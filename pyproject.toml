@@ -192,6 +192,10 @@ conflicts = [
         { group = "ci-gpu-pin" },
         { extra = "executorch" },
     ],
+    [
+        { extra = "tflite" },
+        { extra = "executorch" },
+    ],
 ]
 
 

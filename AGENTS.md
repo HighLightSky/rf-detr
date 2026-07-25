@@ -12,6 +12,8 @@ This document supplements the contribution guidelines with detailed technical in
 
 ## Agent Responsibilities
 
+最高注释要求：所有的注释全部使用中文来写
+
 As an AI agent contributing to RF-DETR, you are responsible for:
 
 1. **Following test-driven development practices**
