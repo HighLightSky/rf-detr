@@ -524,6 +524,9 @@ class RFDETRModelModule(LightningModule):
             except RuntimeError:
                 pass  # Not attached to Trainer (unit-test context); nothing to zero.
         self._accumulated_box_normalizer = None
+        # 每个 epoch 开始时清理 GPU 缓存，释放碎片化的显存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def training_step(self, batch: tuple[Any, Any], batch_idx: int) -> Tensor | dict[str, Any]:
         """Compute loss for one training step and log metrics.

@@ -502,6 +502,9 @@ class COCOEvalCallback(Callback):
                 self._reset_keypoint_split("val_ema")
                 return
         self._compute_and_log(trainer, pl_module, "val")
+        # 验证完成后清理 GPU 缓存，释放 torchmetrics 累积的预测张量
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def on_test_batch_end(
         self,
