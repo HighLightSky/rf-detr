@@ -1106,6 +1106,7 @@ class TrainConfig(BaseConfig):
     # lower resolution, and IoU is computed on a coarser pixel grid either way.
     eval_masks_head_resolution: bool = False
     aug_config: Optional[Dict[str, Any]] = None
+    mosaic_p: float = Field(default=0.0, ge=0.0, le=1.0, description="Mosaic 增强触发概率，0 表示关闭。")
     scale_jitter: bool = True
     augmentation_backend: AugmentationBackend | Literal["cpu", "auto"] = "cpu"
     save_dataset_grids: bool = False

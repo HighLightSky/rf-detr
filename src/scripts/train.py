@@ -13,10 +13,9 @@
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
-from rfdetr.datasets.aug_configs import AUG_AERIAL, AUG_AGGRESSIVE, AUG_CONSERVATIVE, AUG_INDUSTRIAL
+from rfdetr.datasets.aug_configs import AUG_AERIAL
 from rfdetr.variants import RFDETRLarge, RFDETRMedium, RFDETRNano, RFDETRSmall
 
 # ============================================================================
@@ -54,6 +53,12 @@ WARMUP_EPOCHS = 0.0       # 预热 epoch 数
 #   AUG_INDUSTRIAL   → 工业/检测影像（光照噪声 + 模糊）
 #   {}             → 关闭额外增广
 AUG_CONFIG = AUG_AERIAL   # 遥感、航拍预设
+
+# --- Mosaic 增强 ---
+# Mosaic 将 4 张图片拼接为 1 张训练样本，有效提升小目标检测和遥感数据集的性能。
+# 推荐值: 0.5 (前 80% 训练阶段开启，最后 20% 关闭)
+# 设为 0.0 关闭
+MOSAIC_P = 0.8
 
 # --- 硬件 ---
 DEVICE = "cuda"           # 设备: cuda, cuda:0, cpu
@@ -135,6 +140,7 @@ def main() -> None:
         use_ema=USE_EMA,           # 关闭 EMA 以节省显存
         compute_val_loss=False,    # 关掉验证 loss 计算，省显存，mAP 指标不受影响
         aug_config=AUG_CONFIG if AUG_CONFIG is not None else {},
+        mosaic_p=MOSAIC_P,
     )
 
     print(f"\n训练完成！输出目录: {OUTPUT_DIR}")

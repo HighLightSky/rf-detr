@@ -19,6 +19,7 @@ from rfdetr._namespace import _namespace_from_configs
 from rfdetr.config import AugmentationBackend, ModelConfig, TrainConfig
 from rfdetr.datasets import build_dataset
 from rfdetr.datasets.aug_configs import AUG_CONFIG
+from rfdetr.datasets.mosaic import MosaicDataset
 from rfdetr.utilities.box_ops import box_xyxy_to_cxcywh
 from rfdetr.utilities.logger import get_logger
 from rfdetr.utilities.tensors import make_collate_fn
@@ -256,6 +257,15 @@ class RFDETRDataModule(LightningDataModule):
                 )
             if self._dataset_train is None:
                 self._dataset_train = build_dataset("train", ns, resolution)
+                # 如果配置了 mosaic 增强，包装训练数据集
+                mosaic_p = getattr(self.train_config, "mosaic_p", 0.0)
+                if mosaic_p > 0:
+                    self._dataset_train = MosaicDataset(
+                        self._dataset_train,
+                        p=mosaic_p,
+                        output_size=(resolution, resolution),
+                    )
+                    logger.info("Mosaic 增强已启用，触发概率: %.2f", mosaic_p)
             if self._dataset_val is None:
                 self._dataset_val = build_dataset("val", ns, resolution)
             # Build Kornia pipeline (once); use _kornia_setup_done so fallback paths
