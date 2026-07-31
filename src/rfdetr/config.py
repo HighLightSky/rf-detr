@@ -1162,6 +1162,43 @@ class TrainConfig(BaseConfig):
         ),
     )
 
+    # ------------------------------------------------------------------
+    # [SSCL] 语义相似度引导的监督对比学习配置（默认全部关闭）
+    # ------------------------------------------------------------------
+    sscl_enabled: bool = False
+    """是否启用 SSCL（语义相似度引导的监督对比学习）损失。"""
+    sscl_semantic_matrix_path: str | None = None
+    """CLIP 类别语义相似度矩阵文件路径（.pt），由 build_semantic_matrix.py 生成。"""
+    sscl_matrix_normalize: str = "minmax"
+    """加载语义矩阵时的后处理方式：
+    - "minmax": 线性映射到 [0, 1]（默认，推荐，增强易混对的判别度）。
+    - "softmax": 温度缩放的 softmax 行归一化。
+    - "none": 使用原始 CLIP 余弦相似度。"""
+    sscl_lambda: float = 0.01
+    """SSCL 损失权重 λ_sscl（推荐 0.01 ~ 0.05）。"""
+    sscl_tau: float = 0.1
+    """SSCL 对比学习温度 τ。"""
+    sscl_rho: float = 0.3
+    """语义先验对负样本强度的放大系数 ρ（推荐 0.2 ~ 0.5）。"""
+    sscl_omega_max: float = 2.0
+    """负样本语义权重上限 ω_max，防止训练不稳定。"""
+    sscl_anchor_classes: list[int] | None = None
+    """重点 anchor 类别索引列表，默认 None（使用全部类别），推荐 C_focus = [0, 1]（HM/LQS）。"""
+    sscl_confusing_classes: list[int] | None = None
+    """易混负样本类别索引列表，默认 None（对所有异类负样本加权），推荐 C_ship = [0, 1, 2, 3]。"""
+    sscl_distill_enabled: bool = False
+    """是否启用基类 logit 蒸馏（保护飞机类/FSC 指标）。"""
+    sscl_distill_lambda: float = 0.5
+    """蒸馏损失权重 λ_distill（推荐 0.5 ~ 1.0）。"""
+    sscl_distill_temperature: float = 2.0
+    """蒸馏温度 T。"""
+    sscl_distill_mode: str = "mse"
+    """蒸馏方式："mse"（logit 蒸馏，第一版推荐）或 "kl"（伯努利软标签蒸馏）。"""
+    sscl_teacher_checkpoint: str | None = None
+    """教师模型（原始 RF-DETR checkpoint）路径，启用蒸馏时必需。"""
+    sscl_protected_classes: list[int] | None = None
+    """受保护的基类类别索引列表，默认 None（自动使用飞机类 4-23 + FSC 24，舰船类 0-3 不蒸馏）。"""
+
     @field_validator("progress_bar", mode="before")
     @classmethod
     def _coerce_legacy_progress_bar(cls, value: Any) -> Any:

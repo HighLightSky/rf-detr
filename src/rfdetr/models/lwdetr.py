@@ -558,6 +558,10 @@ class LWDETR(nn.Module):
                 outputs_masks = seg_head_fwd(features[0].tensors, hs, cast(tuple[int, int], samples.tensors.shape[-2:]))
 
             out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1]}
+            # [SSCL] 暴露 decoder 最后一层的 hidden states，供 SSCL 对比学习
+            # 提取 matched foreground query features。hs 已在上述 class_embed/bbox_embed
+            # 计算中产生，仅多一次引用存储，不增加任何前向计算量。
+            out["hs"] = hs[-1]  # [B, num_queries * group_detr, hidden_dim]（训练时含全部组）
             if self.segmentation_head is not None:
                 out["pred_masks"] = outputs_masks[-1]
             if outputs_keypoints is not None:

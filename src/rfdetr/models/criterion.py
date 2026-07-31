@@ -206,6 +206,9 @@ class SetCriterion(nn.Module):
         self.ia_bce_loss = ia_bce_loss
         self.mask_point_sample_ratio = mask_point_sample_ratio
         self.num_keypoints_per_class = num_keypoints_per_class or []
+        # [SSCL] 可选的 SSCL 损失回调。默认不启用，通过 set_sscl_loss_fn 注入，
+        # 在 forward() 复用已计算的 Hungarian matching indices 计算 SSCL 损失。
+        self._sscl_loss_fn: Callable | None = None
 
     @staticmethod
     def _output_device(outputs: dict[str, Any]) -> torch.device:
@@ -640,6 +643,18 @@ class SetCriterion(nn.Module):
         tgt_idx = torch.cat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
 
+    def set_sscl_loss_fn(self, loss_fn: Callable) -> None:
+        """注册 SSCL 损失回调。
+
+        回调在 forward() 中复用已计算的 Hungarian matching ``indices``，
+        签名约定：``(outputs: dict, targets: list, indices: list) -> dict[str, Tensor]``，
+        返回的字典键值将合并进最终 losses（键为 ``loss_sscl``，值为 SSCL 损失标量）。
+
+        Args:
+            loss_fn: SSCL 损失计算回调。
+        """
+        self._sscl_loss_fn = loss_fn
+
     def get_loss(
         self,
         loss: str,
@@ -720,6 +735,9 @@ class SetCriterion(nn.Module):
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, targets, group_detr=group_detr)
+        # [SSCL] 保存最后一层的匹配结果，供 SSCL 回调使用。后续 aux/enc 循环
+        # 会覆盖 indices，而 SSCL 只作用在 decoder 最后一层的 matched query 上。
+        last_layer_indices = indices
 
         if num_boxes is None:
             num_boxes = self.num_boxes_for_targets(outputs, targets)
@@ -757,5 +775,11 @@ class SetCriterion(nn.Module):
                 l_dict = self.get_loss(loss, enc_outputs, targets, indices, num_boxes, **kwargs)
                 l_dict = {k + "_enc": v for k, v in l_dict.items()}
                 losses.update(l_dict)
+
+        # [SSCL] 若注册了 SSCL 损失回调，使用最后一层的匹配结果计算 SSCL 损失，
+        # 结果合并进 losses 字典（键为 "loss_sscl"，由训练循环按 sscl_lambda 加权）。
+        if self._sscl_loss_fn is not None:
+            sscl_losses = self._sscl_loss_fn(outputs, targets, last_layer_indices)
+            losses.update(sscl_losses)
 
         return losses

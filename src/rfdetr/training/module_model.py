@@ -396,6 +396,12 @@ class RFDETRModelModule(LightningModule):
         # they are constructed with a config that matches the current model head.
         self.criterion, self.postprocess = build_criterion_from_config(self.model_config, self.train_config)
 
+        # [SSCL] 若启用 SSCL（语义相似度引导的对比学习），初始化冻结策略、
+        # 对比损失与基类蒸馏。必须在 configure_optimizers() 之前调用，
+        # 确保优化器只包含解冻后的可训练参数。
+        if self.train_config.sscl_enabled:
+            self._setup_sscl()
+
         # torch.compile is opt-in: set model_config.compile=True to enable.
         # Only enabled on CUDA; MPS and CPU do not benefit from compilation.
         # Use the fork-safe DEVICE constant instead of torch.cuda.is_available(),
@@ -424,6 +430,187 @@ class RFDETRModelModule(LightningModule):
             # OptimizedModule forwards attribute access to the wrapped LWDETR via
             # __getattr__ at runtime, so self.model keeps working everywhere it's used below.
             self.model = torch.compile(self.model, dynamic=True)  # type: ignore[assignment]
+
+    # ------------------------------------------------------------------
+    # [SSCL] 语义相似度引导的对比学习
+    # ------------------------------------------------------------------
+
+    def _setup_sscl(self) -> None:
+        """初始化 SSCL 训练逻辑。
+
+        步骤：
+        1. 加载 CLIP 类别语义相似度矩阵。
+        2. 构建 SSCL 对比损失模块。
+        3. 配置保守冻结策略（仅解冻 decoder 最后一层 + 分类头）。
+        4. 可选地加载教师模型并构建基类蒸馏损失。
+        5. 将 SSCL 损失权重加入 criterion 的 weight_dict。
+        6. 注册 SSCL 损失回调到 criterion。
+
+        Raises:
+            ValueError: 当 SSCL 相关配置缺失或无效时抛出。
+        """
+        from rfdetr.sscl import (
+            SSCLLoss,
+            load_semantic_matrix,
+            normalize_semantic_matrix,
+        )
+
+        cfg = self.train_config
+        if cfg.sscl_semantic_matrix_path is None:
+            raise ValueError("启用 SSCL 时必须指定 sscl_semantic_matrix_path。")
+        semantic_matrix = load_semantic_matrix(cfg.sscl_semantic_matrix_path)
+        # 语义矩阵后处理：CLIP 原始余弦相似度在军事/遥感文本空间中较密集，
+        # 默认 minmax 归一化到 [0, 1] 以增强易混类别对的判别度
+        if cfg.sscl_matrix_normalize != "none":
+            semantic_matrix = normalize_semantic_matrix(
+                semantic_matrix,
+                mode=cfg.sscl_matrix_normalize,
+            )
+
+        # 构建 SSCL 对比损失（作用在 matched foreground query features 上）
+        self.sscl_loss = SSCLLoss(
+            semantic_matrix=semantic_matrix,
+            tau=cfg.sscl_tau,
+            rho=cfg.sscl_rho,
+            omega_max=cfg.sscl_omega_max,
+            anchor_classes=cfg.sscl_anchor_classes,
+            confusing_classes=cfg.sscl_confusing_classes,
+        )
+
+        # 配置冻结策略：冻结 backbone/encoder/bbox 头等，仅解冻 decoder
+        # 最后一层与分类头，让 SSCL 能真正重塑 query 特征空间
+        self._apply_sscl_freeze()
+
+        # 可选：基类蒸馏（保护飞机类/FSC 指标）
+        if cfg.sscl_distill_enabled:
+            self._setup_sscl_distill()
+
+        # 将 SSCL 损失权重注入 criterion 的 weight_dict，使现有训练循环
+        # 的 loss 聚合逻辑自动包含 SSCL 项
+        self.criterion.weight_dict["loss_sscl"] = cfg.sscl_lambda
+
+        # 注册 SSCL 回调：在 criterion forward() 内复用 Hungarian matching
+        # 的 indices，避免重复匹配
+        self.criterion.set_sscl_loss_fn(self._sscl_loss_callback)
+        logger.info(
+            f"[SSCL] 已启用：λ={cfg.sscl_lambda}, τ={cfg.sscl_tau}, ρ={cfg.sscl_rho}, "
+            f"anchor={cfg.sscl_anchor_classes}, confusing={cfg.sscl_confusing_classes}, "
+            f"distill={cfg.sscl_distill_enabled}"
+        )
+
+    def _apply_sscl_freeze(self) -> None:
+        """应用 SSCL 保守冻结策略。
+
+        冻结：backbone、encoder 主体、bbox 头、early decoder layers、
+        refpoint_embed、query_feat、enc_out_class_embed。
+        解冻：decoder 最后一层、decoder 最终 LayerNorm、分类头 class_embed。
+
+        该策略保证 SSCL 只通过 decoder 最后一层重塑 query 特征空间，
+        不扰动主干与目标定位能力。
+        """
+        model = self.model
+        # 先冻结全部参数
+        for param in model.parameters():
+            param.requires_grad = False
+        # 解冻 decoder 最后一层（产生 hs[-1] 的特征变换层）
+        for param in model.transformer.decoder.layers[-1].parameters():
+            param.requires_grad = True
+        # 解冻 decoder 最终 LayerNorm（作用于最后一层输出，含可训练仿射参数）
+        if getattr(model.transformer.decoder, "norm", None) is not None:
+            for param in model.transformer.decoder.norm.parameters():
+                param.requires_grad = True
+        # 解冻分类头
+        for param in model.class_embed.parameters():
+            param.requires_grad = True
+        logger.info("[SSCL] 冻结策略已应用：仅 decoder 最后一层 + decoder norm + class_embed 可训练")
+
+    def _sscl_loss_callback(
+        self,
+        outputs: dict[str, Any],
+        targets: list[dict[str, Tensor]],
+        indices: list[tuple[Tensor, Tensor]],
+    ) -> dict[str, Tensor]:
+        """SSCL 损失回调，在 criterion forward() 内被调用。
+
+        从 decoder 最后一层的 hidden states 中提取 Hungarian matching 后
+        的 matched foreground query features，计算语义加权的对比损失。
+
+        Args:
+            outputs: 模型输出字典，须包含 ``"hs"``。
+            targets: 目标字典列表。
+            indices: criterion 中已计算的 Hungarian matching 结果。
+
+        Returns:
+            包含 ``{"loss_sscl": 损失标量}`` 的字典；当无 ``"hs"`` 输出时返回空字典。
+        """
+        if "hs" not in outputs:
+            return {}
+        features, labels = self._extract_matched_query_features(outputs["hs"], indices, targets)
+        loss = self.sscl_loss(features, labels)
+        return {"loss_sscl": loss}
+
+    def _extract_matched_query_features(
+        self,
+        hs: Tensor,
+        indices: list[tuple[Tensor, Tensor]],
+        targets: list[dict[str, Tensor]],
+    ) -> tuple[Tensor, Tensor]:
+        """从 decoder hidden states 中提取 matched foreground query features。
+
+        Args:
+            hs: decoder 最后一层 hidden states ``[B, Q, D]``。
+            indices: Hungarian matching 结果（每个 query 匹配到的 GT 索引）。
+            targets: 目标字典列表。
+
+        Returns:
+            ``(features, labels)`` 元组：
+            - features: ``[N_fg, D]`` matched foreground query features。
+            - labels: ``[N_fg]`` 对应的 GT 类别标签。
+        """
+        idx = self.criterion._get_src_permutation_idx(indices)  # (batch_idx, query_idx)
+        features = hs[idx]
+        labels = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+        return features, labels
+
+    def _setup_sscl_distill(self) -> None:
+        """构建教师模型与基类蒸馏损失。
+
+        教师使用与学生学习完全一致的架构，从原始 RF-DETR checkpoint 加载
+        权重并完全冻结。蒸馏仅作用于受保护类别（默认飞机类 + FSC）的
+        logits 通道，舰船类通道不参与蒸馏。
+
+        Raises:
+            ValueError: 当未指定 ``sscl_teacher_checkpoint`` 时抛出。
+        """
+        from copy import deepcopy
+
+        from rfdetr.sscl import BaseClassDistillLoss
+
+        cfg = self.train_config
+        if cfg.sscl_teacher_checkpoint is None:
+            raise ValueError("启用基类蒸馏时必须指定 sscl_teacher_checkpoint。")
+
+        # 构建教师模型：架构与学生一致，从原始 checkpoint 加载权重
+        teacher_config = deepcopy(self.model_config)
+        teacher_config.pretrain_weights = cfg.sscl_teacher_checkpoint  # type: ignore[assignment]
+        teacher_model = build_model_from_config(teacher_config, self.train_config)
+        load_pretrain_weights(teacher_model, teacher_config)
+        # 完全冻结教师模型，仅在 no_grad 下前向
+        for param in teacher_model.parameters():
+            param.requires_grad = False
+        teacher_model.eval()
+        self.sscl_teacher = teacher_model
+
+        # 受保护类别：默认飞机类 (4-23) + FSC (24)，舰船类 (0-3) 不蒸馏。
+        # 原因：蒸馏舰船类会把学生锚定到 teacher 已混乱的舰船边界，与 SSCL 目标冲突。
+        protected_classes = cfg.sscl_protected_classes or list(range(4, self.model_config.num_classes))
+        self.sscl_distill_loss = BaseClassDistillLoss(
+            protected_classes=protected_classes,
+            temperature=cfg.sscl_distill_temperature,
+            mode=cfg.sscl_distill_mode,
+        )
+        self.criterion.weight_dict["loss_sscl_distill"] = cfg.sscl_distill_lambda
+        logger.info(f"[SSCL] 基类蒸馏已启用：受保护类别 {protected_classes}，λ={cfg.sscl_distill_lambda}")
 
     # ------------------------------------------------------------------
     # PTL lifecycle hooks
@@ -553,6 +740,15 @@ class RFDETRModelModule(LightningModule):
         else:
             loss_dict = self.criterion(outputs, targets)
             loss_for_backward = None
+        # [SSCL] 基类蒸馏（自动优化路径）：教师模型在 no_grad 下前向，
+        # 对学生与教师受保护类别的 logits 计算蒸馏损失并加入 loss_dict。
+        if getattr(self, "sscl_teacher", None) is not None and not self._use_manual_optimization:
+            with torch.no_grad():
+                teacher_outputs = self.sscl_teacher(samples, targets)
+            loss_dict["loss_sscl_distill"] = self.sscl_distill_loss(
+                outputs["pred_logits"],
+                teacher_outputs["pred_logits"],
+            )
         weight_dict = self.criterion.weight_dict
         loss: Tensor = torch.stack([loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict]).sum()
         # Automatic optimization path: divide by accumulate_grad_batches so the accumulated
