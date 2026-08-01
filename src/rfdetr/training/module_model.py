@@ -745,9 +745,16 @@ class RFDETRModelModule(LightningModule):
         if getattr(self, "sscl_teacher", None) is not None and not self._use_manual_optimization:
             with torch.no_grad():
                 teacher_outputs = self.sscl_teacher(samples, targets)
+            student_logits = outputs["pred_logits"]
+            teacher_logits = teacher_outputs["pred_logits"]
+            # 训练时学生使用 group_detr 组（如 13×300=3900 query），而教师以
+            # eval 模式仅输出单组（300 query）。取学生的第 0 组与教师对齐，
+            # 与推理时仅使用第 0 组的约定一致；若形状已一致则无需切片。
+            if student_logits.shape[1] != teacher_logits.shape[1]:
+                student_logits = student_logits[:, : teacher_logits.shape[1], :]
             loss_dict["loss_sscl_distill"] = self.sscl_distill_loss(
-                outputs["pred_logits"],
-                teacher_outputs["pred_logits"],
+                student_logits,
+                teacher_logits,
             )
         weight_dict = self.criterion.weight_dict
         loss: Tensor = torch.stack([loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict]).sum()

@@ -61,7 +61,7 @@ DEVICES = 1
 NUM_NODES = 1
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0731-SHWX-rfdetr_medium_SSCL"
+OUTPUT_DIR = "output/0801-SHWX-rfdetr_medium_SSCL+distill"
 TENSORBOARD = True
 WANDB = False
 
@@ -88,7 +88,7 @@ SSCL_ANCHOR_CLASSES = [0, 1, 2, 3]  # 参与计算sscl损失的类别
 SSCL_CONFUSING_CLASSES = [0, 1, 2, 3]  # 参与充当比较类别的类别
 
 # --- 基类蒸馏（阶段 2 再启用，阶段 1 保持关闭）---
-SSCL_DISTILL_ENABLED = False
+SSCL_DISTILL_ENABLED = True
 SSCL_DISTILL_LAMBDA = 0.5
 SSCL_DISTILL_TEMPERATURE = 2.0
 SSCL_DISTILL_MODE = "mse"
