@@ -18,9 +18,9 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = PROJECT_ROOT / "src"
 DATA_DIR = Path("/home/liu/datasets/SHWX-dataset-dict")
-TEST_IMAGE_DIR = DATA_DIR / "images" / "test"
-LABEL_DIR = DATA_DIR / "labels" / "test"
-EXP_OUTPUT_DIR = PROJECT_ROOT / "output" / "0724-shwx-rfdetr_medium"
+TEST_IMAGE_DIR = DATA_DIR / "images" / "val"
+LABEL_DIR = DATA_DIR / "labels" / "val"
+EXP_OUTPUT_DIR = PROJECT_ROOT / "output" / "0731-SHWX-rfdetr_medium_SSCL"
 CHECKPOINT_PATH = EXP_OUTPUT_DIR / "checkpoint_best_total.pth"
 
 # ── 推理配置 ───────────────────────────────────────────────────────

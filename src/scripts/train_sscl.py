@@ -41,7 +41,7 @@ DATASET_DIR = "/home/liu/datasets/SHWX-dataset-dict"
 DATASET_FILE = "yolo"
 
 # --- 训练超参数（阶段 1：SSCL Only，保守微调）---
-EPOCHS = 3  # 1~3 epoch，验证 SSCL 效果而非追求 mAP
+EPOCHS = 10  # 1~3 epoch，验证 SSCL 效果而非追求 mAP
 BATCH_SIZE = 8  # 每 GPU batch size
 GRAD_ACCUM_STEPS = 4  # 有效 batch = 8 × 4 = 32，保证 batch 内有足够同类正样本
 NUM_WORKERS = 8
@@ -84,8 +84,8 @@ SSCL_LAMBDA = 0.01  # SSCL 损失权重 λ（0.01 ~ 0.05）
 SSCL_TAU = 0.1  # 对比学习温度 τ
 SSCL_RHO = 0.3  # 语义先验放大系数 ρ（0.2 ~ 0.5）
 SSCL_OMEGA_MAX = 2.0  # 负样本语义权重上限
-SSCL_ANCHOR_CLASSES = [0, 1]  # 重点 anchor 类 = {HM, LQS}
-SSCL_CONFUSING_CLASSES = [0, 1, 2, 3]  # 舰船易混集合 = {HM, LQS, QHS, MS}
+SSCL_ANCHOR_CLASSES = [0, 1, 2, 3]  # 参与计算sscl损失的类别
+SSCL_CONFUSING_CLASSES = [0, 1, 2, 3]  # 参与充当比较类别的类别
 
 # --- 基类蒸馏（阶段 2 再启用，阶段 1 保持关闭）---
 SSCL_DISTILL_ENABLED = False
