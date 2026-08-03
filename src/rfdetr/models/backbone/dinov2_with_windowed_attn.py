@@ -763,21 +763,25 @@ class WindowedDinov2WithRegistersLayer(nn.Module):
         run_full_attention: bool = False,
     ) -> tuple[Tensor, Tensor | None] | tuple[Tensor]:
         assert not output_attentions, "output_attentions is not supported for windowed attention"
-        shortcut = hidden_states
+        shortcut = hidden_states   # 保存输入，给残差用
+        # 如果当前层是全局层
         if run_full_attention:
-            # reshape x to remove windows
+            # reshape x to remove windows 合并窗口
             batch_windows, tokens_per_window, channels = hidden_states.shape
             num_windows_squared = self.num_windows**2
             hidden_states = hidden_states.view(
                 batch_windows // num_windows_squared, num_windows_squared * tokens_per_window, channels
             )
 
+        # 多头自注意力运算，先LayerNorm归一化再算注意力
+        # LayerNorm作用在注意力输入上
         self_attention_outputs = self.attention(
             self.norm1(hidden_states),  # in Dinov2WithRegisters, layernorm is applied before self-attention
             output_attentions=output_attentions,
         )
         attention_output = self_attention_outputs[0]
 
+        # attention 后再切成窗口
         if run_full_attention:
             # reshape x to add windows back
             batch_windows, tokens_per_window, channels = hidden_states.shape
@@ -787,10 +791,13 @@ class WindowedDinov2WithRegistersLayer(nn.Module):
                 batch_windows * num_windows_squared, tokens_per_window // num_windows_squared, channels
             )
 
+        # 对层输出做幅度调整，控制残差增量贡献
+        # LayerScale作用在注意力输入上
         attention_output = self.layer_scale1(attention_output)
         outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
 
         # first residual connection
+        # drop_path 对 batch 中的每个样本独立地以 keep_prob 概率把整条 attention 分支置零，正则化
         hidden_states = self.drop_path(attention_output) + shortcut
 
         # in Dinov2WithRegisters, layernorm is also applied after self-attention
