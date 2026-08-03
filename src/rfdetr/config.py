@@ -1198,6 +1198,15 @@ class TrainConfig(BaseConfig):
     """教师模型（原始 RF-DETR checkpoint）路径，启用蒸馏时必需。"""
     sscl_protected_classes: list[int] | None = None
     """受保护的基类类别索引列表，默认 None（自动使用飞机类 4-23 + FSC 24，舰船类 0-3 不蒸馏）。"""
+    sscl_start_epoch: int = 30
+    """SSCL 损失开始生效的 epoch（从 0 起计）。在此 epoch 之前 ``loss_sscl``
+    权重被置 0，仅由常规检测损失训练；达到该 epoch 后按 ``sscl_lambda`` 加权。
+    适用于从预训练直接训练、希望先让基类收敛再施加语义对比约束的实验。"""
+    sscl_freeze_strategy: Literal["conservative", "none"] = "conservative"
+    """SSCL 冻结策略：
+    - ``"conservative"``: 冻结 backbone/encoder/bbox 头/decoder 前几层，仅解冻
+      decoder 最后一层 + norm + class_embed（在已收敛 checkpoint 上微调时使用）。
+    - ``"none"``: 不冻结任何参数，保持全量微调（从预训练直接开始训练时使用）。"""
 
     @field_validator("progress_bar", mode="before")
     @classmethod

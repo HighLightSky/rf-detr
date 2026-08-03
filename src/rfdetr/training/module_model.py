@@ -477,9 +477,18 @@ class RFDETRModelModule(LightningModule):
             confusing_classes=cfg.sscl_confusing_classes,
         )
 
-        # 配置冻结策略：冻结 backbone/encoder/bbox 头等，仅解冻 decoder
-        # 最后一层与分类头，让 SSCL 能真正重塑 query 特征空间
-        self._apply_sscl_freeze()
+        # 配置冻结策略：默认 "conservative" 冻结 backbone/encoder/bbox 头等，
+        # 仅解冻 decoder 最后一层与分类头，让 SSCL 能真正重塑 query 特征空间
+        # （适合在已收敛 checkpoint 上微调）；"none" 时保持全量微调，适合
+        # 从预训练直接开始训练、由常规损失先学基类的实验。
+        if cfg.sscl_freeze_strategy == "conservative":
+            self._apply_sscl_freeze()
+        elif cfg.sscl_freeze_strategy == "none":
+            logger.info("[SSCL] 冻结策略为 none：保持全量微调，不冻结任何参数")
+        else:
+            raise ValueError(
+                f"不支持的 sscl_freeze_strategy: {cfg.sscl_freeze_strategy}，可选: 'conservative', 'none'"
+            )
 
         # 可选：基类蒸馏（保护飞机类/FSC 指标）
         if cfg.sscl_distill_enabled:
@@ -495,6 +504,7 @@ class RFDETRModelModule(LightningModule):
         logger.info(
             f"[SSCL] 已启用：λ={cfg.sscl_lambda}, τ={cfg.sscl_tau}, ρ={cfg.sscl_rho}, "
             f"anchor={cfg.sscl_anchor_classes}, confusing={cfg.sscl_confusing_classes}, "
+            f"start_epoch={cfg.sscl_start_epoch}, freeze={cfg.sscl_freeze_strategy}, "
             f"distill={cfg.sscl_distill_enabled}"
         )
 
@@ -757,6 +767,13 @@ class RFDETRModelModule(LightningModule):
                 teacher_logits,
             )
         weight_dict = self.criterion.weight_dict
+        # [SSCL] 起始 epoch 门控：在 sscl_start_epoch 之前将 loss_sscl 权重置 0，
+        # 让常规检测损失先训练若干 epoch 收敛基类，再按策略从指定 epoch 开始
+        # 施加语义对比约束。使用副本而非修改 self.criterion.weight_dict，
+        # 避免污染后续 step 的权重。非 SSCL 训练（weight_dict 中无 loss_sscl）
+        # 不进入此分支。
+        if "loss_sscl" in weight_dict and self.current_epoch < self.train_config.sscl_start_epoch:
+            weight_dict = {**weight_dict, "loss_sscl": 0.0}
         loss: Tensor = torch.stack([loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict]).sum()
         # Automatic optimization path: divide by accumulate_grad_batches so the accumulated
         # gradient matches a single large batch, matching the legacy engine.  PTL accumulates
