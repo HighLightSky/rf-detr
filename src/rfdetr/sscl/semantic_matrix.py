@@ -14,6 +14,8 @@ CLIP 只参与本模块的离线计算，不参与在线训练或推理。
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 import torch.nn.functional as F  # noqa: N812 -- 项目约定别名（见 AGENTS.md）
 
@@ -185,67 +187,66 @@ def load_semantic_matrix(path: str) -> torch.Tensor:
 def validate_matrix(
     matrix: torch.Tensor,
     class_names: list[str],
-    ship_class_ids: list[int] | None = None,
-    aircraft_class_ids: list[int] | None = None,
-) -> dict[str, float]:
+    group_a: list[int] | None = None,
+    group_b: list[int] | None = None,
+) -> dict[str, Any]:
     """验证语义相似度矩阵质量，供人工检查。
 
-    检查要点：
-    - 舰船类内部相似度（应较高，符合"易混"前提）。
-    - 舰船类与飞机类之间相似度（应较低，跨大类应有区分）。
-    - 全局最相似的类别对（确认没有异常跨大类对）。
+    通用统计：
+    - 全局最相似的非自反类别对（确认没有异常的跨组相似）。
+    - （可选）当给定 ``group_a``/``group_b`` 时，额外计算各组内部及两组之间
+      的平均相似度，用于观察易混类别分组是否符合预期。
 
     Args:
         matrix: 语义相似度矩阵 ``[C, C]``。
         class_names: 按类别索引顺序排列的类别名称列表。
-        ship_class_ids: 舰船类别索引列表（默认 ``[0, 1, 2, 3]``）。
-        aircraft_class_ids: 飞机类别索引列表（默认 ``list(range(4, 24))``）。
+        group_a: 第一组类别索引列表，默认 ``None``（不计算组统计）。
+        group_b: 第二组类别索引列表，默认 ``None``（不计算组统计）。
 
     Returns:
-        包含关键统计量的字典：
-        ``ship_ship_mean``、``ship_aircraft_mean``、``aircraft_aircraft_mean``、
-        ``max_pair``、``max_pair_value``、``max_cross_ship_aircraft``。
+        包含关键统计量的字典：``max_pair``、``max_pair_value``；
+        当给定组参数时额外包含 ``group_a_mean``、``group_b_mean``、
+        ``cross_ab_mean``。
+
+    Raises:
+        ValueError: 当 ``class_names`` 长度与矩阵类别数不一致时抛出。
     """
-    ship_class_ids = ship_class_ids or [0, 1, 2, 3]
-    aircraft_class_ids = aircraft_class_ids or list(range(4, 24))
+    num_classes = matrix.shape[0]
+    if len(class_names) != num_classes:
+        raise ValueError(f"class_names 长度 {len(class_names)} 与矩阵类别数 {num_classes} 不一致")
 
     def _mean_of_pairs(ids_a: list[int], ids_b: list[int]) -> float:
-        """计算两组类别之间（含组内）的平均相似度。"""
+        """计算两组类别之间（含组内）的平均相似度，越界索引自动忽略。"""
         values = []
         for i in ids_a:
             for j in ids_b:
-                values.append(float(matrix[i, j]))
+                if 0 <= i < num_classes and 0 <= j < num_classes:
+                    values.append(float(matrix[i, j]))
         return sum(values) / len(values) if values else 0.0
 
-    ship_ship_mean = _mean_of_pairs(ship_class_ids, ship_class_ids)
-    ship_aircraft_mean = _mean_of_pairs(ship_class_ids, aircraft_class_ids)
-    aircraft_aircraft_mean = _mean_of_pairs(aircraft_class_ids, aircraft_class_ids)
+    stats: dict[str, Any] = {}
 
     # 全局最相似的非自反类别对
     flat = matrix.clone().fill_diagonal_(-2.0)  # 排除对角线
     max_ij = int(flat.argmax().item())
-    i, j = max_ij // matrix.shape[1], max_ij % matrix.shape[1]
-    max_pair = f"{class_names[i]}-{class_names[j]}"
-    max_pair_value = float(matrix[i, j])
+    i, j = max_ij // num_classes, max_ij % num_classes
+    stats["max_pair"] = f"{class_names[i]}-{class_names[j]}"
+    stats["max_pair_value"] = float(matrix[i, j])
 
-    # 跨大类的最高相似对（舰船 vs 飞机）
-    cross_values = [float(matrix[i, j]) for i in ship_class_ids for j in aircraft_class_ids]
-    max_cross_ship_aircraft = max(cross_values) if cross_values else 0.0
+    # 可选：组内/跨组平均相似度
+    if group_a:
+        stats["group_a_mean"] = _mean_of_pairs(group_a, group_a)
+    if group_b:
+        stats["group_b_mean"] = _mean_of_pairs(group_b, group_b)
+    if group_a and group_b:
+        stats["cross_ab_mean"] = _mean_of_pairs(group_a, group_b)
 
-    stats = {
-        "ship_ship_mean": ship_ship_mean,
-        "ship_aircraft_mean": ship_aircraft_mean,
-        "aircraft_aircraft_mean": aircraft_aircraft_mean,
-        "max_pair": max_pair,
-        "max_pair_value": max_pair_value,
-        "max_cross_ship_aircraft": max_cross_ship_aircraft,
-    }
-    logger.info(
-        "语义矩阵验证:\n"
-        f"  舰船类内部平均相似度: {ship_ship_mean:.4f}\n"
-        f"  舰船-飞机类平均相似度: {ship_aircraft_mean:.4f}\n"
-        f"  飞机类内部平均相似度: {aircraft_aircraft_mean:.4f}\n"
-        f"  全局最相似类别对: {max_pair} = {max_pair_value:.4f}\n"
-        f"  舰船-飞机最大相似度: {max_cross_ship_aircraft:.4f}"
-    )
+    log_lines = [f"  全局最相似类别对: {stats['max_pair']} = {stats['max_pair_value']:.4f}"]
+    if "group_a_mean" in stats:
+        log_lines.append(f"  组 A 内部平均相似度: {stats['group_a_mean']:.4f}")
+    if "group_b_mean" in stats:
+        log_lines.append(f"  组 B 内部平均相似度: {stats['group_b_mean']:.4f}")
+    if "cross_ab_mean" in stats:
+        log_lines.append(f"  组 A-B 平均相似度: {stats['cross_ab_mean']:.4f}")
+    logger.info("语义矩阵验证:\n" + "\n".join(log_lines))
     return stats
