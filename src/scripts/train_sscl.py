@@ -61,7 +61,7 @@ DEVICES = 1
 NUM_NODES = 1
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0801-SHWX-rfdetr_medium_SSCL+distill"
+OUTPUT_DIR = "output/0804-SHWX-rfdetr_medium_SSCL+prototype"
 TENSORBOARD = True
 WANDB = False
 
@@ -89,8 +89,13 @@ SSCL_CONFUSING_CLASSES = [0, 1, 2, 3]  # 参与充当比较类别的类别
 SSCL_START_EPOCH = 0  # 微调场景从第 0 个 epoch 即启用 SSCL（config 默认 30，此处显式覆盖）
 SSCL_FREEZE_STRATEGY = "conservative"  # 在已收敛 checkpoint 上微调，采用保守冻结策略
 
+# --- 类别原型库（原型锚定 SSCL，规避 batch 内同类样本不足导致的零损失）---
+SSCL_PROTOTYPE_ENABLED = True
+SSCL_PROTOTYPE_MOMENTUM = 0.99  # 原型 EMA 更新系数（0.9 ~ 0.999）
+SSCL_PROTOTYPE_MIN_SAMPLES = 1  # 单批同类样本低于该阈值则跳过该类原型更新
+
 # --- 基类蒸馏（阶段 2 再启用，阶段 1 保持关闭）---
-SSCL_DISTILL_ENABLED = True
+SSCL_DISTILL_ENABLED = False
 SSCL_DISTILL_LAMBDA = 0.5
 SSCL_DISTILL_TEMPERATURE = 2.0
 SSCL_DISTILL_MODE = "mse"
@@ -165,6 +170,9 @@ def main() -> None:
         sscl_distill_mode=SSCL_DISTILL_MODE,
         sscl_teacher_checkpoint=SSCL_TEACHER_CHECKPOINT if SSCL_DISTILL_ENABLED else None,
         sscl_protected_classes=SSCL_PROTECTED_CLASSES,
+        sscl_prototype_enabled=SSCL_PROTOTYPE_ENABLED,
+        sscl_prototype_momentum=SSCL_PROTOTYPE_MOMENTUM,
+        sscl_prototype_min_samples=SSCL_PROTOTYPE_MIN_SAMPLES,
     )
 
     print(f"\n训练完成！输出目录: {output_dir}")

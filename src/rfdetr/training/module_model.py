@@ -468,6 +468,7 @@ class RFDETRModelModule(LightningModule):
             )
 
         # 构建 SSCL 对比损失（作用在 matched foreground query features 上）
+        # hidden_dim 恒从 model_config 传入，避免原型库惰性 resize_ 与编译/续训交互
         self.sscl_loss = SSCLLoss(
             semantic_matrix=semantic_matrix,
             tau=cfg.sscl_tau,
@@ -475,6 +476,11 @@ class RFDETRModelModule(LightningModule):
             omega_max=cfg.sscl_omega_max,
             anchor_classes=cfg.sscl_anchor_classes,
             confusing_classes=cfg.sscl_confusing_classes,
+            prototype_mode=cfg.sscl_prototype_enabled,
+            prototype_momentum=cfg.sscl_prototype_momentum,
+            prototype_min_samples=cfg.sscl_prototype_min_samples,
+            prototype_sync_ddp=cfg.sscl_prototype_sync_ddp,
+            hidden_dim=self.model_config.hidden_dim,
         )
 
         # 配置冻结策略：默认 "conservative" 冻结 backbone/encoder/bbox 头等，
@@ -505,7 +511,8 @@ class RFDETRModelModule(LightningModule):
             f"[SSCL] 已启用：λ={cfg.sscl_lambda}, τ={cfg.sscl_tau}, ρ={cfg.sscl_rho}, "
             f"anchor={cfg.sscl_anchor_classes}, confusing={cfg.sscl_confusing_classes}, "
             f"start_epoch={cfg.sscl_start_epoch}, freeze={cfg.sscl_freeze_strategy}, "
-            f"distill={cfg.sscl_distill_enabled}"
+            f"distill={cfg.sscl_distill_enabled}, "
+            f"prototype={cfg.sscl_prototype_enabled}"
         )
 
     def _apply_sscl_freeze(self) -> None:
@@ -557,6 +564,11 @@ class RFDETRModelModule(LightningModule):
             return {}
         features, labels = self._extract_matched_query_features(outputs["hs"], indices, targets)
         loss = self.sscl_loss(features, labels)
+        # [SSCL] 原型模式：训练阶段用 detach 特征更新类别原型库（无梯度）。
+        # 不做 start_epoch 门控——sscl_start_epoch 前 loss 权重为 0，原型更新
+        # 作为预热让锚点在 SSCL 生效前就绪；验证阶段 self.training 为 False 天然门控。
+        if self.training and getattr(self.sscl_loss, "prototype_mode", False):
+            self.sscl_loss.update_prototypes(features.detach(), labels)
         return {"loss_sscl": loss}
 
     def _extract_matched_query_features(

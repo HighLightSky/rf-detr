@@ -30,18 +30,17 @@ SRC_DIR = PROJECT_ROOT / "src"
 DATA_DIR = Path("/home/liu/datasets/SHWX-dataset-dict")
 TEST_IMAGE_DIR = DATA_DIR / "images" / "test"
 LABEL_DIR = DATA_DIR / "labels" / "test"
-EXP_OUTPUT_DIR = PROJECT_ROOT / "output" / "0802-SHWX-rfdetr_medium_SSCL-all"
+EXP_OUTPUT_DIR = PROJECT_ROOT / "output" / "0804-SHWX-rfdetr_medium_SSCL+prototype"
 CHECKPOINT_PATH = EXP_OUTPUT_DIR / "checkpoint_best_total.pth"
 
 # ── 推理配置 ───────────────────────────────────────────────────────
 CONF_THRESHOLD = 0.25
 DEVICE = "cuda:0"  # 使用 GPU 推理；无 CUDA 时脚本会自动回退到 CPU
 
-# ── 推理性能配置（用于 GPU 满载测速）──────────────────────────────────
+# ── 推理性能配置（GPU 满载单轮推理）──────────────────────────────────
 BATCH_SIZE = 32          # GPU 单次前向处理的图像数；越大 GPU 利用率越高，受显存限制
 NUM_WORKERS = 12         # CPU 预取 worker 进程数（建议等于 CPU 核数）
 PREFETCH_FACTOR = 3      # 每个 worker 在内存中预取的数据批数（需保证 num_workers × prefetch ≥ batch_size）
-BENCH_REPEAT = 10        # 推理测速重复轮数，用于获得稳定的稳态吞吐（仅计时，不重复统计）
 GPU_UTIL_SAMPLE_INTERVAL = 0.5  # 后台采样 GPU 利用率的时间间隔（秒）
 USE_FP16 = False        # 用 FP16 张量核加速推理（RTX 30 系约 2.5 倍提速）；对精度敏感时保持 False
 
@@ -195,29 +194,23 @@ def print_eval_result(name: str, result: EvalResult) -> None:
 class _InferenceDataset(Dataset):
     """在 DataLoader 子进程 worker 中读取并轻量预处理的测试图像数据集。
 
-    每个样本返回 ``(image_id, rgb_tensor, (height, width), repeat)``，其中
+    每个样本返回 ``(image_id, rgb_tensor, (height, width))``，其中
     ``rgb_tensor`` 为 ``(C, H, W)`` 的 uint8 RGB 张量（零拷贝视图）。worker 只做
     磁盘解码与 BGR→RGB 换色，float 化、缩放与归一化全部放到 GPU 端批量执行，
-    从而把 CPU 负载降到最低、让 GPU 持续饱和。
-
-    数据集通过 ``repeats`` 参数把同一批测试图像重复拼接成一条连续流，测速时
-    无需反复重新迭代 DataLoader（避免每轮之间的流水线排空/填充气泡）。
+    从而把 CPU 负载降到最低、让 GPU 持续饱和。测试集单轮完整推理一遍。
 
     Args:
         image_paths: 测试图像路径列表。
-        repeats: 测速重复轮数；``repeat == 0`` 的样本用于收集预测框。
     """
 
-    def __init__(self, image_paths: list[Path], repeats: int) -> None:
+    def __init__(self, image_paths: list[Path]) -> None:
         self.image_paths = image_paths
-        self.repeats = repeats
 
     def __len__(self) -> int:
-        return len(self.image_paths) * self.repeats
+        return len(self.image_paths)
 
-    def __getitem__(self, index: int) -> tuple[str, torch.Tensor, tuple[int, int], int]:
-        repeat = index // len(self.image_paths)
-        image_path = self.image_paths[index % len(self.image_paths)]
+    def __getitem__(self, index: int) -> tuple[str, torch.Tensor, tuple[int, int]]:
+        image_path = self.image_paths[index]
         image = cv2.imread(str(image_path))
         if image is None:
             raise FileNotFoundError(f"无法读取图像: {image_path}")
@@ -225,18 +218,17 @@ class _InferenceDataset(Dataset):
         height, width = image.shape[:2]
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         rgb_tensor = torch.from_numpy(image).permute(2, 0, 1)  # (C,H,W) uint8 视图
-        return image_path.stem, rgb_tensor, (height, width), repeat
+        return image_path.stem, rgb_tensor, (height, width)
 
 
 def _inference_collate(
-    batch: list[tuple[str, torch.Tensor, tuple[int, int], int]],
-) -> tuple[list[str], list[torch.Tensor], list[tuple[int, int]], list[int]]:
+    batch: list[tuple[str, torch.Tensor, tuple[int, int]]],
+) -> tuple[list[str], list[torch.Tensor], list[tuple[int, int]]]:
     """自定义聚合函数：图像原始尺寸不同，保持为张量列表而非堆叠。"""
     stems = [item[0] for item in batch]
     tensors = [item[1] for item in batch]
     orig_sizes = [item[2] for item in batch]
-    repeats = [item[3] for item in batch]
-    return stems, tensors, orig_sizes, repeats
+    return stems, tensors, orig_sizes
 
 
 def _worker_init_fn(worker_id: int) -> None:
@@ -329,10 +321,9 @@ def predict_batched_to_records(
        只承担最轻量的解码工作。
 
     预测结果与 ``model.predict`` 逐像素一致（相同的 uint8→float 转换、
-    ``antialias=False`` 缩放与归一化）。测速通过对同一批测试图像连续重复推理
-    ``BENCH_REPEAT`` 轮取稳态吞吐：``repeat == 0`` 的样本用于收集预测框，
-    其余轮仅计时。数据集在 DataLoader 内部拼接为连续流，避免每轮之间流水线
-    排空/填充带来的气泡。
+    ``antialias=False`` 缩放与归一化）。测试集完整单轮推理一遍，逐张收集
+    预测框；第一批作为流水线预热（触发 worker 启动与 pipeline 填充），其预测框
+    仍被收集，但不计入测速吞吐。
 
     Args:
         model: 已加载的 RFDETRMedium 实例。
@@ -349,7 +340,7 @@ def predict_batched_to_records(
         ``None``；``timed_images`` 为参与稳态计时（剔除预热批）的图像数。
     """
     resolution = int(model.model.resolution)
-    dataset = _InferenceDataset(image_paths, repeats=BENCH_REPEAT)
+    dataset = _InferenceDataset(image_paths)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -388,14 +379,14 @@ def predict_batched_to_records(
     gpu_monitor.start()
 
     pred_records: list[BoxRecord] = []
-    total = len(image_paths) * BENCH_REPEAT  # 连续流总图像数（含重复轮）
+    total = len(image_paths)  # 测试图像总数（单轮）
     timed_images = 0
     warmup_images = 0
     bench_start = time.perf_counter()
     first_batch = True
 
     with torch.inference_mode():
-        for stems, rgb_tensors, orig_sizes, repeats in loader:
+        for stems, rgb_tensors, orig_sizes in loader:
             # uint8(C,H,W) → float[0,1]，并在 GPU 上缩放至模型分辨率
             # （与 predict() 的 F.to_tensor + F.resize(antialias=False) 完全一致）
             gpu_images = [
@@ -412,10 +403,8 @@ def predict_batched_to_records(
             target_sizes = torch.tensor(orig_sizes, device=device)
             results = model.model.postprocess(predictions, target_sizes=target_sizes)
 
-            # 只在 repeat == 0 的样本上收集预测框（测速轮无需 GPU→CPU 同步，保持流水线满载）
-            for stem, repeat, result in zip(stems, repeats, results):
-                if repeat != 0:
-                    continue
+            # 收集预测框（每张测试图只推理一遍，全部收集）
+            for stem, result in zip(stems, results):
                 keep = result["scores"] > conf_threshold
                 boxes = result["boxes"][keep].cpu().numpy()
                 class_ids = result["labels"][keep].cpu().numpy()
@@ -480,8 +469,8 @@ if __name__ == "__main__":
     # ── 推理测速结果 ─────────────────────────────────────────────────
     print("=" * 80)
     print("推理测速结果")
-    print(f"GPU 批量大小: {BATCH_SIZE}  |  CPU 预取 worker 数: {NUM_WORKERS}  |  测速重复轮数: {BENCH_REPEAT}")
-    print(f"稳态吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {timed_images / throughput:.1f}s）")
+    print(f"GPU 批量大小: {BATCH_SIZE}  |  CPU 预取 worker 数: {NUM_WORKERS}")
+    print(f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {timed_images / throughput:.1f}s）")
     if gpu_util is not None:
         print(f"推理期间 GPU 平均利用率: {gpu_util:.1f}%")
     print("=" * 80)

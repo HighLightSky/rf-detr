@@ -95,6 +95,11 @@ SSCL_ANCHOR_CLASSES = None  # None = 全部 25 个类别都作为 anchor
 SSCL_CONFUSING_CLASSES = None  # None = 所有异类负样本都施加语义权重
 SSCL_FREEZE_STRATEGY = "none"  # 从预训练直接训练：不冻结，全量微调
 
+# --- 类别原型库（原型锚定 SSCL，规避 batch 内同类样本不足导致的零损失）---
+SSCL_PROTOTYPE_ENABLED = True
+SSCL_PROTOTYPE_MOMENTUM = 0.99  # 原型 EMA 更新系数（0.9 ~ 0.999）
+SSCL_PROTOTYPE_MIN_SAMPLES = 1  # 单批同类样本低于该阈值则跳过该类原型更新
+
 # --- 基类蒸馏：本实验关闭（从 COCO 起步没有合理的 SHWX teacher）---
 SSCL_DISTILL_ENABLED = False
 
@@ -160,6 +165,9 @@ def main() -> None:
         sscl_start_epoch=SSCL_START_EPOCH,
         sscl_freeze_strategy=SSCL_FREEZE_STRATEGY,
         sscl_distill_enabled=SSCL_DISTILL_ENABLED,
+        sscl_prototype_enabled=SSCL_PROTOTYPE_ENABLED,
+        sscl_prototype_momentum=SSCL_PROTOTYPE_MOMENTUM,
+        sscl_prototype_min_samples=SSCL_PROTOTYPE_MIN_SAMPLES,
     )
 
     print(f"\n训练完成！输出目录: {output_dir}")
