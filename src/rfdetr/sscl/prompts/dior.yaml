@@ -1,0 +1,120 @@
+# DIOR 数据集 20 个类别的 CLIP 文本提示词。
+#
+# 每个类别提供多个 prompt 模板（描述目标在遥感俯视视角下的典型外观），
+# 构建语义相似度矩阵时对同一类别的所有 prompt 编码结果取平均，
+# 以增强 CLIP 对类别语义的稳定理解。
+#
+# 提示词编写原则：
+# - 使用完整名称而非缩写（CLIP 对缩写理解不稳定）。
+# - 描述可见外观特征：形状、纹理、与周边环境（道路/水面/绿地）的空间关系。
+# - 统一使用遥感/俯视视角描述，与检测任务视角一致。
+#
+# 类别索引与 DIOR 数据集 COCO 标注中的 category id 保持一致（1-20），
+# 类别名称与 _annotations.coco.json 中 categories.name 一致。
+dataset: DIOR
+
+# 类别索引 → 人类可读类别名称（用于日志与矩阵验证输出）
+class_names:
+  1: airplane
+  2: airport
+  3: baseballfield
+  4: basketballcourt
+  5: bridge
+  6: chimney
+  7: dam
+  8: Expressway-Service-area
+  9: Expressway-toll-station
+  10: golffield
+  11: groundtrackfield
+  12: harbor
+  13: overpass
+  14: ship
+  15: stadium
+  16: storagetank
+  17: tenniscourt
+  18: trainstation
+  19: vehicle
+  20: windmill
+
+# 类别索引 → 提示词列表
+class_prompts:
+  1:  # airplane —— 飞机
+    - "an airplane with a long cylindrical fuselage and swept-back wings, viewed from above in satellite imagery"
+    - "a jet aircraft flying with wings and a tail fin clearly visible, overhead aerial view"
+    - "an airplane on the ground or in the air with a distinctive wing and fuselage silhouette, top-down remote sensing image"
+  2:  # airport —— 机场
+    - "an airport with long parallel runways and terminal buildings connected by taxiways, viewed from above in satellite imagery"
+    - "a large airport complex with multiple paved runways, aircraft parking aprons and terminal structures, overhead aerial view"
+    - "an airport with a control tower and a network of runways and taxiways, top-down remote sensing image"
+  3:  # baseballfield —— 棒球场
+    - "a baseball field with a diamond-shaped dirt infield and a green outfield, viewed from above in satellite imagery"
+    - "a baseball stadium with a home plate, pitcher's mound and diamond baselines, overhead aerial view"
+    - "a baseball diamond with a dirt infield forming a diamond and green outfield grass, top-down remote sensing image"
+  4:  # basketballcourt —— 篮球场
+    - "a basketball court with a rectangular playing area, two hoop positions and painted boundary lines, viewed from above in satellite imagery"
+    - "an outdoor basketball court with a distinct center circle and key areas at both ends, overhead aerial view"
+    - "a rectangular basketball court with visible lane lines and a center line, top-down remote sensing image"
+  5:  # bridge —— 桥梁
+    - "a bridge crossing a river with a long straight deck and regular supporting piers, viewed from above in satellite imagery"
+    - "a highway bridge spanning a body of water with visible piers and guardrails, overhead aerial view"
+    - "a long bridge with a linear deck and evenly spaced pillars over water, top-down remote sensing image"
+  6:  # chimney —— 烟囱
+    - "a tall chimney stack with a small round footprint casting a long shadow, viewed from above in satellite imagery"
+    - "a factory chimney with a circular outline and a distinct shadow on the ground, overhead aerial view"
+    - "a single smokestack with a round base and an elongated shadow, top-down remote sensing image"
+  7:  # dam —— 水坝
+    - "a dam with a wide straight crest wall across a river and a reservoir upstream, viewed from above in satellite imagery"
+    - "a concrete dam with a flat top edge and water on one side, overhead aerial view"
+    - "a hydroelectric dam crossing a valley with a large reservoir behind it, top-down remote sensing image"
+  8:  # Expressway-Service-area —— 高速公路服务区
+    - "an expressway service area with a rectangular building and parking lots adjacent to a highway, viewed from above in satellite imagery"
+    - "a highway service station with fuel pumps, a main building and parking areas, overhead aerial view"
+    - "a rest area alongside a motorway with buildings and parking spaces, top-down remote sensing image"
+  9:  # Expressway-toll-station —— 高速公路收费站
+    - "an expressway toll station with a row of toll booths spanning across the highway lanes, viewed from above in satellite imagery"
+    - "a highway toll gate with multiple canopied toll booths across the roadway, overhead aerial view"
+    - "a toll station with a line of booths and canopy roofs perpendicular to the highway, top-down remote sensing image"
+  10:  # golffield —— 高尔夫球场
+    - "a golf course with large green fairways, sand bunkers and small round greens, viewed from above in satellite imagery"
+    - "a golf field with a manicured grass layout, sand traps and water hazards, overhead aerial view"
+    - "a golf course with fairways forming an irregular green network and a clubhouse, top-down remote sensing image"
+  11:  # groundtrackfield —— 地面田径场
+    - "a ground track and field stadium with an oval running track and a central green field, viewed from above in satellite imagery"
+    - "an athletics stadium with an oval red running track surrounding a green pitch, overhead aerial view"
+    - "a sports field with a running track in a rounded rectangle shape around a grass center, top-down remote sensing image"
+  12:  # harbor —— 港口
+    - "a harbor with a curved breakwater, docks and many moored ships, viewed from above in satellite imagery"
+    - "a seaport with piers extending into the water and berthed vessels, overhead aerial view"
+    - "a port with quays, cargo berths and ships docked along the waterfront, top-down remote sensing image"
+  13:  # overpass —— 天桥
+    - "an overpass where a road crosses above another road with a visible elevated structure, viewed from above in satellite imagery"
+    - "a highway interchange with an elevated bridge deck crossing over lower roads, overhead aerial view"
+    - "an elevated road bridge spanning over another roadway with supporting columns, top-down remote sensing image"
+  14:  # ship —— 船舶
+    - "a ship with an elongated hull sailing on the water, viewed from above in satellite imagery"
+    - "a vessel with a pointed bow and a wake trailing behind it, overhead aerial view"
+    - "a cargo ship with a long hull and a superstructure on the water surface, top-down remote sensing image"
+  15:  # stadium —— 体育场
+    - "a large stadium with a round or oval bowl-shaped structure and a field in the center, viewed from above in satellite imagery"
+    - "a sports stadium with a circular outer ring and tiered seating around a central field, overhead aerial view"
+    - "an outdoor stadium with a closed oval roof ring and a central playing field, top-down remote sensing image"
+  16:  # storagetank —— 储罐
+    - "a large cylindrical storage tank with a circular roof, viewed from above in satellite imagery"
+    - "round industrial storage tanks grouped together with ring-like shadows, overhead aerial view"
+    - "a storage tank with a round top edge and concentric circular marks, top-down remote sensing image"
+  17:  # tenniscourt —— 网球场
+    - "a tennis court with a rectangular playing area divided by a center net, viewed from above in satellite imagery"
+    - "a tennis court with white boundary lines and a net line across the middle, overhead aerial view"
+    - "a rectangular tennis court with a horizontal net dividing two halves, top-down remote sensing image"
+  18:  # trainstation —— 火车站
+    - "a train station with platforms, railway tracks and a station building, viewed from above in satellite imagery"
+    - "a railway station with long parallel tracks and covered platforms, overhead aerial view"
+    - "a train station with a terminal building and multiple platform tracks, top-down remote sensing image"
+  19:  # vehicle —— 车辆
+    - "vehicles such as cars and trucks parked or driving on the ground, viewed from above in satellite imagery"
+    - "a small car with a rectangular body and a visible roof, overhead aerial view"
+    - "motor vehicles with visible rooftops and shadows on the road, top-down remote sensing image"
+  20:  # windmill —— 风车
+    - "a windmill with a tall tower and three spinning blades casting a long shadow, viewed from above in satellite imagery"
+    - "a wind turbine with a slender mast and a rotor of three blades, overhead aerial view"
+    - "a windmill with a large circular rotor shadow on the ground, top-down remote sensing image"
