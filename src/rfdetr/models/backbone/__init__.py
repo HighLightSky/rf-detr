@@ -81,6 +81,7 @@ def build_backbone(
     num_windows: int,
     positional_encoding_size: int,
     dual_projector: bool = False,
+    use_sga: bool = False,
 ) -> Joiner:
     """
     Useful args:
@@ -112,6 +113,7 @@ def build_backbone(
         num_windows=num_windows,
         positional_encoding_size=positional_encoding_size,
         dual_projector=dual_projector,
+        use_sga=use_sga,
     )
 
     model = Joiner(backbone, position_embedding_module)

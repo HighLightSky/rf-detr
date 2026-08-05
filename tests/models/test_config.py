@@ -909,6 +909,7 @@ class TestPretrainWeightsCompatibilityWarning:
             pytest.param("layer_norm", False, id="layer_norm"),
             pytest.param("two_stage", False, id="two_stage"),
             pytest.param("num_channels", 1, id="num_channels"),
+            pytest.param("use_sga", True, id="use_sga"),
         ],
     )
     def test_load_breaking_override_warns(self, field: str, value: object) -> None:
@@ -1100,11 +1101,36 @@ class TestBreakingListIntegrity:
             "patch_size",
             "segmentation_head",
             "num_channels",
+            "use_sga",
             "num_queries",
             "group_detr",
         }
         stale = all_breaking - set(ModelConfig.model_fields.keys())
         assert not stale, f"Fields in breaking lists not in ModelConfig.model_fields: {stale}"
+
+
+class TestUseSgaConfig:
+    """``use_sga`` 配置字段的默认值、序列化与 namespace 透传测试。"""
+
+    def test_default_false(self) -> None:
+        """默认关闭 SGM 分支。"""
+        assert RFDETRMediumConfig().use_sga is False
+
+    def test_round_trip_true(self) -> None:
+        """use_sga=True 可构造且经 model_dump 后能重建。"""
+        mc = RFDETRMediumConfig(use_sga=True, num_classes=5)
+        assert mc.use_sga is True
+        reloaded = RFDETRMediumConfig(**mc.model_dump())
+        assert reloaded.use_sga is True
+
+    def test_namespace_forwards_use_sga(self) -> None:
+        """_namespace_from_configs 应把 use_sga 透传到命名空间（供 build_model 读取）。"""
+        from rfdetr._namespace import _namespace_from_configs
+
+        mc = RFDETRMediumConfig(use_sga=True, num_classes=5)
+        tc = TrainConfig(dataset_dir="/tmp")
+        ns = _namespace_from_configs(mc, tc)
+        assert ns.use_sga is True
 
 
 class TestTrainConfigAugmentationBackendSerialization:

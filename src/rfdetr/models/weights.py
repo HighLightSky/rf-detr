@@ -21,7 +21,7 @@ from typing import Any, cast
 
 import torch
 import torch.nn.functional as F  # noqa: N812
-from torch import Tensor
+from torch import Tensor, nn
 
 from rfdetr.assets.model_weights import download_pretrain_weights, validate_pretrain_weights
 from rfdetr.config import ModelConfig
@@ -258,6 +258,68 @@ def interpolate_position_embeddings(
             key,
             tuple(ckpt_pe.shape),
             tuple(checkpoint_state[key].shape),
+        )
+
+
+def _warm_start_multi_level_attention(checkpoint_state: dict[str, Any], model: nn.Module) -> None:
+    """将 checkpoint 中随 level 数变化的注意力权重从少级扩展（warm-start）到当前模型的级数。
+
+    当 Phase 2 把 ``num_feature_levels`` 从 1 升到 N 时，decoder 的 ``MSDeformAttn`` 的
+    ``sampling_offsets``/``attention_weights`` 输出维度随级数变化，``load_state_dict(strict=False)``
+    会因 shape 不匹配静默丢弃这些键，导致新级从随机初始化重训。本函数把已有级沿 level 维
+    重复平铺，用已学到的权重初始化新级（标准 DETR 多级 warm-start），**就地修改** checkpoint_state。
+
+    Args:
+        checkpoint_state: 从 checkpoint 加载出的 ``"model"`` 子字典（与 ``interpolate_position_embeddings`` 一致）。
+        model: 目标模型，用于解析各 MSDeformAttn 模块的 ``n_heads``/``n_points``/``n_levels``。
+    """
+    target_state = model.state_dict()
+    module_by_name = {name: m for name, m in model.named_modules()}
+    for key, ckpt_tensor in list(checkpoint_state.items()):
+        # 只处理两个随级数变化的 Linear（weight + bias）；其余键跳过。
+        # 注：MSDeformAttn 里这两个 Linear 默认 bias=True，故 bias 也随级数变化。
+        is_sampling = ".sampling_offsets.weight" in key or ".sampling_offsets.bias" in key
+        is_attention = ".attention_weights.weight" in key or ".attention_weights.bias" in key
+        if not (is_sampling or is_attention):
+            continue
+        target_tensor = target_state.get(key)
+        if target_tensor is None or ckpt_tensor.shape == target_tensor.shape:
+            continue  # 级数一致或目标不存在，无需处理
+
+        is_bias = key.endswith(".bias")
+        module = module_by_name.get(key.rsplit(".", 2)[0])  # 去掉 ".weight"/".bias" 得到模块名
+        if module is None or not hasattr(module, "n_levels"):
+            continue
+
+        n_off = 2 if is_sampling else 1  # 采样偏移有 x/y 两个分量，注意力权重仅 1 个
+        per_level = module.n_heads * module.n_points * n_off
+        if per_level <= 0 or ckpt_tensor.shape[0] % per_level != 0:
+            continue  # 形状无法按级分解，跳过避免误判
+        n_ckpt = ckpt_tensor.shape[0] // per_level
+        n_tgt = module.n_levels
+        if n_ckpt >= n_tgt or n_tgt % n_ckpt != 0:
+            logger.warning(
+                "Skipping warm-start for %s: checkpoint levels=%s, target levels=%s (不可整除)。",
+                key,
+                n_ckpt,
+                n_tgt,
+            )
+            continue
+
+        repeat = n_tgt // n_ckpt
+        # 权重布局 [head, level, point, offset, d_model]，bias 布局 [head, level, point, offset]；
+        # 沿 level 维重复平铺已有级（标准 DETR 多级 warm-start）。
+        view_shape = (module.n_heads, n_ckpt, module.n_points, n_off) + (() if is_bias else (ckpt_tensor.shape[-1],))
+        reshaped = ckpt_tensor.view(*view_shape)
+        reshaped = reshaped.repeat_interleave(repeat, dim=1)
+        checkpoint_state[key] = reshaped.reshape(target_tensor.shape)
+        logger.debug(
+            "Warm-started %s: %s → %s (level %s → %s)。",
+            key,
+            tuple(ckpt_tensor.shape),
+            tuple(target_tensor.shape),
+            n_ckpt,
+            n_tgt,
         )
 
 
@@ -552,6 +614,9 @@ def load_pretrain_weights(
         )
         checkpoint["model"].pop("_kp_active_mask", None)
     interpolate_position_embeddings(checkpoint["model"], mc.positional_encoding_size)
+    # Phase 2 多级（num_feature_levels 增加）时，用 checkpoint 已有级 warm-start 新级的
+    # sampling_offsets/attention_weights，避免新级从随机初始化重训。
+    _warm_start_multi_level_attention(checkpoint["model"], nn_model)
     incompatible = nn_model.load_state_dict(checkpoint["model"], strict=False)
     _warn_on_partial_load(incompatible, pretrain_weights)
 

@@ -32,6 +32,10 @@ from rfdetr.variants import RFDETRMedium
 # --- 模型 ---
 MODEL = "medium"
 NUM_CLASSES = 20
+# 是否启用 SGM 混合编码器分支。默认关闭以保持现有 SSCL 行为不变；
+# 注意：SSCL 的冻结策略可能连带冻结 backbone.0.sga.*（随机初始化），
+# 建议先用 src/scripts/train.py 跑通 SGM 分支后再在此开启。
+USE_SGA = False
 # 基线 checkpoint（作为微调起点，同时是蒸馏的 teacher 权重来源）
 _BASE_CHECKPOINT = Path("output/0726-DIOR-rfdetr_medium/checkpoint_best_total.pth")
 
@@ -127,6 +131,7 @@ def main() -> None:
         num_classes=NUM_CLASSES,
         resolution=640,
         gradient_checkpointing=True,
+        use_sga=USE_SGA,
         pretrain_weights=str(_BASE_CHECKPOINT),  # 从基线 checkpoint 微调
     )
 

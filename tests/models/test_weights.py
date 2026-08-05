@@ -9,11 +9,13 @@ These tests cover ``load_pretrain_weights`` and ``apply_lora`` directly, exercis
 ``detr.py`` and ``module_model.py``.
 """
 
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
+from torch import nn
 
 from rfdetr.config import RFDETRBaseConfig, TrainConfig
 from rfdetr.models.weights import _warn_on_partial_load
@@ -1187,3 +1189,79 @@ class TestPartialLoadDetector:
         nn_model.load_state_dict.return_value = SimpleNamespace(missing_keys=[], unexpected_keys=[])
         load_pretrain_weights(nn_model, mc)
         assert not any("partially" in m for m in captured), f"Clean load must not warn; got messages: {captured}"
+
+
+class TestWarmStartMultiLevelAttention:
+    """``_warm_start_multi_level_attention`` 多级 warm-start 辅助函数测试。"""
+
+    @staticmethod
+    def _make_host(n_levels: int) -> nn.Module:
+        """构造一个宿主模型，decoder.cross_attn 为真实 MSDeformAttn。"""
+        from rfdetr.models.ops.modules.ms_deform_attn import MSDeformAttn
+
+        attn = MSDeformAttn(d_model=32, n_levels=n_levels, n_heads=2, n_points=2)
+        return nn.Sequential(OrderedDict([("decoder", nn.Sequential(OrderedDict([("cross_attn", attn)])))]))
+
+    def test_expands_weights_and_duplicates_level_zero(self) -> None:
+        """n_levels=1 的 checkpoint 权重应被平铺到 n_levels=2，且新级等于 level-0 切片。"""
+        from rfdetr.models.ops.modules.ms_deform_attn import MSDeformAttn
+        from rfdetr.models.weights import _warm_start_multi_level_attention
+
+        host = self._make_host(n_levels=2)
+        attn_ckpt = MSDeformAttn(d_model=32, n_levels=1, n_heads=2, n_points=2)
+        ckpt = {f"decoder.cross_attn.{k}": v.clone() for k, v in attn_ckpt.state_dict().items()}
+
+        _warm_start_multi_level_attention(ckpt, host)
+
+        # 布局 [head, level, point, off, (d_model)]；新级应与 checkpoint 的 level-0 完全一致（weight 与 bias 都查）
+        for key, n_off in (
+            ("decoder.cross_attn.sampling_offsets.weight", 2),
+            ("decoder.cross_attn.attention_weights.weight", 1),
+            ("decoder.cross_attn.sampling_offsets.bias", 2),
+            ("decoder.cross_attn.attention_weights.bias", 1),
+        ):
+            src = attn_ckpt.state_dict()[key.removeprefix("decoder.cross_attn.")]
+            tail = (-1,) if key.endswith(".weight") else ()
+            ck = src.view(2, 1, 2, n_off, *tail)
+            out = ckpt[key].view(2, 2, 2, n_off, *tail)
+            assert torch.allclose(out[:, 0], ck[:, 0])
+            assert torch.allclose(out[:, 1], ck[:, 0])
+
+    def test_load_state_dict_after_warmstart_has_no_mismatch(self) -> None:
+        """warm-start 后 load_state_dict(strict=False) 不应再有缺失键（含 level 无关参数）。"""
+        from rfdetr.models.ops.modules.ms_deform_attn import MSDeformAttn
+        from rfdetr.models.weights import _warm_start_multi_level_attention
+
+        host = self._make_host(n_levels=2)
+        attn_ckpt = MSDeformAttn(d_model=32, n_levels=1, n_heads=2, n_points=2)
+        # 完整 checkpoint：所有参数都带上 decoder.cross_attn. 前缀
+        ckpt = {f"decoder.cross_attn.{k}": v.clone() for k, v in attn_ckpt.state_dict().items()}
+        _warm_start_multi_level_attention(ckpt, host)
+        incompatible = host.load_state_dict(ckpt, strict=False)
+        assert incompatible.missing_keys == []
+        assert incompatible.unexpected_keys == []
+
+    def test_noop_when_levels_match(self) -> None:
+        """checkpoint 与模型级数一致时不应改动任何键。"""
+        from rfdetr.models.ops.modules.ms_deform_attn import MSDeformAttn
+        from rfdetr.models.weights import _warm_start_multi_level_attention
+
+        host = self._make_host(n_levels=1)
+        attn = MSDeformAttn(d_model=32, n_levels=1, n_heads=2, n_points=2)
+        ckpt = {
+            "decoder.cross_attn.sampling_offsets.weight": attn.sampling_offsets.weight.data.clone(),
+            "decoder.cross_attn.attention_weights.weight": attn.attention_weights.weight.data.clone(),
+        }
+        before = {k: v.clone() for k, v in ckpt.items()}
+        _warm_start_multi_level_attention(ckpt, host)
+        for k in ckpt:
+            assert torch.equal(ckpt[k], before[k])
+
+    def test_skips_unrelated_keys(self) -> None:
+        """与 level 无关的键（如类嵌入）不应被触碰。"""
+        from rfdetr.models.weights import _warm_start_multi_level_attention
+
+        host = self._make_host(n_levels=2)
+        ckpt = {"class_embed.weight": torch.randn(10, 32)}
+        _warm_start_multi_level_attention(ckpt, host)
+        assert ckpt["class_embed.weight"].shape == (10, 32)

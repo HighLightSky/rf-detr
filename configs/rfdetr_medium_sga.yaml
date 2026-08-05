@@ -1,0 +1,30 @@
+# RF-DETR Medium + SGM 混合编码器分支 — 示例训练配置（Phase 1：单级 fused P4）。
+# 用法：
+#   rfdetr fit --config configs/rfdetr_medium_sga.yaml
+#   rfdetr fit --config configs/rfdetr_medium_sga.yaml \
+#     --model.train_config.init_args.dataset_dir /data/my_dataset \
+#     --trainer.devices 4
+#
+# SGM 分支说明（详见 docs/改进方案-SGM-encoder/）：
+#   - use_sga: true  启用 SPM（空间先验）+ SGM（语义引导）+ 融合层；
+#   - 新分支对发布权重随机初始化，DINOv2/projector/decoder 照常加载（strict=False）；
+#   - Phase 2（多级，需 decoder warm-start + 重训）：把 projector_scale 改为 [P3, P4]
+#     以启用 stride-8 小目标收益。
+
+model:
+  model_config:
+    class_path: rfdetr.config.RFDETRMediumConfig
+    init_args:
+      num_classes: 80 # set to your dataset class count
+      use_sga: true # 启用 SGM 混合编码器分支
+      # Phase 2（多级 fused P3+P4，decoder n_levels=2，需 warm-start + 重训）：
+      # projector_scale: [P3, P4]
+  train_config:
+    class_path: rfdetr.config.TrainConfig
+    init_args:
+      dataset_dir: /data/coco # required: path to your COCO-format dataset
+      output_dir: output/rfdetr_medium_sga
+      epochs: 100
+      batch_size: 4
+      num_workers: 4
+      tensorboard: true

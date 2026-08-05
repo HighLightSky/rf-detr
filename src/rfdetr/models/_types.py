@@ -44,6 +44,7 @@ class BuilderArgs(Protocol):
     grouppose_keypoint_dim_downscale: int
     dual_projector: bool
     dual_projector_kp_only: bool
+    use_sga: bool
     num_keypoints_per_class: list[int]
     num_decoder_registers: int
     projector_scale: list[str]

@@ -25,6 +25,7 @@ from torch import Tensor
 from rfdetr.models.backbone.base import BackboneBase
 from rfdetr.models.backbone.dinov2 import DinoV2
 from rfdetr.models.backbone.projector import MultiScaleProjector
+from rfdetr.models.backbone.sga import SGAEncoder
 from rfdetr.utilities.logger import get_logger
 from rfdetr.utilities.tensors import NestedTensor
 
@@ -57,6 +58,7 @@ class Backbone(BackboneBase):
         num_windows: int = 4,
         positional_encoding_size: int = 0,
         dual_projector: bool = False,
+        use_sga: bool = False,
     ) -> None:
         super().__init__()
         # an example name here would be "dinov2_base" or "dinov2_registers_windowed_base"
@@ -125,6 +127,17 @@ class Backbone(BackboneBase):
             else None
         )
 
+        # SGM 混合编码器分支（use_sga=False 时为 None，完全不影响原有前向行为）
+        self.sga = (
+            SGAEncoder(
+                projector_scale=self.projector_scale,
+                hidden_dim=out_channels,
+                sem_channels=self.encoder._out_feature_channels[-1],
+            )
+            if use_sga
+            else None
+        )
+
         self._export = False
 
     def export(self) -> None:
@@ -153,6 +166,9 @@ class Backbone(BackboneBase):
         # (H, W, B, C)
         raw_feats = self.encoder(tensor_list.tensors)
         feats = self.projector(raw_feats)
+        # 新增 SGM 分支融合：SPM + SGM 门控 + concat 融合，输出与 feats 同构
+        if self.sga is not None:
+            feats = self.sga(feats, raw_feats, tensor_list.tensors)
         # x: [(B, C, H, W)]
         out = []
         for feat in feats:
@@ -176,6 +192,9 @@ class Backbone(BackboneBase):
     def forward_export(self, tensors: Tensor) -> tuple[list[Tensor], list[Tensor], list[Tensor] | None]:
         raw_feats = self.encoder(tensors)
         feats = self.projector(raw_feats)
+        # 导出路径与训练路径保持一致的 SGM 分支融合
+        if self.sga is not None:
+            feats = self.sga(feats, raw_feats, tensors)
         out_feats = []
         out_masks = []
         for feat in feats:

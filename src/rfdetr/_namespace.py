@@ -53,6 +53,7 @@ _MC_NAMESPACE_FIELDS = {
     "grouppose_keypoint_dim_downscale",
     "dual_projector",
     "dual_projector_kp_only",
+    "use_sga",
     "num_keypoints_per_class",
     "num_decoder_registers",
     "postprocess_trace_alpha",

@@ -523,6 +523,7 @@ class ModelConfig(BaseConfig):
     mask_downsample_ratio: int = 4
     backbone_lora: bool = False
     freeze_encoder: bool = False
+    use_sga: bool = False  # 启用 SGM 混合编码器分支（SPM+SGM+融合）
     license: str = "Apache-2.0"
     model_name: str | None = Field(
         default=None,
@@ -660,6 +661,7 @@ class ModelConfig(BaseConfig):
             "patch_size",
             "segmentation_head",
             "num_channels",
+            "use_sga",
         )
         # Fields where only an *increase* above the variant default is load-breaking:
         # num_queries / group_detr add slots whose shape differs — decrease is fine.
