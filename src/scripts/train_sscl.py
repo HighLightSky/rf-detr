@@ -3,7 +3,7 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-"""SSCL 语义相似度引导微调训练脚本（阶段 1：SSCL Only）。
+"""SSCL 语义相似度引导微调训练脚本 SSCL+视觉原型
 
 在原始 RF-DETR checkpoint 基础上，冻结 backbone/encoder/bbox 头，
 仅解冻 decoder 最后一层与分类头，加入语义相似度引导的对比学习损失，
@@ -31,24 +31,24 @@ from rfdetr.variants import RFDETRMedium
 
 # --- 模型 ---
 MODEL = "medium"
-NUM_CLASSES = 20
+NUM_CLASSES = 25
 # 是否启用 SGM 混合编码器分支。默认关闭以保持现有 SSCL 行为不变；
 # 注意：SSCL 的冻结策略可能连带冻结 backbone.0.sga.*（随机初始化），
 # 建议先用 src/scripts/train.py 跑通 SGM 分支后再在此开启。
 USE_SGA = False
 # 基线 checkpoint（作为微调起点，同时是蒸馏的 teacher 权重来源）
-_BASE_CHECKPOINT = Path("output/0726-DIOR-rfdetr_medium/checkpoint_best_total.pth")
+_BASE_CHECKPOINT = Path("output/0805-SHWX-data-expand-rfdetr-baseline/checkpoint_best_total.pth")
 
 # --- 数据集 ---
-# DATASET_DIR = "/home/liu/datasets/SHWX-dataset-dict"
-DATASET_DIR = "/home/liu/datasets/DIOR-rfdetr"
+DATASET_DIR = "/home/liu/datasets/SHWX-dataset-dict"
+# DATASET_DIR = "/home/liu/datasets/DIOR-rfdetr"
 # DIOR 是 Roboflow 布局（train/valid/test 各含 _annotations.coco.json），
 # 必须用 "roboflow"；"coco" 走标准 COCO 布局（annotations/instances_*2017.json）。
-DATASET_FILE = "roboflow"
+DATASET_FILE = "yolo"
 
 # --- 训练超参数（阶段 1：SSCL Only，保守微调）---
 EPOCHS = 6
-BATCH_SIZE = 8  # 每 GPU batch size
+BATCH_SIZE = 12  # 每 GPU batch size
 GRAD_ACCUM_STEPS = 4  # 有效 batch = 8 × 4 = 32，保证 batch 内有足够同类正样本
 NUM_WORKERS = 12
 LR = 1e-5  # 低学习率，保护已有权重（解码器部分）
@@ -67,7 +67,7 @@ DEVICES = 1
 NUM_NODES = 1
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0804-DIOR-rfdetr_medium_SSCL"
+OUTPUT_DIR = "output/0805-SHWX-data-expand-SSCL"
 TENSORBOARD = True
 WANDB = False
 
@@ -84,17 +84,17 @@ RESUME = ""
 # SSCL 配置
 # ============================================================================
 SSCL_ENABLED = True
-# SSCL_SEMANTIC_MATRIX_PATH = "data/semantic_matrix_shwx.pt"
-SSCL_SEMANTIC_MATRIX_PATH = "data/semantic_matrix_dior.pt"
+SSCL_SEMANTIC_MATRIX_PATH = "data/semantic_matrix_shwx.pt"
+# SSCL_SEMANTIC_MATRIX_PATH = "data/semantic_matrix_dior.pt"
 SSCL_MATRIX_NORMALIZE = "minmax"  # 语义矩阵后处理: "minmax"（推荐）/"softmax"/"none"
 SSCL_LAMBDA = 0.02  # SSCL 损失权重 λ（0.01 ~ 0.05）
 SSCL_TAU = 0.1  # 对比学习温度 τ
 SSCL_RHO = 0.3  # 语义先验放大系数 ρ（0.2 ~ 0.5）
 SSCL_OMEGA_MAX = 2.0  # 负样本语义权重上限
-# SSCL_ANCHOR_CLASSES = [0, 1, 2, 3]  # 参与计算sscl损失的类别
-# SSCL_CONFUSING_CLASSES = [0, 1, 2, 3]  # 参与充当比较类别的类别
-SSCL_ANCHOR_CLASSES = None
-SSCL_CONFUSING_CLASSES = None
+SSCL_ANCHOR_CLASSES = [0, 1, 2, 3]  # 参与计算sscl损失的类别
+SSCL_CONFUSING_CLASSES = [0, 1, 2, 3]  # 参与充当比较类别的类别
+# SSCL_ANCHOR_CLASSES = None
+# SSCL_CONFUSING_CLASSES = None
 SSCL_START_EPOCH = 0  # 微调场景从第 0 个 epoch 即启用 SSCL（config 默认 30，此处显式覆盖）
 SSCL_FREEZE_STRATEGY = "conservative"  # 在已收敛 checkpoint 上微调，采用保守冻结策略
 
