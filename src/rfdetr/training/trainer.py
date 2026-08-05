@@ -31,6 +31,7 @@ from rfdetr.training.callbacks import (
     DropPathCallback,
     RFDETREarlyStopping,
     RFDETREMACallback,
+    SgaGradNormCallback,
 )
 from rfdetr.training.callbacks.coco_eval import COCOEvalCallback
 from rfdetr.utilities.logger import get_logger
@@ -176,6 +177,10 @@ def _append_training_callbacks(
     # Drop-path / dropout scheduling (vit_encoder_num_layers defaults to 12).
     if tc.drop_path > 0.0:
         callbacks.append(DropPathCallback(drop_path=tc.drop_path))
+
+    # SGA 分支梯度范数监控（仅 use_sga=True 时启用），记录到 TensorBoard 的 grad_norm/* 标量。
+    if model_config.use_sga:
+        callbacks.append(SgaGradNormCallback(prefix="sga"))
 
     # Latest resume checkpoint — overwritten every epoch.
     # Skip when checkpoint_interval == 1 to avoid duplicate ModelCheckpoint state_key.

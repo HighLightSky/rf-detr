@@ -47,7 +47,7 @@ CLIP_MAX_NORM = 0.1  # 梯度裁剪
 
 # --- 学习率调度 ---
 LR_DROP = 60  # 学习率下降的 epoch 数
-WARMUP_EPOCHS = 0.0  # 预热 epoch 数
+WARMUP_EPOCHS = 2.0  # 预热 epoch 数
 
 # --- 数据增广 ---
 # 可选预设:
@@ -71,7 +71,7 @@ DEVICES = 1  # GPU 数量
 NUM_NODES = 1  # 节点数
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0805-SHWX-data-expand-rfdetr-baseline"  # 输出目录
+OUTPUT_DIR = "output/0805-SHWX-SGA-rfdetr"  # 输出目录
 TENSORBOARD = True  # 是否启用 TensorBoard
 WANDB = False  # 是否启用 Wandb
 

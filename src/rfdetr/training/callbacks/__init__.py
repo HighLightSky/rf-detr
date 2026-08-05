@@ -9,11 +9,13 @@ from rfdetr.training.callbacks.best_model import BestModelCallback, RFDETREarlyS
 from rfdetr.training.callbacks.coco_eval import COCOEvalCallback
 from rfdetr.training.callbacks.drop_schedule import DropPathCallback
 from rfdetr.training.callbacks.ema import RFDETREMACallback
+from rfdetr.training.callbacks.sga_grad_norm import SgaGradNormCallback
 
 __all__ = [
     "BestModelCallback",
     "COCOEvalCallback",
     "DropPathCallback",
     "RFDETREMACallback",
+    "SgaGradNormCallback",
     "RFDETREarlyStopping",
 ]
