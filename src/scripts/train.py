@@ -26,13 +26,13 @@ from rfdetr.variants import RFDETRLarge, RFDETRMedium, RFDETRNano, RFDETRSmall
 MODEL = "medium"          # 可选: nano, small, medium, large
 
 # --- 数据集 ---
-DATASET_DIR = "/home/liu/datasets/CGWX-dataset"
+DATASET_DIR = "/home/liu/datasets/SHWX-dataset-dict"
 DATASET_FILE = "yolo"            # roboflow：Roboflow COCO 格式 (train/_annotations.coco.json)，还有coco yolo
 
 # --- 训练超参数 ---
-NUM_CLASSES = 1          # 类别数
-EPOCHS = 120              # 训练轮数
-BATCH_SIZE = 8            # 每 GPU 的 batch size
+NUM_CLASSES = 25          # 类别数
+EPOCHS = 100              # 训练轮数
+BATCH_SIZE = 16            # 每 GPU 的 batch size
 NUM_WORKERS = 12           # DataLoader 工作进程数
 LR = 1e-4                 # 基础学习率
 LR_ENCODER = 1.5e-4       # 编码器（backbone）学习率
@@ -41,7 +41,7 @@ GRAD_ACCUM_STEPS = 4      # 梯度累积步数（有效 batch = BATCH_SIZE * GRA
 CLIP_MAX_NORM = 0.1       # 梯度裁剪
 
 # --- 学习率调度 ---
-LR_DROP = 80             # 学习率下降的 epoch 数
+LR_DROP = 60             # 学习率下降的 epoch 数
 WARMUP_EPOCHS = 0.0       # 预热 epoch 数
 
 # --- 数据增广 ---
@@ -66,7 +66,7 @@ DEVICES = 1               # GPU 数量
 NUM_NODES = 1             # 节点数
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0727-CGWX-rfdetr_medium"   # 输出目录
+OUTPUT_DIR = "output/0805-SHWX-data-expand-rfdetr-baseline"   # 输出目录
 TENSORBOARD = True                  # 是否启用 TensorBoard
 WANDB = False                       # 是否启用 Wandb
 

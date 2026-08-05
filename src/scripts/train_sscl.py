@@ -16,7 +16,6 @@
     - 已运行 build_semantic_matrix.py 生成 data/semantic_matrix_shwx.pt
     - 已有基线 checkpoint（默认 output/0724-shwx-rfdetr_medium/checkpoint_best_total.pth）
 
-阶段 1 推荐配置（保守）：SSCL 极小权重、不启用蒸馏、训练 1-3 epoch。
 """
 
 from __future__ import annotations
@@ -44,8 +43,8 @@ DATASET_DIR = "/home/liu/datasets/DIOR-rfdetr"
 DATASET_FILE = "roboflow"
 
 # --- 训练超参数（阶段 1：SSCL Only，保守微调）---
-EPOCHS = 10
-BATCH_SIZE = 16  # 每 GPU batch size
+EPOCHS = 6
+BATCH_SIZE = 8  # 每 GPU batch size
 GRAD_ACCUM_STEPS = 4  # 有效 batch = 8 × 4 = 32，保证 batch 内有足够同类正样本
 NUM_WORKERS = 12
 LR = 1e-5  # 低学习率，保护已有权重（解码器部分）
@@ -84,19 +83,19 @@ SSCL_ENABLED = True
 # SSCL_SEMANTIC_MATRIX_PATH = "data/semantic_matrix_shwx.pt"
 SSCL_SEMANTIC_MATRIX_PATH = "data/semantic_matrix_dior.pt"
 SSCL_MATRIX_NORMALIZE = "minmax"  # 语义矩阵后处理: "minmax"（推荐）/"softmax"/"none"
-SSCL_LAMBDA = 0.01  # SSCL 损失权重 λ（0.01 ~ 0.05）
+SSCL_LAMBDA = 0.02  # SSCL 损失权重 λ（0.01 ~ 0.05）
 SSCL_TAU = 0.1  # 对比学习温度 τ
 SSCL_RHO = 0.3  # 语义先验放大系数 ρ（0.2 ~ 0.5）
 SSCL_OMEGA_MAX = 2.0  # 负样本语义权重上限
 # SSCL_ANCHOR_CLASSES = [0, 1, 2, 3]  # 参与计算sscl损失的类别
 # SSCL_CONFUSING_CLASSES = [0, 1, 2, 3]  # 参与充当比较类别的类别
-SSCL_ANCHOR_CLASSES = [5, 7, ]
+SSCL_ANCHOR_CLASSES = None
 SSCL_CONFUSING_CLASSES = None
 SSCL_START_EPOCH = 0  # 微调场景从第 0 个 epoch 即启用 SSCL（config 默认 30，此处显式覆盖）
 SSCL_FREEZE_STRATEGY = "conservative"  # 在已收敛 checkpoint 上微调，采用保守冻结策略
 
 # --- 类别原型库（原型锚定 SSCL，规避 batch 内同类样本不足导致的零损失）---
-SSCL_PROTOTYPE_ENABLED = False
+SSCL_PROTOTYPE_ENABLED = True
 SSCL_PROTOTYPE_MOMENTUM = 0.99  # 原型 EMA 更新系数（0.9 ~ 0.999）
 SSCL_PROTOTYPE_MIN_SAMPLES = 1  # 单批同类样本低于该阈值则跳过该类原型更新
 

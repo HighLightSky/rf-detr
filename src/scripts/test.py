@@ -18,73 +18,120 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import cv2
 import torch
 import torchvision.transforms.functional as F  # noqa: N812
 from torch.utils.data import DataLoader, Dataset
 
-# ── 路径配置 ───────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+#  数据集选择 —— 切换数据集只需改这里
+# ══════════════════════════════════════════════════════════════════════
+DATASET = "dior"    # 可选: "shwx"（YOLO 格式）| "dior"（Roboflow COCO 格式）
+SAVE_FD_FN = False  # 是否保存FN/FD可视化
+
+# ── 项目路径 ───────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = PROJECT_ROOT / "src"
-DATA_DIR = Path("/home/liu/datasets/SHWX-dataset-dict")
-TEST_IMAGE_DIR = DATA_DIR / "images" / "test"
-LABEL_DIR = DATA_DIR / "labels" / "test"
-EXP_OUTPUT_DIR = PROJECT_ROOT / "output" / "0804-SHWX-rfdetr_medium_SSCL+prototype"
-CHECKPOINT_PATH = EXP_OUTPUT_DIR / "checkpoint_best_total.pth"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+# 类别名称统一来自 sscl/prompts/*.yaml，保证与语义矩阵的类别索引一致
+from rfdetr.sscl.prompts import DIOR_CLASS_NAMES, SHWX_CLASS_NAMES  # noqa: E402
+
+
+def _label_keyed_names(names_by_id: dict[int, str]) -> dict[int, str]:
+    """把 {类别id: 名称} 转成 {label: 名称}。
+
+    label 为按类别 id 排序后的连续索引（0..C-1），与训练时类别 remap 一致：
+    - SHWX: 类别 id 0-24 → label 0-24。
+    - DIOR: 类别 id 1-20 → label 0-19。
+
+    Args:
+        names_by_id: {类别id: 名称} 映射。
+
+    Returns:
+        {label: 名称} 映射。
+    """
+    return {label: names_by_id[cid] for label, cid in enumerate(sorted(names_by_id.keys()))}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  各数据集配置 —— 所有参数统一在下方维护，新增数据集照格式添加即可
+# ══════════════════════════════════════════════════════════════════════
+DATASET_CONFIGS: dict[str, dict[str, Any]] = {
+    "shwx": {
+        "data_dir": "/home/liu/datasets/SHWX-dataset-dict",
+        "image_dir": "images/test",
+        "label_format": "yolo",
+        "label_dir": "labels/test",
+        "exp_output_dir": "output/0804-SHWX-rfdetr_medium_SSCL+prototype",
+        "checkpoint_file": "checkpoint_best_total.pth",
+        "num_classes": 25,
+        "vehicle_class_ids": {24},  # FSC 发射车，比赛规则按车辆目标 IoU=0.35
+        "class_names": _label_keyed_names(SHWX_CLASS_NAMES),
+        # 大类分组：25 类 → 3 个大类（舰船/飞机/车辆）
+        "class_to_group": {
+            **{class_id: "ship" for class_id in range(0, 4)},
+            **{class_id: "aircraft" for class_id in range(4, 24)},
+            24: "vehicle",
+        },
+        "group_iou_thresholds": {"ship": 0.50, "aircraft": 0.50, "vehicle": 0.35},
+    },
+    "dior": {
+        "data_dir": "/home/liu/datasets/DIOR-rfdetr",
+        "image_dir": "test",
+        "label_format": "coco",
+        "annotation_file": "test/_annotations.coco.json",
+        "exp_output_dir": "output/0804-DIOR-rfdetr_medium_SSCL",
+        # 注意：checkpoint_best_total.pth 因 val mAP 未超过 epoch0 基线，实际存的是基线权重；
+        # 真正训练过的模型在 checkpoint_best_regular.pth（epoch 6）。
+        "checkpoint_file": "checkpoint_best_regular.pth",
+        "num_classes": 20,
+        "vehicle_class_ids": set(),  # DIOR 无比赛特殊 IoU 规则，全部按 0.50
+        "class_names": _label_keyed_names(DIOR_CLASS_NAMES),
+        # DIOR 无舰船/飞机/车辆大类分组，所有类别归为单组 "all"
+        "class_to_group": {class_id: "all" for class_id in range(20)},
+        "group_iou_thresholds": {"all": 0.50},
+    },
+}
+
+# ── 激活所选数据集，展开为主流程使用的常量 ────────────────────────────
+_cfg = DATASET_CONFIGS[DATASET]
+DATA_DIR = Path(_cfg["data_dir"])
+TEST_IMAGE_DIR = DATA_DIR / _cfg["image_dir"]
+LABEL_FORMAT = _cfg["label_format"]
+LABEL_DIR = DATA_DIR / _cfg["label_dir"] if _cfg.get("label_dir") else None
+COCO_ANNOTATION = DATA_DIR / _cfg["annotation_file"] if _cfg.get("annotation_file") else None
+EXP_OUTPUT_DIR = PROJECT_ROOT / _cfg["exp_output_dir"]
+CHECKPOINT_PATH = EXP_OUTPUT_DIR / _cfg["checkpoint_file"]
+NUM_CLASSES = _cfg["num_classes"]
+VEHICLE_CLASS_IDS = _cfg["vehicle_class_ids"]
+CLASS_NAMES: dict[int, str] = _cfg["class_names"]
+CLASS_TO_GROUP: dict[int, str] = _cfg["class_to_group"]
+GROUP_IOU_THRESHOLDS: dict[str, float] = _cfg["group_iou_thresholds"]
+
+# 细粒度类别分组映射：每个类独立成组，用于输出逐类指标
+PER_CLASS_TO_GROUP: dict[int, str] = {class_id: name for class_id, name in CLASS_NAMES.items()}
+PER_CLASS_IOU_THRESHOLDS: dict[str, float] = {
+    name: 0.35 if class_id in VEHICLE_CLASS_IDS else 0.50 for class_id, name in CLASS_NAMES.items()
+}
 
 # ── 推理配置 ───────────────────────────────────────────────────────
 CONF_THRESHOLD = 0.25
 DEVICE = "cuda:0"  # 使用 GPU 推理；无 CUDA 时脚本会自动回退到 CPU
 
 # ── 推理性能配置（GPU 满载单轮推理）──────────────────────────────────
-BATCH_SIZE = 32          # GPU 单次前向处理的图像数；越大 GPU 利用率越高，受显存限制
-NUM_WORKERS = 12         # CPU 预取 worker 进程数（建议等于 CPU 核数）
-PREFETCH_FACTOR = 3      # 每个 worker 在内存中预取的数据批数（需保证 num_workers × prefetch ≥ batch_size）
+BATCH_SIZE = 32  # GPU 单次前向处理的图像数；越大 GPU 利用率越高，受显存限制
+NUM_WORKERS = 12  # CPU 预取 worker 进程数（建议等于 CPU 核数）
+PREFETCH_FACTOR = 3  # 每个 worker 在内存中预取的数据批数（需保证 num_workers × prefetch ≥ batch_size）
 GPU_UTIL_SAMPLE_INTERVAL = 0.5  # 后台采样 GPU 利用率的时间间隔（秒）
-USE_FP16 = False        # 用 FP16 张量核加速推理（RTX 30 系约 2.5 倍提速）；对精度敏感时保持 False
+USE_FP16 = False  # 用 FP16 张量核加速推理（RTX 30 系约 2.5 倍提速）；对精度敏感时保持 False
 
 # ── 可视化保存配置 ───────────────────────────────────────────────────
 FP_DIR = EXP_OUTPUT_DIR / "FP"  # FP 可视化保存根目录
 FN_DIR = EXP_OUTPUT_DIR / "FN"  # FN 可视化保存根目录
-
-# ── 比赛指标配置 ───────────────────────────────────────────────────
-NUM_CLASSES = 25
-VEHICLE_CLASS_IDS = {24}  # FSC 发射车，比赛规则按车辆目标 IoU=0.35
-
-# 25 个细粒度类别名称
-CLASS_NAMES: dict[int, str] = {
-    0: "HM", 1: "LQS", 2: "QHS", 3: "MS",
-    4: "A1_SU-35", 5: "A2_C-130", 6: "A3_C-17", 7: "A4_C-5",
-    8: "A5_F-16", 9: "A6_TU-160", 10: "A7_E-3", 11: "A8_B-52",
-    12: "A9_P-3C", 13: "A10_B-1B", 14: "A11_E-8", 15: "A12_TU-22",
-    16: "A13_F-15", 17: "A14_KC-135", 18: "A15_F-22", 19: "A16_FA-18",
-    20: "A17_TU-95", 21: "A18_KC-10", 22: "A19_SU-34", 23: "A20_SU-24",
-    24: "FSC",
-}
-
-# 大类分组映射：25 类 → 3 个大类（舰船/飞机/车辆）
-CLASS_TO_GROUP: dict[int, str] = {
-    **{class_id: "ship" for class_id in range(0, 4)},
-    **{class_id: "aircraft" for class_id in range(4, 24)},
-    24: "vehicle",
-}
-GROUP_IOU_THRESHOLDS: dict[str, float] = {
-    "ship": 0.50,
-    "aircraft": 0.50,
-    "vehicle": 0.35,
-}
-
-# 细粒度类别分组映射：每个类独立成组，用于输出逐类指标
-PER_CLASS_TO_GROUP: dict[int, str] = {class_id: name for class_id, name in CLASS_NAMES.items()}
-PER_CLASS_IOU_THRESHOLDS: dict[str, float] = {
-    name: 0.35 if class_id in VEHICLE_CLASS_IDS else 0.50
-    for class_id, name in CLASS_NAMES.items()
-}
-
-
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
 
 from rfdetr import RFDETRMedium  # noqa: E402
 from val.competition_metrics import (  # noqa: E402
@@ -129,6 +176,45 @@ def build_image_size_map(image_paths: list[Path]) -> dict[str, tuple[int, int]]:
         image_size_map[image_path.stem] = (width, height)
         del image
     return image_size_map
+
+
+def load_coco_labels(annotation_path: str | Path) -> list[BoxRecord]:
+    """读取 Roboflow COCO 标注文件，生成真实框记录。
+
+    COCO 的 ``bbox`` 为 ``[x, y, w, h]``（像素坐标），此处转换为 ``xyxy``。
+    类别 ``category_id`` 按 id 排序映射为连续 label（0..C-1），
+    与训练时 ``remap_category_ids=True`` 的映射（build_roboflow_from_coco）保持一致，
+    保证真实框类别与模型预测类别处于同一 label 空间。
+
+    Args:
+        annotation_path: ``_annotations.coco.json`` 文件路径。
+
+    Returns:
+        BoxRecord 列表。
+    """
+    import json
+
+    with open(annotation_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    # category_id → 连续 label（按 id 排序，与训练 remap 一致）
+    cat_ids = sorted(int(cat["id"]) for cat in data["categories"])
+    cat2label = {cat_id: label for label, cat_id in enumerate(cat_ids)}
+
+    # image_id → 文件名（Roboflow 布局：图像与标注文件在同一目录）
+    img_id_to_file = {img["id"]: img["file_name"] for img in data["images"]}
+
+    records: list[BoxRecord] = []
+    for ann in data["annotations"]:
+        x, y, w, h = ann["bbox"]
+        records.append(
+            BoxRecord(
+                image_id=Path(img_id_to_file[ann["image_id"]]).stem,
+                class_id=cat2label[ann["category_id"]],
+                xyxy=(float(x), float(y), float(x) + float(w), float(y) + float(h)),
+            )
+        )
+    return records
 
 
 def resolve_device(device: str) -> str:
@@ -446,10 +532,16 @@ if __name__ == "__main__":
     os.chdir(PROJECT_ROOT)
 
     test_image_paths = read_test_image_paths(TEST_IMAGE_DIR)
-    image_size_map = build_image_size_map(test_image_paths)
+    # YOLO 格式需要图像尺寸把归一化坐标换算成像素；COCO 的 bbox 本身就是像素坐标
+    image_size_map = build_image_size_map(test_image_paths) if LABEL_FORMAT == "yolo" else None
 
-    # 读取测试集真实框
-    gt_records = load_yolo_labels(LABEL_DIR, image_size_map)
+    # 读取测试集真实框（按数据集标签格式分派）
+    if LABEL_FORMAT == "yolo":
+        gt_records = load_yolo_labels(LABEL_DIR, image_size_map)
+    elif LABEL_FORMAT == "coco":
+        gt_records = load_coco_labels(COCO_ANNOTATION)
+    else:
+        raise ValueError(f"不支持的标签格式: {LABEL_FORMAT}")
 
     # 加载 RF-DETR 模型并执行批量流水线推理（含测速）
     device = resolve_device(DEVICE)
@@ -506,7 +598,9 @@ if __name__ == "__main__":
         class_aware=True,
     )
     per_class_results = evaluate_competition_metrics(
-        gt_records, pred_records, per_class_config,
+        gt_records,
+        pred_records,
+        per_class_config,
     )
 
     print("\n" + "-" * 80)
@@ -533,14 +627,25 @@ if __name__ == "__main__":
     print(f"[完成] 混淆矩阵已保存至: {EXP_OUTPUT_DIR / 'confusion_matrix.png'}")
 
     # ── FP / FN 可视化保存 ───────────────────────────────────────────
-    print("\n[i] 正在生成 FP/FN 可视化...")
-    clear_vis_dirs(FP_DIR, FN_DIR, CLASS_NAMES)
-    fp_img, fn_img, fp_box, fn_box, tp_pred = match_per_image_per_class(
-        gt_records, pred_records, NUM_CLASSES, VEHICLE_CLASS_IDS,
-    )
-    save_fp_fn_visualizations(
-        fp_img, fn_img, fp_box, fn_box, tp_pred,
-        gt_records, test_image_paths,
-        CLASS_NAMES, FP_DIR, FN_DIR,
-    )
-    print("[完成] FP/FN 可视化保存完成")
+    if SAVE_FD_FN:
+        print("\n[i] 正在生成 FP/FN 可视化...")
+        clear_vis_dirs(FP_DIR, FN_DIR, CLASS_NAMES)
+        fp_img, fn_img, fp_box, fn_box, tp_pred = match_per_image_per_class(
+            gt_records,
+            pred_records,
+            NUM_CLASSES,
+            VEHICLE_CLASS_IDS,
+        )
+        save_fp_fn_visualizations(
+            fp_img,
+            fn_img,
+            fp_box,
+            fn_box,
+            tp_pred,
+            gt_records,
+            test_image_paths,
+            CLASS_NAMES,
+            FP_DIR,
+            FN_DIR,
+        )
+        print("[完成] FP/FN 可视化保存完成")
