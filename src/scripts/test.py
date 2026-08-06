@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ from torch.utils.data import DataLoader, Dataset
 # ══════════════════════════════════════════════════════════════════════
 #  数据集选择 —— 切换数据集只需改这里
 # ══════════════════════════════════════════════════════════════════════
-DATASET = "shwx"    # 可选: "shwx"（YOLO 格式）| "dior"（Roboflow COCO 格式）
+DATASET = "shwx"  # 可选: "shwx"（YOLO 格式）| "dior"（Roboflow COCO 格式）
 SAVE_FD_FN = True  # 是否保存FN/FD可视化
 
 # ══════════════════════════════════════════════════════════════════════
@@ -39,8 +40,8 @@ SAVE_FD_FN = True  # 是否保存FN/FD可视化
 #                      （并把上方 DATASET_CONFIGS 里该数据集的 exp_output_dir
 #                        指向 CFE 训练输出目录）
 # ══════════════════════════════════════════════════════════════════════
-USE_SGA = True          # 是否启用 SGM 混合编码器分支
-USE_CFE = False         # 是否启用跨尺度交互（CFE），需 USE_SGA=True 且 PROJECTOR_SCALE 多级
+USE_SGA = True  # 是否启用 SGM 混合编码器分支
+USE_CFE = False  # 是否启用跨尺度交互（CFE），需 USE_SGA=True 且 PROJECTOR_SCALE 多级
 PROJECTOR_SCALE = ["P4"]  # 金字塔等级：SGA 单级 ["P4"]；SGA+CFE 多级 ["P3", "P4"]
 
 # ── 项目路径 ───────────────────────────────────────────────────────
@@ -271,9 +272,9 @@ def release_cuda_cache(device: str) -> None:
         torch.cuda.empty_cache()
 
 
-def print_eval_result(name: str, result: EvalResult) -> None:
-    """打印单组比赛评测结果。"""
-    print(
+def _format_eval_result(name: str, result: EvalResult) -> str:
+    """格式化单组比赛评测结果为一行文本。"""
+    return (
         f"{name:<10s} "
         f"TP={result.tp:<6d} "
         f"FP={result.fp:<6d} "
@@ -282,6 +283,169 @@ def print_eval_result(name: str, result: EvalResult) -> None:
         f"FDR={result.fdr:.4f} "
         f"Precision={result.precision:.4f}"
     )
+
+
+def print_eval_result(name: str, result: EvalResult) -> None:
+    """打印单组比赛评测结果。"""
+    print(_format_eval_result(name, result))
+
+
+def average_per_class_metrics(
+    per_class_groups: dict[str, EvalResult],
+    class_to_group: dict[int, str],
+) -> dict[str, dict[str, float]]:
+    """计算每个大类下小类指标的平均值（macro 平均）。
+
+    对每个大类，收集其下各小类在测试集中实际出现的类别（tp+fn>0）的指标
+    （TP/FP/FN/Recall/FDR/Precision），逐项取算术平均。这里是对“小类指标”取
+    平均，而非把小类的 TP/FP/FN 合并后再计算指标，避免样本量大的小类主导大类
+    结果；测试集中没有真实框的小类不参与平均，与逐小类指标只打印出现类别的
+    逻辑保持一致。
+
+    Args:
+        per_class_groups: 逐小类评测结果（``evaluate_competition_metrics``
+            返回中的 ``groups`` 字段）。
+        class_to_group: {类别label: 大类名称} 映射。
+
+    Returns:
+        {大类名称: {指标名: 平均值}}，只包含测试集中有小类出现的大类。
+    """
+    group_values: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    for class_id, class_name in CLASS_NAMES.items():
+        result = per_class_groups.get(class_name)
+        if result is None or result.tp + result.fn == 0:
+            continue
+        group_name = class_to_group[class_id]
+        for metric in ("tp", "fp", "fn", "recall", "fdr", "precision"):
+            group_values[group_name][metric].append(float(getattr(result, metric)))
+
+    return {
+        group_name: {metric: sum(values) / len(values) if values else 0.0 for metric, values in metric_values.items()}
+        for group_name, metric_values in group_values.items()
+    }
+
+
+def _format_average_metrics(name: str, avg_metrics: dict[str, float]) -> str:
+    """格式化单个大类的平均小类指标为一行文本。"""
+    return (
+        f"{name:<10s} "
+        f"avgTP={avg_metrics['tp']:6.2f} "
+        f"avgFP={avg_metrics['fp']:6.2f} "
+        f"avgFN={avg_metrics['fn']:6.2f} "
+        f"avgRecall={avg_metrics['recall']:.4f} "
+        f"avgFDR={avg_metrics['fdr']:.4f} "
+        f"avgPrecision={avg_metrics['precision']:.4f}"
+    )
+
+
+def print_average_metrics(name: str, avg_metrics: dict[str, float]) -> None:
+    """打印单个大类的平均小类指标。"""
+    print(_format_average_metrics(name, avg_metrics))
+
+
+def write_test_result_report(report_path: Path, report_text: str) -> None:
+    """把测试结果报告文本写入文件。
+
+    Args:
+        report_path: 报告文件路径（如 ``output/xxx/test_result.txt``）。
+        report_text: 完整报告文本。
+    """
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(report_text + "\n")
+    print(f"[完成] 测试结果报告已保存至: {report_path}")
+
+
+def build_test_result_report(
+    test_image_count: int,
+    gt_count: int,
+    pred_count: int,
+    throughput: float,
+    timed_images: int,
+    gpu_util: float | None,
+    eval_results: dict[str, Any],
+    group_avg_metrics: dict[str, dict[str, float]],
+    per_class_results: dict[str, Any],
+    artifact_paths: dict[str, Path],
+) -> str:
+    """构建测试结果报告文本，供打印之外保存到文件。
+
+    报告按顺序包含：配置信息、推理测速、比赛大类指标、每个大类下小类指标
+    的平均值（macro 平均）、逐小类指标，以及生成的可视化文件路径。
+
+    Args:
+        test_image_count: 测试图像总数。
+        gt_count: 真实框总数。
+        pred_count: 预测框总数。
+        throughput: 稳态推理吞吐（img/s）。
+        timed_images: 参与稳态计时的图像数。
+        gpu_util: 推理期间 GPU 平均利用率（%），采样失败时为 None。
+        eval_results: 比赛大类评测结果（``evaluate_competition_metrics`` 返回）。
+        group_avg_metrics: 每个大类下小类指标平均值
+            （``average_per_class_metrics`` 返回）。
+        per_class_results: 逐小类评测结果。
+        artifact_paths: 生成的可视化文件路径，{描述: 路径}。
+
+    Returns:
+        完整报告文本（多行字符串）。
+    """
+    lines: list[str] = []
+    sep = "=" * 80
+
+    # ── 配置信息 ─────────────────────────────────────────────────────
+    lines.append(sep)
+    lines.append("RF-DETR 测试结果报告")
+    lines.append(f"生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"数据集: {DATASET}")
+    lines.append(f"权重: {CHECKPOINT_PATH}")
+    lines.append(f"模型版本: SGA={USE_SGA} | CFE={USE_CFE} | projector_scale={PROJECTOR_SCALE}")
+    lines.append(sep)
+    lines.append(f"测试图像数: {test_image_count}")
+    lines.append(f"真实框数: {gt_count}")
+    lines.append(f"预测框数: {pred_count}")
+    lines.append(f"置信度阈值: {CONF_THRESHOLD}")
+    iou_desc = "，".join(f"{g}={t:.2f}" for g, t in GROUP_IOU_THRESHOLDS.items())
+    lines.append(f"IoU 阈值: {iou_desc}")
+    lines.append(sep)
+
+    # ── 推理测速 ─────────────────────────────────────────────────────
+    lines.append("推理测速结果")
+    lines.append(f"GPU 批量大小: {BATCH_SIZE}  |  CPU 预取 worker 数: {NUM_WORKERS}")
+    lines.append(f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {timed_images / throughput:.1f}s）")
+    if gpu_util is not None:
+        lines.append(f"推理期间 GPU 平均利用率: {gpu_util:.1f}%")
+    lines.append(sep)
+
+    # ── 比赛大类指标 ─────────────────────────────────────────────────
+    lines.append("比赛指标评估结果（测试集）")
+    lines.append(_format_eval_result("all", eval_results["all"]))
+    for group_name, group_result in eval_results["groups"].items():
+        lines.append(_format_eval_result(group_name, group_result))
+
+    # ── 每个大类下小类指标的平均值（macro 平均）──────────────────────
+    lines.append("-" * 80)
+    lines.append("每个大类下小类指标的平均值（macro 平均）")
+    lines.append("-" * 80)
+    for group_name, avg_metrics in group_avg_metrics.items():
+        lines.append(_format_average_metrics(group_name, avg_metrics))
+
+    # ── 逐小类指标 ───────────────────────────────────────────────────
+    lines.append("-" * 80)
+    lines.append("细粒度类别指标")
+    lines.append("-" * 80)
+    for class_name in sorted(per_class_results["groups"].keys()):
+        result = per_class_results["groups"][class_name]
+        if result.tp + result.fn > 0:  # 只记录测试集中存在的类别
+            lines.append(_format_eval_result(class_name, result))
+
+    # ── 可视化产物 ───────────────────────────────────────────────────
+    if artifact_paths:
+        lines.append(sep)
+        lines.append("生成的可视化文件")
+        for key, path in artifact_paths.items():
+            lines.append(f"{key}: {path}")
+
+    return "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -629,6 +793,18 @@ if __name__ == "__main__":
         if result.tp + result.fn > 0:  # 只打印测试集中存在的类别
             print_eval_result(class_name, result)
 
+    # ── 每个大类下小类指标的平均值（macro 平均）──────────────────────
+    group_avg_metrics = average_per_class_metrics(
+        per_class_results["groups"],
+        CLASS_TO_GROUP,
+    )
+
+    print("\n" + "-" * 80)
+    print("每个大类下小类指标的平均值（macro 平均）")
+    print("-" * 80)
+    for group_name, avg_metrics in group_avg_metrics.items():
+        print_average_metrics(group_name, avg_metrics)
+
     # ── 混淆矩阵可视化 ───────────────────────────────────────────────
     print("\n[i] 正在生成混淆矩阵分析图...")
     cm = build_confusion_matrix(
@@ -667,3 +843,24 @@ if __name__ == "__main__":
             FN_DIR,
         )
         print("[完成] FP/FN 可视化保存完成")
+
+    # ── 测试结果报告保存 ─────────────────────────────────────────────
+    artifact_paths: dict[str, Path] = {
+        "混淆矩阵": EXP_OUTPUT_DIR / "confusion_matrix.png",
+    }
+    if SAVE_FD_FN:
+        artifact_paths["FP 可视化目录"] = FP_DIR
+        artifact_paths["FN 可视化目录"] = FN_DIR
+    report_text = build_test_result_report(
+        test_image_count=len(test_image_paths),
+        gt_count=len(gt_records),
+        pred_count=len(pred_records),
+        throughput=throughput,
+        timed_images=timed_images,
+        gpu_util=gpu_util,
+        eval_results=eval_results,
+        group_avg_metrics=group_avg_metrics,
+        per_class_results=per_class_results,
+        artifact_paths=artifact_paths,
+    )
+    write_test_result_report(EXP_OUTPUT_DIR / "test_result.txt", report_text)
