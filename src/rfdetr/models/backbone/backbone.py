@@ -23,6 +23,7 @@ import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
 
 from rfdetr.models.backbone.base import BackboneBase
+from rfdetr.models.backbone.cfe import CrossScaleEncoder
 from rfdetr.models.backbone.dinov2 import DinoV2
 from rfdetr.models.backbone.projector import MultiScaleProjector
 from rfdetr.models.backbone.sga import SGAEncoder
@@ -59,6 +60,11 @@ class Backbone(BackboneBase):
         positional_encoding_size: int = 0,
         dual_projector: bool = False,
         use_sga: bool = False,
+        use_cfe: bool = False,
+        cfe_use_encoder: bool = False,
+        cfe_act: str = "silu",
+        cfe_expansion: float = 1.0,
+        cfe_depth_mult: float = 1.0,
     ) -> None:
         super().__init__()
         # an example name here would be "dinov2_base" or "dinov2_registers_windowed_base"
@@ -138,6 +144,22 @@ class Backbone(BackboneBase):
             else None
         )
 
+        # 跨尺度交互分支（CFE）：作用于 SGA 融合后的特征，P3/P4/P5 之间双向互导。
+        # 需同时 use_sga=True 且 projector_scale 至少 2 级（由 ModelConfig 校验保证）。
+        self.cfe = (
+            CrossScaleEncoder(
+                projector_scale=self.projector_scale,
+                hidden_dim=out_channels,
+                use_encoder=cfe_use_encoder,
+                gradient_checkpointing=gradient_checkpointing,
+                expansion=cfe_expansion,
+                depth_mult=cfe_depth_mult,
+                act=cfe_act,
+            )
+            if (use_sga and use_cfe)
+            else None
+        )
+
         self._export = False
 
     def export(self) -> None:
@@ -169,6 +191,9 @@ class Backbone(BackboneBase):
         # 新增 SGM 分支融合：SPM + SGM 门控 + concat 融合，输出与 feats 同构
         if self.sga is not None:
             feats = self.sga(feats, raw_feats, tensor_list.tensors)
+        # 新增跨尺度交互：SGA 融合后经 FPN(自顶向下)+PAN(自底向上)+RGM 双向互导
+        if self.cfe is not None:
+            feats = self.cfe(feats)
         # x: [(B, C, H, W)]
         out = []
         for feat in feats:
@@ -195,6 +220,9 @@ class Backbone(BackboneBase):
         # 导出路径与训练路径保持一致的 SGM 分支融合
         if self.sga is not None:
             feats = self.sga(feats, raw_feats, tensors)
+        # 导出路径与训练路径保持一致的跨尺度交互
+        if self.cfe is not None:
+            feats = self.cfe(feats)
         out_feats = []
         out_masks = []
         for feat in feats:

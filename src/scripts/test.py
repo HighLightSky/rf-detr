@@ -31,6 +31,18 @@ from torch.utils.data import DataLoader, Dataset
 DATASET = "shwx"    # 可选: "shwx"（YOLO 格式）| "dior"（Roboflow COCO 格式）
 SAVE_FD_FN = True  # 是否保存FN/FD可视化
 
+# ══════════════════════════════════════════════════════════════════════
+#  模型版本开关 —— 与 src/scripts/train.py 的 USE_SGA/USE_CFE/PROJECTOR_SCALE 对应。
+#  测试前确认开关与所测 checkpoint 的训练架构一致：
+#    - SGA 版本：      USE_SGA=True, USE_CFE=False, PROJECTOR_SCALE=["P4"]
+#    - SGA+CFE 版本：  USE_SGA=True, USE_CFE=True,  PROJECTOR_SCALE=["P3","P4"]
+#                      （并把上方 DATASET_CONFIGS 里该数据集的 exp_output_dir
+#                        指向 CFE 训练输出目录）
+# ══════════════════════════════════════════════════════════════════════
+USE_SGA = True          # 是否启用 SGM 混合编码器分支
+USE_CFE = False         # 是否启用跨尺度交互（CFE），需 USE_SGA=True 且 PROJECTOR_SCALE 多级
+PROJECTOR_SCALE = ["P4"]  # 金字塔等级：SGA 单级 ["P4"]；SGA+CFE 多级 ["P3", "P4"]
+
 # ── 项目路径 ───────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = PROJECT_ROOT / "src"
@@ -66,7 +78,7 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         "image_dir": "images/test",
         "label_format": "yolo",
         "label_dir": "labels/test",
-        "exp_output_dir": "output/0805-SHWX-data-expand-SSCL",
+        "exp_output_dir": "output/0805-SHWX-SGA-rfdetr",
         "checkpoint_file": "checkpoint_best_total.pth",
         "num_classes": 25,
         "vehicle_class_ids": {24},  # FSC 发射车，比赛规则按车辆目标 IoU=0.35
@@ -546,7 +558,13 @@ if __name__ == "__main__":
     # 加载 RF-DETR 模型并执行批量流水线推理（含测速）
     device = resolve_device(DEVICE)
     print(f"[i] 正在从 {CHECKPOINT_PATH} 加载 RF-DETR 模型...")
-    model = RFDETRMedium.from_checkpoint(str(CHECKPOINT_PATH))
+    print(f"[i] 模型版本: SGA={USE_SGA} | CFE={USE_CFE} | projector_scale={PROJECTOR_SCALE}")
+    model = RFDETRMedium.from_checkpoint(
+        str(CHECKPOINT_PATH),
+        use_sga=USE_SGA,
+        use_cfe=USE_CFE,
+        projector_scale=PROJECTOR_SCALE,
+    )
     pred_records, throughput, gpu_util, timed_images = predict_batched_to_records(
         model,
         test_image_paths,

@@ -30,6 +30,14 @@ MODEL = "medium"  # 可选: nano, small, medium, large
 # 关闭 = 完全等同原模型行为。
 USE_SGA = True
 
+# --- 跨尺度交互分支（Phase 2：CFE，尺度内 RepNCSPELAN4 + 尺度间 RGM）---
+# 启用需同时：USE_SGA=True、USE_CFE=True、PROJECTOR_SCALE=["P3","P4"]（多级，
+# decoder 自动 n_levels=2 + warm-start，CFE 模块随机初始化、其余从 COCO 预训练权重开始）。
+# 默认单级 P4（当前 Phase 1 训练），CFE 关闭不影响现有训练。
+USE_CFE = True
+# PROJECTOR_SCALE = ["P4"]  # CFE 开启时改为 ["P3", "P4"]
+PROJECTOR_SCALE = ["P3", "P4"]
+
 # --- 数据集 ---
 DATASET_DIR = "/home/liu/datasets/SHWX-dataset-dict"
 DATASET_FILE = "yolo"  # roboflow：Roboflow COCO 格式 (train/_annotations.coco.json)，还有coco yolo
@@ -46,7 +54,7 @@ GRAD_ACCUM_STEPS = 4  # 梯度累积步数（有效 batch = BATCH_SIZE * GRAD_AC
 CLIP_MAX_NORM = 0.1  # 梯度裁剪
 
 # --- 学习率调度 ---
-LR_DROP = 60  # 学习率下降的 epoch 数
+LR_DROP = 70  # 学习率下降的 epoch 数
 WARMUP_EPOCHS = 2.0  # 预热 epoch 数
 
 # --- 数据增广 ---
@@ -71,12 +79,12 @@ DEVICES = 1  # GPU 数量
 NUM_NODES = 1  # 节点数
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0805-SHWX-SGA-rfdetr"  # 输出目录
+OUTPUT_DIR = "output/0806-SHWX-SGA-CFE-rfdetr"  # 输出目录
 TENSORBOARD = True  # 是否启用 TensorBoard
 WANDB = False  # 是否启用 Wandb
 
 # --- EMA (指数移动平均) ---
-USE_EMA = True  # 关闭 EMA，节省约 1 倍模型权重的显存
+USE_EMA = False  # 关闭 EMA，节省约 1 倍模型权重的显存
 
 # --- 验证 ---
 EVAL_INTERVAL = 5  # 每隔 N 个 epoch 验证一次（减少 CPU 阻塞，加快训练）
@@ -119,6 +127,8 @@ def main() -> None:
         resolution=default_resolution,
         gradient_checkpointing=True,
         use_sga=USE_SGA,
+        use_cfe=USE_CFE,
+        projector_scale=PROJECTOR_SCALE,
     )
 
     # --- 训练 ---

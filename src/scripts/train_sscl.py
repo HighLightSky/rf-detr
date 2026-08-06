@@ -36,6 +36,8 @@ NUM_CLASSES = 25
 # 注意：SSCL 的冻结策略可能连带冻结 backbone.0.sga.*（随机初始化），
 # 建议先用 src/scripts/train.py 跑通 SGM 分支后再在此开启。
 USE_SGA = False
+# 是否启用跨尺度交互（CFE）。需 USE_SGA=True 且多级 PROJECTOR_SCALE；此处保持关闭。
+USE_CFE = False
 # 基线 checkpoint（作为微调起点，同时是蒸馏的 teacher 权重来源）
 _BASE_CHECKPOINT = Path("output/0805-SHWX-data-expand-rfdetr-baseline/checkpoint_best_total.pth")
 
@@ -132,6 +134,7 @@ def main() -> None:
         resolution=640,
         gradient_checkpointing=True,
         use_sga=USE_SGA,
+        use_cfe=USE_CFE,
         pretrain_weights=str(_BASE_CHECKPOINT),  # 从基线 checkpoint 微调
     )
 

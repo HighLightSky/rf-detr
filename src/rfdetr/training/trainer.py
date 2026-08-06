@@ -181,6 +181,9 @@ def _append_training_callbacks(
     # SGA 分支梯度范数监控（仅 use_sga=True 时启用），记录到 TensorBoard 的 grad_norm/* 标量。
     if model_config.use_sga:
         callbacks.append(SgaGradNormCallback(prefix="sga"))
+    # CFE 跨尺度分支梯度范数监控（仅 use_cfe=True 时启用）
+    if model_config.use_cfe:
+        callbacks.append(SgaGradNormCallback(prefix="cfe"))
 
     # Latest resume checkpoint — overwritten every epoch.
     # Skip when checkpoint_interval == 1 to avoid duplicate ModelCheckpoint state_key.

@@ -812,6 +812,11 @@ def build_model(args: "BuilderArgs") -> LWDETR | tuple[Any, None, None]:
         positional_encoding_size=args.positional_encoding_size,
         dual_projector=args.dual_projector,
         use_sga=args.use_sga,
+        use_cfe=args.use_cfe,
+        cfe_use_encoder=args.cfe_use_encoder,
+        cfe_act=args.cfe_act,
+        cfe_expansion=args.cfe_expansion,
+        cfe_depth_mult=args.cfe_depth_mult,
     )
     if args.encoder_only:
         return backbone[0].encoder, None, None

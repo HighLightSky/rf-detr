@@ -1102,6 +1102,7 @@ class TestBreakingListIntegrity:
             "segmentation_head",
             "num_channels",
             "use_sga",
+            "use_cfe",
             "num_queries",
             "group_detr",
         }

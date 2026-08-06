@@ -45,6 +45,11 @@ class BuilderArgs(Protocol):
     dual_projector: bool
     dual_projector_kp_only: bool
     use_sga: bool
+    use_cfe: bool
+    cfe_use_encoder: bool
+    cfe_act: str
+    cfe_expansion: float
+    cfe_depth_mult: float
     num_keypoints_per_class: list[int]
     num_decoder_registers: int
     projector_scale: list[str]

@@ -323,6 +323,79 @@ def _warm_start_multi_level_attention(checkpoint_state: dict[str, Any], model: n
         )
 
 
+def _align_projector_scales(checkpoint_state: dict[str, Any], model: nn.Module) -> None:
+    """将 checkpoint 的 projector 级数与当前模型对齐（按 C2f 输入通道匹配尺度）。
+
+    发布权重（如 ``rf-detr-medium.pth``）为单级 ``projector_scale=["P4"]``；训练 SGA+CFE
+    多级（``["P3","P4"]``）后，同名 ``stages`` 的 C2f 输入通道不同（P4=1536 vs P3=768），
+    ``load_state_dict`` 会因 shape 不匹配直接抛 ``RuntimeError``。
+
+    本函数按"C2f 第一个卷积的输入通道数"作为尺度指纹，把 checkpoint 中与模型**共享尺度**
+    的 stage 权重映射到正确槽位（如 P4→P4），模型新增尺度（如 P3）的 stage 留随机初始化。
+    **就地修改** checkpoint_state（与 ``interpolate_position_embeddings`` 一致）。
+
+    Args:
+        checkpoint_state: 从 checkpoint 加载出的 ``"model"`` 子字典。
+        model: 目标模型，用于读取 projector 各级的输入通道。
+    """
+    model_state = model.state_dict()
+
+    def _stage_in_channels(state: dict[str, Any], idx: int) -> int | None:
+        """读取某 stage 的 C2f 首卷积输入通道作为尺度指纹。"""
+        cv1 = f"backbone.0.projector.stages.{idx}.0.cv1.conv.weight"
+        tensor = state.get(cv1)
+        return int(tensor.shape[1]) if tensor is not None else None
+
+    def _projector_stage_idxs(state: dict[str, Any]) -> list[int]:
+        """收集 state 中 projector.stages.{i} 的索引（不含 stages_sampling）。"""
+        idxs: set[int] = set()
+        for key in state:
+            marker = ".projector.stages."
+            if marker in key and ".projector.stages_sampling." not in key:
+                idxs.add(int(key.split(marker)[1].split(".")[0]))
+        return sorted(idxs)
+
+    ckpt_idxs = _projector_stage_idxs(checkpoint_state)
+    model_idxs = _projector_stage_idxs(model_state)
+    if not ckpt_idxs or not model_idxs or len(ckpt_idxs) == len(model_idxs):
+        return  # 无法读取或级数一致，无需处理
+
+    # 按 C2f 输入通道匹配共享尺度（例如 P4-only → P3+P4：ckpt stage0(P4) → model stage1(P4)）
+    mapping: dict[int, int] = {}
+    for ci in ckpt_idxs:
+        cin = _stage_in_channels(checkpoint_state, ci)
+        if cin is None:
+            continue
+        for mi in model_idxs:
+            if _stage_in_channels(model_state, mi) == cin:
+                mapping[ci] = mi
+                break
+
+    # 就地重写 stages / stages_sampling 键
+    renamed: dict[str, str] = {}
+    for key in list(checkpoint_state):
+        for marker in (".projector.stages.", ".projector.stages_sampling."):
+            if marker not in key:
+                continue
+            idx = int(key.split(marker)[1].split(".")[0])
+            new_idx = mapping.get(idx)
+            if new_idx is None:
+                del checkpoint_state[key]  # 模型无该尺度 → 丢弃，该级随机初始化
+            elif new_idx != idx:
+                rest = key.split(marker)[1]
+                renamed[key] = f"{key.split(marker)[0]}{marker}{new_idx}{rest[len(str(idx)):]}"
+            break  # 一个键只属于 stages 或 stages_sampling 之一
+
+    for old, new in renamed.items():
+        checkpoint_state[new] = checkpoint_state.pop(old)
+    if mapping:
+        logger.info(
+            "projector 尺度对齐: checkpoint stages=%s → 模型 stages=%s（新尺度随机初始化）。",
+            ckpt_idxs,
+            {ci: mi for ci, mi in mapping.items()},
+        )
+
+
 def load_pretrain_weights(
     nn_model: LWDETR,
     model_config: ModelConfig,
@@ -614,6 +687,9 @@ def load_pretrain_weights(
         )
         checkpoint["model"].pop("_kp_active_mask", None)
     interpolate_position_embeddings(checkpoint["model"], mc.positional_encoding_size)
+    # projector 级数与 checkpoint 不同（如 P4-only → P3+P4）时，按尺度对齐共享槽位的权重，
+    # 避免同名 stages 形状不同导致 load_state_dict 报错。
+    _align_projector_scales(checkpoint["model"], nn_model)
     # Phase 2 多级（num_feature_levels 增加）时，用 checkpoint 已有级 warm-start 新级的
     # sampling_offsets/attention_weights，避免新级从随机初始化重训。
     _warm_start_multi_level_attention(checkpoint["model"], nn_model)

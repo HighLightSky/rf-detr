@@ -524,6 +524,11 @@ class ModelConfig(BaseConfig):
     backbone_lora: bool = False
     freeze_encoder: bool = False
     use_sga: bool = False  # 启用 SGM 混合编码器分支（SPM+SGM+融合）
+    use_cfe: bool = False  # 启用跨尺度交互（CFE）：需 use_sga=True 且 projector_scale 至少 2 级
+    cfe_use_encoder: bool = False  # CFE 在最深级叠加一层自注意力（对应 SKYDET use_encoder_idx）
+    cfe_act: str = "silu"  # CFE 块激活函数（silu/gelu/relu/none）
+    cfe_expansion: float = 1.0  # CFE CSPLayer 通道膨胀系数
+    cfe_depth_mult: float = 1.0  # CFE RepNCSPELAN4 深度倍率
     license: str = "Apache-2.0"
     model_name: str | None = Field(
         default=None,
@@ -569,6 +574,24 @@ class ModelConfig(BaseConfig):
         if default_pe == default_resolution // default_patch_size:
             self.positional_encoding_size = self.resolution // self.patch_size
 
+        return self
+
+    @model_validator(mode="after")
+    def _validate_cfe_prereq(self) -> "ModelConfig":
+        """``use_cfe=True`` 的强制前提：``use_sga=True`` 且至少 2 个金字塔等级。
+
+        跨尺度交互（CFE）作用于 SGA 融合后的多级特征：
+        - 没有 SGA 则无"融合后特征"可交互；
+        - 少于 2 级则无"尺度间"可言。
+        """
+        if self.use_cfe:
+            if not self.use_sga:
+                raise ValueError("use_cfe=True 需要 use_sga=True（CFE 作用于 SGA 融合后的特征）。")
+            if len(self.projector_scale) < 2:
+                raise ValueError(
+                    "use_cfe=True 需要至少 2 个金字塔等级（例如 projector_scale=['P3','P4']），"
+                    f"当前仅 {len(self.projector_scale)} 级。"
+                )
         return self
 
     @model_validator(mode="after")
@@ -662,6 +685,7 @@ class ModelConfig(BaseConfig):
             "segmentation_head",
             "num_channels",
             "use_sga",
+            "use_cfe",
         )
         # Fields where only an *increase* above the variant default is load-breaking:
         # num_queries / group_detr add slots whose shape differs — decrease is fine.

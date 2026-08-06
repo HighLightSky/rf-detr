@@ -82,6 +82,11 @@ def build_backbone(
     positional_encoding_size: int,
     dual_projector: bool = False,
     use_sga: bool = False,
+    use_cfe: bool = False,
+    cfe_use_encoder: bool = False,
+    cfe_act: str = "silu",
+    cfe_expansion: float = 1.0,
+    cfe_depth_mult: float = 1.0,
 ) -> Joiner:
     """
     Useful args:
@@ -114,6 +119,11 @@ def build_backbone(
         positional_encoding_size=positional_encoding_size,
         dual_projector=dual_projector,
         use_sga=use_sga,
+        use_cfe=use_cfe,
+        cfe_use_encoder=cfe_use_encoder,
+        cfe_act=cfe_act,
+        cfe_expansion=cfe_expansion,
+        cfe_depth_mult=cfe_depth_mult,
     )
 
     model = Joiner(backbone, position_embedding_module)

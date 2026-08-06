@@ -1265,3 +1265,70 @@ class TestWarmStartMultiLevelAttention:
         ckpt = {"class_embed.weight": torch.randn(10, 32)}
         _warm_start_multi_level_attention(ckpt, host)
         assert ckpt["class_embed.weight"].shape == (10, 32)
+
+
+class TestAlignProjectorScales:
+    """``_align_projector_scales`` 投影仪尺度对齐测试。"""
+
+    @staticmethod
+    def _make_model(stage_channels: list[int]) -> nn.Module:
+        """构造一个最小宿主模型，state_dict 键形如 backbone.0.projector.stages.{i}.0.cv1.conv.weight。"""
+
+        class _ConvLike(nn.Module):
+            """照真实 ConvX：cv1.conv.weight（Conv2d 作为子模块）。"""
+
+            def __init__(self, ch: int) -> None:
+                super().__init__()
+                self.conv = nn.Conv2d(ch, 256, 1)
+
+        class _C2fLike(nn.Module):
+            def __init__(self, ch: int) -> None:
+                super().__init__()
+                self.cv1 = _ConvLike(ch)
+
+        class _Stage(nn.Module):
+            def __init__(self, ch: int) -> None:
+                super().__init__()
+                self.add_module("0", _C2fLike(ch))
+
+        model = nn.Module()
+        model.backbone = nn.ModuleList([nn.Module()])
+        model.backbone[0].projector = nn.Module()
+        model.backbone[0].projector.stages = nn.ModuleList([_Stage(ch) for ch in stage_channels])
+        return model
+
+    def test_remaps_shared_scale(self) -> None:
+        """P4-only checkpoint → P3+P4 模型：ckpt stage0(P4,1536) 应映射到模型 stage1(P4)。"""
+        from rfdetr.models.weights import _align_projector_scales
+
+        model = self._make_model([768, 1536])
+        ckpt = {"backbone.0.projector.stages.0.0.cv1.conv.weight": torch.randn(256, 1536, 1, 1)}
+        _align_projector_scales(ckpt, model)
+        assert "backbone.0.projector.stages.0.0.cv1.conv.weight" not in ckpt
+        assert "backbone.0.projector.stages.1.0.cv1.conv.weight" in ckpt
+        assert ckpt["backbone.0.projector.stages.1.0.cv1.conv.weight"].shape == (256, 1536, 1, 1)
+
+    def test_noop_when_levels_match(self) -> None:
+        """checkpoint 与模型级数一致时不应改动任何键。"""
+        from rfdetr.models.weights import _align_projector_scales
+
+        model = self._make_model([1536])
+        ckpt = {"backbone.0.projector.stages.0.0.cv1.conv.weight": torch.randn(256, 1536, 1, 1)}
+        before = dict(ckpt)
+        _align_projector_scales(ckpt, model)
+        assert ckpt == before
+
+    def test_drops_unmatched_scale(self) -> None:
+        """checkpoint 有而模型没有的尺度键应被丢弃（避免 unexpected key）。"""
+        from rfdetr.models.weights import _align_projector_scales
+
+        model = self._make_model([768, 1536])
+        ckpt = {
+            "backbone.0.projector.stages.0.0.cv1.conv.weight": torch.randn(256, 768, 1, 1),  # P3
+            "backbone.0.projector.stages.1.0.cv1.conv.weight": torch.randn(256, 1536, 1, 1),  # P4
+            "backbone.0.projector.stages.2.0.cv1.conv.weight": torch.randn(256, 3072, 1, 1),  # P5，模型无
+        }
+        _align_projector_scales(ckpt, model)
+        assert "backbone.0.projector.stages.2.0.cv1.conv.weight" not in ckpt
+        assert "backbone.0.projector.stages.0.0.cv1.conv.weight" in ckpt  # P3 保留（模型有）
+        assert "backbone.0.projector.stages.1.0.cv1.conv.weight" in ckpt  # P4 保留
