@@ -142,9 +142,13 @@ PER_CLASS_IOU_THRESHOLDS: dict[str, float] = {
 # ── 推理配置 ───────────────────────────────────────────────────────
 CONF_THRESHOLD = 0.25
 DEVICE = "cuda:0"  # 使用 GPU 推理；无 CUDA 时脚本会自动回退到 CPU
+# 推理分辨率：训练侧实际以 800×800 单档 resize（multi_scale+expanded_scales+skip_random_resize），
+# 而 checkpoint 的 model_config.resolution=640 会让推理缩到 640，把小目标进一步缩小。
+# 评估对齐到 800，避免 train/eval 分辨率错配（0807test_sga 分析 §九）。
+INFERENCE_RESOLUTION = 800
 
 # ── 推理性能配置（GPU 满载单轮推理）──────────────────────────────────
-BATCH_SIZE = 32  # GPU 单次前向处理的图像数；越大 GPU 利用率越高，受显存限制
+BATCH_SIZE = 16  # GPU 单次前向处理的图像数；800 分辨率下两级 decoder token 翻 2.4 倍，32 易 OOM，降到 16
 NUM_WORKERS = 12  # CPU 预取 worker 进程数（建议等于 CPU 核数）
 PREFETCH_FACTOR = 3  # 每个 worker 在内存中预取的数据批数（需保证 num_workers × prefetch ≥ batch_size）
 GPU_UTIL_SAMPLE_INTERVAL = 0.5  # 后台采样 GPU 利用率的时间间隔（秒）
@@ -808,6 +812,7 @@ if __name__ == "__main__":
     print(f"[i] 模型版本: SGA={USE_SGA} | CFE={USE_CFE} | projector_scale={PROJECTOR_SCALE}")
     model = RFDETRMedium.from_checkpoint(
         str(CHECKPOINT_PATH),
+        resolution=INFERENCE_RESOLUTION,  # 推理分辨率覆盖 checkpoint 的 640，对齐训练 800
         use_sga=USE_SGA,
         use_cfe=USE_CFE,
         projector_scale=PROJECTOR_SCALE,
