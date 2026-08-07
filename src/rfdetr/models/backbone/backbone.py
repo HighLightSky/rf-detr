@@ -69,6 +69,8 @@ class Backbone(BackboneBase):
         sga_fusion_residual: bool = False,
         sga_residual_gamma: float = 0.1,
         sga_attn_bias: float = 0.0,
+        sga_fusion_mode: str = "concat",
+        sga_residual_alpha_init: float = 1e-3,
     ) -> None:
         super().__init__()
         # an example name here would be "dinov2_base" or "dinov2_registers_windowed_base"
@@ -147,6 +149,8 @@ class Backbone(BackboneBase):
                 fusion_residual=sga_fusion_residual,
                 residual_gamma=sga_residual_gamma,
                 attn_bias=sga_attn_bias,
+                fusion_mode=sga_fusion_mode,
+                residual_alpha_init=sga_residual_alpha_init,
             )
             if use_sga
             else None

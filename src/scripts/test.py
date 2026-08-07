@@ -49,6 +49,8 @@ SGA_GATE_MODE = "product"  # 门控模式: product/lower_bound/residual/ones
 SGA_FUSION_RESIDUAL = False  # 融合是否残差保底（fused = feats[i] + gamma*delta）
 SGA_RESIDUAL_GAMMA = 0.1  # 残差融合系数
 SGA_ATTN_BIAS = 0.0  # SGM 注意力 logits 初值偏置（init-only，仅用于报告头完整）
+SGA_FUSION_MODE = "concat"  # SGA 融合方式: concat（原版）/ semantic_film（语义条件残差调制，§3.2）
+SGA_RESIDUAL_ALPHA_INIT = 1e-3  # semantic_film 各 P 级可学习残差系数 α_s 初值
 
 # ── 项目路径 ───────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -710,6 +712,7 @@ def predict_batched_to_records(
 #  主流程
 # ══════════════════════════════════════════════════════════════════════
 
+
 def load_exp_model_version(exp_dir: Path) -> dict[str, Any]:
     """从实验输出目录的 training_config.json 读取模型结构开关（评估时保证与训练一致）。
 
@@ -718,8 +721,8 @@ def load_exp_model_version(exp_dir: Path) -> dict[str, Any]:
 
     Returns:
         dict: use_sga / use_cfe / projector_scale / sga_gate_mode / sga_fusion_residual /
-        sga_residual_gamma / sga_attn_bias；配置文件缺失时回退到模块级常量（旧实验无
-        sga_* 字段时回退默认 = 原版行为）。
+        sga_residual_gamma / sga_attn_bias / sga_fusion_mode / sga_residual_alpha_init；
+        配置文件缺失时回退到模块级常量（旧实验无 sga_* 字段时回退默认 = 原版行为）。
     """
     cfg_path = exp_dir / "training_config.json"
     if cfg_path.exists():
@@ -734,6 +737,8 @@ def load_exp_model_version(exp_dir: Path) -> dict[str, Any]:
             "sga_fusion_residual": bool(model_config.get("sga_fusion_residual", SGA_FUSION_RESIDUAL)),
             "sga_residual_gamma": float(model_config.get("sga_residual_gamma", SGA_RESIDUAL_GAMMA)),
             "sga_attn_bias": float(model_config.get("sga_attn_bias", SGA_ATTN_BIAS)),
+            "sga_fusion_mode": model_config.get("sga_fusion_mode", SGA_FUSION_MODE),
+            "sga_residual_alpha_init": float(model_config.get("sga_residual_alpha_init", SGA_RESIDUAL_ALPHA_INIT)),
         }
     return {
         "use_sga": USE_SGA,
@@ -743,6 +748,8 @@ def load_exp_model_version(exp_dir: Path) -> dict[str, Any]:
         "sga_fusion_residual": SGA_FUSION_RESIDUAL,
         "sga_residual_gamma": SGA_RESIDUAL_GAMMA,
         "sga_attn_bias": SGA_ATTN_BIAS,
+        "sga_fusion_mode": SGA_FUSION_MODE,
+        "sga_residual_alpha_init": SGA_RESIDUAL_ALPHA_INIT,
     }
 
 
@@ -753,7 +760,12 @@ if __name__ == "__main__":
     # 不传参数时行为与旧版完全一致；传 --exp-dir/--checkpoint 时覆盖输出目录与模型版本开关，
     # 便于实验运行器（src/scripts/test_sga/run.py）对任意实验归档目录批量评估。
     _ap = argparse.ArgumentParser(description="SHWX/DIOR 测试集比赛指标评估")
-    _ap.add_argument("--exp-dir", type=str, default=None, help="实验输出目录（含 training_config.json），自动读取模型版本开关")
+    _ap.add_argument(
+        "--exp-dir",
+        type=str,
+        default=None,
+        help="实验输出目录（含 training_config.json），自动读取模型版本开关",
+    )
     _ap.add_argument("--checkpoint", type=str, default=None, help="直接指定 checkpoint .pth 路径（优先于 --exp-dir）")
     _args = _ap.parse_args()
     if _args.checkpoint or _args.exp_dir:
@@ -772,6 +784,8 @@ if __name__ == "__main__":
         SGA_FUSION_RESIDUAL = _version["sga_fusion_residual"]
         SGA_RESIDUAL_GAMMA = _version["sga_residual_gamma"]
         SGA_ATTN_BIAS = _version["sga_attn_bias"]
+        SGA_FUSION_MODE = _version["sga_fusion_mode"]
+        SGA_RESIDUAL_ALPHA_INIT = _version["sga_residual_alpha_init"]
         FP_DIR = EXP_OUTPUT_DIR / "FP"  # FP 可视化目录随实验输出目录切换
         FN_DIR = EXP_OUTPUT_DIR / "FN"
         print(f"[i] 评估模式: 输出目录覆盖为 {EXP_OUTPUT_DIR}", flush=True)
@@ -801,6 +815,8 @@ if __name__ == "__main__":
         sga_fusion_residual=SGA_FUSION_RESIDUAL,
         sga_residual_gamma=SGA_RESIDUAL_GAMMA,
         sga_attn_bias=SGA_ATTN_BIAS,
+        sga_fusion_mode=SGA_FUSION_MODE,
+        sga_residual_alpha_init=SGA_RESIDUAL_ALPHA_INIT,
     )
     pred_records, throughput, gpu_util, timed_images = predict_batched_to_records(
         model,

@@ -533,6 +533,8 @@ class ModelConfig(BaseConfig):
     sga_fusion_residual: bool = False  # 融合残差：fused = feats[i] + gamma*delta，保留 projector 语义基线
     sga_residual_gamma: float = 0.1  # 残差融合系数
     sga_attn_bias: float = 0.0  # SGM 注意力 logits 初值偏置（>0 使初始注意力≈全通，防早期反向收敛）
+    sga_fusion_mode: Literal["concat", "semantic_film"] = "concat"  # SGA 融合方式（§3.2）
+    sga_residual_alpha_init: float = 1e-3  # semantic_film 各 P 级可学习残差系数 α_s 的初值
     license: str = "Apache-2.0"
     model_name: str | None = Field(
         default=None,

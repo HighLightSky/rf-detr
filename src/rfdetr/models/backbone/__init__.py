@@ -91,6 +91,8 @@ def build_backbone(
     sga_fusion_residual: bool = False,
     sga_residual_gamma: float = 0.1,
     sga_attn_bias: float = 0.0,
+    sga_fusion_mode: str = "concat",
+    sga_residual_alpha_init: float = 1e-3,
 ) -> Joiner:
     """
     Useful args:
@@ -132,6 +134,8 @@ def build_backbone(
         sga_fusion_residual=sga_fusion_residual,
         sga_residual_gamma=sga_residual_gamma,
         sga_attn_bias=sga_attn_bias,
+        sga_fusion_mode=sga_fusion_mode,
+        sga_residual_alpha_init=sga_residual_alpha_init,
     )
 
     model = Joiner(backbone, position_embedding_module)

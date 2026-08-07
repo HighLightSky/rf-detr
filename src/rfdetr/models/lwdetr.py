@@ -821,6 +821,8 @@ def build_model(args: "BuilderArgs") -> LWDETR | tuple[Any, None, None]:
         sga_fusion_residual=args.sga_fusion_residual,
         sga_residual_gamma=args.sga_residual_gamma,
         sga_attn_bias=args.sga_attn_bias,
+        sga_fusion_mode=args.sga_fusion_mode,
+        sga_residual_alpha_init=args.sga_residual_alpha_init,
     )
     if args.encoder_only:
         return backbone[0].encoder, None, None

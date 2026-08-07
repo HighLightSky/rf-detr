@@ -54,6 +54,8 @@ class BuilderArgs(Protocol):
     sga_fusion_residual: bool
     sga_residual_gamma: float
     sga_attn_bias: float
+    sga_fusion_mode: str
+    sga_residual_alpha_init: float
     num_keypoints_per_class: list[int]
     num_decoder_registers: int
     projector_scale: list[str]

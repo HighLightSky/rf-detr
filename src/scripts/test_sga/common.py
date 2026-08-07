@@ -23,7 +23,7 @@ import json
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +53,10 @@ class Variant:
         residual_gamma: 残差融合系数。
         attn_bias: SGM 注意力 logits 初值偏置（>0 使初始注意力≈全通；默认 0 = 从 0.5 起步）。
         description: 中文描述（写入实验报告）。
+        projector_scale: 参与 decoder 的金字塔等级（默认 P4 单级）。
+        fusion_mode: 融合方式（concat = 现有 concat+conv；semantic_film = 语义条件残差调制）。
+        residual_alpha_init: semantic_film 各 P 级可学习残差系数 α_s 的初值。
+        analyze_attn: 是否对该变体运行 SGM 注意力分析（ones/无 SGM 门控的变体设为 False）。
     """
 
     name: str
@@ -62,6 +66,10 @@ class Variant:
     residual_gamma: float
     description: str
     attn_bias: float = 0.0
+    projector_scale: list[str] = field(default_factory=lambda: ["P4"])
+    fusion_mode: str = "concat"
+    residual_alpha_init: float = 1e-3
+    analyze_attn: bool = True
 
 
 VARIANTS: dict[str, Variant] = {
@@ -83,6 +91,49 @@ VARIANTS: dict[str, Variant] = {
         "注意力初值偏置 +2，product 直接门控 + 残差融合（治本第一版）",
         attn_bias=2.0,
     ),
+    # ── 多尺度 P3/P4 验证（docs/改进方案-SGM-encoder/SGA多尺度语义-细节融合优化：10ep短训验证方案.md）──
+    # E0：基线 / 纯 DINO 多级 / 真实 CNN 细节（H1 判据）
+    "baseline_p4": Variant(
+        "baseline_p4",
+        False,
+        "product",
+        False,
+        0.1,
+        "当前基线：单级 P4 decoder，无 SGA（多尺度实验对照）",
+        projector_scale=["P4"],
+    ),
+    "vit_p3p4": Variant(
+        "vit_p3p4",
+        False,
+        "product",
+        False,
+        0.1,
+        "纯 DINO projector 多级 P3/P4 decoder（无 CNN 细节，验证多级 decoder 本身）",
+        projector_scale=["P3", "P4"],
+    ),
+    "spm_p3p4": Variant(
+        "spm_p3p4",
+        True,
+        "ones",
+        True,
+        0.1,
+        "真实 C2/P3 细节 + 残差 concat 融合，SGM 门控固定全 1（H1 判据）",
+        projector_scale=["P3", "P4"],
+        analyze_attn=False,
+    ),
+    # E1：语义条件残差调制（H2 判据，§3.2）
+    "semantic_film_p3p4": Variant(
+        "semantic_film_p3p4",
+        True,
+        "ones",
+        False,
+        0.1,
+        "语义条件残差调制（GN + 通道-空间调制 + 可学习残差 α_s），无单通道 SGM（H2 判据）",
+        projector_scale=["P3", "P4"],
+        fusion_mode="semantic_film",
+        residual_alpha_init=1e-3,
+        analyze_attn=False,
+    ),
 }
 DEFAULT_VARIANT = "fixed_sga_lb"  # 默认跑 P0 首选变体
 
@@ -94,18 +145,23 @@ DATASET_DIR = "/home/liu/datasets/SHWX-dataset-dict"  # SHWX 数据集（yolo �
 DATASET_FILE = "yolo"
 NUM_CLASSES = 25
 MODEL_RESOLUTION = 640  # RFDETRMedium 默认分辨率
-PROJECTOR_SCALE = ["P4"]  # 单级 fused P4（Phase 1 设置）
+PROJECTOR_SCALE = ["P4"]  # 单级 fused P4（Phase 1 设置，build_model_for_variant 按 v.projector_scale 覆盖）
 USE_CFE = False  # 先不开 CFE，避免变量混合
+
+# 多尺度验证（0807）的输出根目录：output/0807test_sga/<variant>/
+EXPERIMENT_ROOT = PROJECT_ROOT / "output/0807test_sga"
 
 # 短训超参（小规模方向验证：COCO 预训练起步、固定 seed、25 epoch）
 SEED = 0
 EPOCHS = 10
-BATCH_SIZE = 16
+# OOM 调整（2026-08-07）：单级 P4 batch16 已占 ~21GB/24GB，两级 decoder 必然超限。
+# 降 batch 到 8 并翻倍累积步数，有效 batch 仍 = 64，超参口径不漂移（文档 §6 风险对策）。
+BATCH_SIZE = 8
 NUM_WORKERS = 12
 LR = 1e-4  # 基础学习率
 LR_ENCODER = 1.5e-4  # 编码器学习率
 WEIGHT_DECAY = 1e-4
-GRAD_ACCUM_STEPS = 4  # 有效 batch = BATCH_SIZE * GRAD_ACCUM_STEPS = 64
+GRAD_ACCUM_STEPS = 8  # 有效 batch = BATCH_SIZE * GRAD_ACCUM_STEPS = 64
 CLIP_MAX_NORM = 0.1
 LR_DROP = 15  # ≈原 100ep/60 的比例（60%）
 WARMUP_EPOCHS = 2.0
@@ -132,25 +188,27 @@ def build_model_for_variant(v: Variant) -> RFDETRMedium:
         gradient_checkpointing=True,
         use_sga=v.use_sga,
         use_cfe=USE_CFE,
-        projector_scale=PROJECTOR_SCALE,
+        projector_scale=v.projector_scale,
         sga_gate_mode=v.gate_mode if v.use_sga else "product",
         sga_fusion_residual=v.fusion_residual,
         sga_residual_gamma=v.residual_gamma,
         sga_attn_bias=v.attn_bias,
+        sga_fusion_mode=v.fusion_mode,
+        sga_residual_alpha_init=v.residual_alpha_init,
     )
 
 
 def output_dir_for(v: Variant, date: str) -> Path:
-    """返回该变体的输出目录（output/{date}-SHWX-test_sga-<variant>）。
+    """返回该变体的输出目录（output/0807test_sga/<variant>）。
 
     Args:
         v: 实验变体。
-        date: 日期字符串（MMDD）。
+        date: 日期字符串（MMDD，仅用于日志；目录结构按 EXPERIMENT_ROOT 固定）。
 
     Returns:
         输出目录绝对路径。
     """
-    return PROJECT_ROOT / f"output/{date}-SHWX-test_sga-{v.name}"
+    return EXPERIMENT_ROOT / v.name
 
 
 def short_train(v: Variant, out_dir: Path, seed: int, epochs: int, resume: str = "") -> None:
@@ -167,8 +225,10 @@ def short_train(v: Variant, out_dir: Path, seed: int, epochs: int, resume: str =
         resume: 可选恢复 checkpoint（默认空串 = 从预训练权重起步）。
     """
     model = build_model_for_variant(v)
-    print(f"\n[短训] 变体={v.name} | gate_mode={v.gate_mode} | fusion_residual={v.fusion_residual} "
-          f"| seed={seed} | epochs={epochs} | 输出={out_dir}")
+    print(
+        f"\n[短训] 变体={v.name} | gate_mode={v.gate_mode} | fusion_residual={v.fusion_residual} "
+        f"| seed={seed} | epochs={epochs} | 输出={out_dir}"
+    )
     model.train(
         dataset_dir=str(Path(DATASET_DIR).resolve()),
         dataset_file=DATASET_FILE,
@@ -349,7 +409,7 @@ def _parse_attention_stats(attn_txt: Path) -> list[str]:
 def _baseline_test_result(out_dir: Path, date: str) -> dict[str, dict[str, float]]:
     """确定对照 baseline 的 test_result。
 
-    优先取本 runner 自己的 baseline（同 seed/协议，受控对比），回退到历史
+    优先取本 runner 的 baseline_p4（同 seed/协议，受控对比），回退到历史
     output/0805-SHWX-data-expand-rfdetr-baseline 的结果。
 
     Args:
@@ -359,7 +419,7 @@ def _baseline_test_result(out_dir: Path, date: str) -> dict[str, dict[str, float
     Returns:
         解析出的 baseline 大类指标。
     """
-    own = out_dir.parent / f"{date}-SHWX-test_sga-baseline" / "test_result.txt"
+    own = EXPERIMENT_ROOT / "baseline_p4" / "test_result.txt"
     if own.exists():
         return _parse_test_result(own)
     legacy = PROJECT_ROOT / "output/0805-SHWX-data-expand-rfdetr-baseline" / "test_result.txt"
@@ -406,9 +466,11 @@ def write_report(v: Variant, out_dir: Path, date: str, seed: int, epochs: int) -
         f"| sga_gate_mode | `{v.gate_mode}` |",
         f"| sga_fusion_residual | {v.fusion_residual} |",
         f"| sga_residual_gamma | {v.residual_gamma} |",
-        f"| projector_scale | {PROJECTOR_SCALE} |",
-        f"| 数据 | SHWX（yolo） |",
-        f"| 起步 | COCO 预训练权重（SGA 分支随机初始化） |",
+        f"| sga_fusion_mode | `{v.fusion_mode}` |",
+        f"| sga_residual_alpha_init | {v.residual_alpha_init} |",
+        f"| projector_scale | {v.projector_scale} |",
+        "| 数据 | SHWX（yolo） |",
+        "| 起步 | COCO 预训练权重（SGA 分支随机初始化） |",
         f"| 训练轮数 / lr / lr_encoder / lr_drop | {epochs} / {LR} / {LR_ENCODER} / {LR_DROP} |",
         f"| batch × grad_accum / seed | {BATCH_SIZE} × {GRAD_ACCUM_STEPS} / {seed} |",
         f"| warmup / mosaic / EMA | {WARMUP_EPOCHS} / {MOSAIC_P} / {EMA_DECAY} |",
@@ -420,9 +482,11 @@ def write_report(v: Variant, out_dir: Path, date: str, seed: int, epochs: int) -
     lines += [sep, "## 二、验证集训练动态（metrics.csv）", sep, ""]
     lines += [
         f"- 最佳 val/mAP_50_95 : {val['best_reg']['value']:.4f}（epoch {val['best_reg']['epoch']}）"
-        if val["best_reg"]["value"] is not None else "- 最佳 val/mAP_50_95 : （无数据）",
+        if val["best_reg"]["value"] is not None
+        else "- 最佳 val/mAP_50_95 : （无数据）",
         f"- 最佳 val/ema_mAP_50_95 : {val['best_ema']['value']:.4f}（epoch {val['best_ema']['epoch']}）"
-        if val["best_ema"]["value"] is not None else "- 最佳 val/ema_mAP_50_95 : （无数据）",
+        if val["best_ema"]["value"] is not None
+        else "- 最佳 val/ema_mAP_50_95 : （无数据）",
     ]
     if val["last_recall"]:
         lines.append(
@@ -432,13 +496,22 @@ def write_report(v: Variant, out_dir: Path, date: str, seed: int, epochs: int) -
         )
     lines.append("")
 
+    # ── 二·五、融合特征统计（冒烟脚本 feature_stats.txt，若存在）─────────
+    feat_txt = out_dir / "feature_stats.txt"
+    if feat_txt.exists():
+        lines += [sep, "## 二·五、融合特征统计（feature_stats.txt）", sep, ""]
+        lines += feat_txt.read_text(encoding="utf-8").splitlines()
+        lines.append("")
+
     # ── 三、测试集结果（固定 conf=0.25，比赛口径）────────────────────
     own = _parse_test_result(out_dir / "test_result.txt")
     base = _baseline_test_result(out_dir, date)
     lines += [sep, "## 三、测试集结果对比（conf=0.25，比赛指标）", sep, ""]
     if own:
-        lines.append(f"{'类别':<10s} {'TP':>6s} {'FP':>6s} {'FN':>6s} "
-                     f"{'Recall':>8s} {'FDR':>7s} {'Prec':>7s} {'ΔRecall':>9s} {'ΔFP':>7s}")
+        lines.append(
+            f"{'类别':<10s} {'TP':>6s} {'FP':>6s} {'FN':>6s} "
+            f"{'Recall':>8s} {'FDR':>7s} {'Prec':>7s} {'ΔRecall':>9s} {'ΔFP':>7s}"
+        )
         lines.append("-" * 70)
         for gname in _GROUP_NAMES:
             data = own.get(gname)
@@ -453,7 +526,7 @@ def write_report(v: Variant, out_dir: Path, date: str, seed: int, epochs: int) -
                 f"{d_recall:>9s} {d_fp:>7s}"
             )
         lines.append("")
-        lines.append(f"对照 baseline: {base and base.get('all', {}).get('recall') and '本 runner baseline 或历史 0805 baseline'}")
+        lines.append(f"对照 baseline: {base and base.get('all', {}).get('recall') and '本 runner baseline_p4'}")
     else:
         lines.append("（未生成 test_result.txt，可能 --no-eval 跳过或评估失败）")
     lines.append("")

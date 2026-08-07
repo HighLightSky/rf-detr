@@ -148,12 +148,80 @@ class SemanticGuidingModule(nn.Module):
         return maps
 
 
+class _SemanticFilmBlock(nn.Module):
+    """语义条件残差调制块（文档 §3.2 公式）。
+
+    用 DINO 语义特征生成有界的通道-空间调制（乘法范围 [0.5,1.5]），对 SPM 高频细节做
+    有限幅度增强/减弱，再由可学习标量 α_s（初值 1e-3）通过残差路径接入 projector 语义基线，
+    保证训练初期新分支几乎不改变预训练 DINO 主路径（预训练主路径近似不变，新分支逐步介入）。
+
+        D = GN(Conv1x1(C_s))                       # C_s = SPM 输出（spm_ch → hidden_dim）
+        S = GN(Conv1x1(V_s))                       # V_s = projector 特征（hidden_dim）
+        G = 0.5 * tanh(Conv1x1(GELU(Conv3x3(S))))  # 通道-空间调制，乘法范围 [0.5,1.5]
+        U = D * (1 + G)
+        F = V_s + α_s * Conv3x3(GELU(U))           # 残差接入，α_s init=1e-3
+
+    归一化统一用 GroupNorm（文档 §3.2：避免小 batch 下 SPM 的 BN 统计与 DINO 特征分布失配）。
+    不启用 beta 加性偏移，避免语义分支直接生成与真实细节无关的伪纹理。
+    """
+
+    def __init__(self, spm_ch: int, hidden_dim: int, alpha_init: float = 1e-3, gn_groups: int = 32) -> None:
+        """初始化语义条件残差调制块。
+
+        Args:
+            spm_ch: SPM 特征通道数（P3=32 / P4=64）。
+            hidden_dim: 输出通道数（与 projector 语义特征对齐）。
+            alpha_init: 可学习残差系数 α_s 初值（默认 1e-3）。
+            gn_groups: GroupNorm 分组数（默认 32，hidden_dim=256 时每组 8 通道）。
+        """
+        super().__init__()
+        self.d_proj = nn.Sequential(
+            nn.Conv2d(spm_ch, hidden_dim, kernel_size=1, bias=False),
+            nn.GroupNorm(gn_groups, hidden_dim),
+        )
+        self.s_proj = nn.Sequential(
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False),
+            nn.GroupNorm(gn_groups, hidden_dim),
+        )
+        self.g_mod = nn.Sequential(
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1),
+            nn.Tanh(),
+        )
+        self.fuse = nn.Sequential(
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1, bias=False),
+            nn.GELU(),
+        )
+        self.alpha = nn.Parameter(torch.full((), float(alpha_init)))
+
+    def forward(self, v: Tensor, c: Tensor) -> Tensor:
+        """按 §3.2 公式计算语义条件残差融合。
+
+        Args:
+            v: projector 语义特征（B, hidden_dim, H, W）。
+            c: SPM 高频细节特征（B, spm_ch, H, W），与 v 同分辨率。
+
+        Returns:
+            融合后特征（B, hidden_dim, H, W）。
+        """
+        d = self.d_proj(c)
+        s = self.s_proj(v)
+        g = 0.5 * self.g_mod(s)  # 有界调制 [0.5, 1.5]
+        u = d * (1.0 + g)
+        return v + self.alpha * self.fuse(u)
+
+
 class SGAEncoder(nn.Module):
     """SGM 混合编码器分支：SPM + SGM 门控 + concat 融合（照 SKYDET SGA 配方）。
 
     输入 projector 输出的 feats、DINOv2 原始多深度特征 raw_feats 与输入图像 x，
     返回与 feats 完全同构的融合后特征列表（通道数 hidden_dim、分辨率不变），
     从而对 decoder / mask / 位置编码零改动。
+
+    融合方式（``fusion_mode``）：
+        - ``concat``：原版 SGM 门控 + concat+conv 融合（SKYDET 配方）；
+        - ``semantic_film``：语义条件残差调制（§3.2），无单通道 SGM 门控。
     """
 
     # P 级 ↔ SPM 输出 (c2, c3, c4) 的映射（patch16 下 stride 对齐：8/16/32）
@@ -166,6 +234,8 @@ class SGAEncoder(nn.Module):
     #   residual    ：det + det*M_att，保底更强（SPM 幅值放大至 1~2 倍）
     #   ones        ：det（忽略注意力，仅测 SPM 分支，用于消融）
     _GATE_MODES: frozenset[str] = frozenset({"product", "lower_bound", "residual", "ones"})
+    # 融合方式可选值
+    _FUSION_MODES: frozenset[str] = frozenset({"concat", "semantic_film"})
 
     def __init__(
         self,
@@ -176,6 +246,8 @@ class SGAEncoder(nn.Module):
         fusion_residual: bool = False,
         residual_gamma: float = 0.1,
         attn_bias: float = 0.0,
+        fusion_mode: str = "concat",
+        residual_alpha_init: float = 1e-3,
     ) -> None:
         """初始化 SGM 混合编码器分支。
 
@@ -188,6 +260,8 @@ class SGAEncoder(nn.Module):
             residual_gamma: 残差融合系数（默认 0.1，起步更稳）。
             attn_bias: SGM 注意力 logits 初值偏置（>0 使初始注意力≈全通，传给
                 SemanticGuidingModule；默认 0.0 = 原版从 sigmoid(0)=0.5 起步）。
+            fusion_mode: 融合方式（concat/semantic_film），见 ``_FUSION_MODES``。
+            residual_alpha_init: semantic_film 各 P 级可学习残差系数 α_s 的初值（默认 1e-3）。
         """
         super().__init__()
         unsupported = set(projector_scale) - set(self._LEVEL_MAP)
@@ -195,22 +269,32 @@ class SGAEncoder(nn.Module):
             raise ValueError(f"use_sga 暂只支持 P3/P4/P5 的融合，收到不支持的等级: {unsupported}")
         if gate_mode not in self._GATE_MODES:
             raise ValueError(f"不支持的门控模式: {gate_mode}，可选: {sorted(self._GATE_MODES)}")
+        if fusion_mode not in self._FUSION_MODES:
+            raise ValueError(f"不支持的融合方式: {fusion_mode}，可选: {sorted(self._FUSION_MODES)}")
         self.projector_scale = list(projector_scale)
         self.gate_mode = gate_mode
         self.fusion_residual = fusion_residual
         self.residual_gamma = residual_gamma
+        self.fusion_mode = fusion_mode
+        self.residual_alpha_init = residual_alpha_init
         self.spm = SpatialPriorModule(in_channels=3)
         self.sgm = SemanticGuidingModule(sem_channels=sem_channels, init_logit_bias=attn_bias)
-        # 每个待融合的 P 级：cat([feats[i](hidden_dim), 门控 SPM(spm_ch)]) → 融合块（1×1 → BN → GELU → 3×3 → BN）
+        # 每个待融合的 P 级，按融合方式构建对应模块：
+        #   concat      ：cat([feats[i](hidden_dim), 门控 SPM(spm_ch)]) → 融合块（1×1 → BN → GELU → 3×3 → BN）
+        #   semantic_film：§3.2 语义条件残差调制块（GN + 通道-空间调制 + 可学习残差 α_s）
         self.fusion_layers: nn.ModuleList = nn.ModuleList()
+        self.film_blocks: nn.ModuleList = nn.ModuleList()
         for lvl in self.projector_scale:
             spm_ch = self._SPM_CHANNELS[self._LEVEL_MAP[lvl]]
-            self.fusion_layers.append(
-                nn.Sequential(
-                    _ConvBnAct(hidden_dim + spm_ch, hidden_dim, kernel_size=1, act="gelu"),
-                    _ConvBnAct(hidden_dim, hidden_dim, kernel_size=3, act=None),
+            if fusion_mode == "semantic_film":
+                self.film_blocks.append(_SemanticFilmBlock(spm_ch, hidden_dim, alpha_init=residual_alpha_init))
+            else:
+                self.fusion_layers.append(
+                    nn.Sequential(
+                        _ConvBnAct(hidden_dim + spm_ch, hidden_dim, kernel_size=1, act="gelu"),
+                        _ConvBnAct(hidden_dim, hidden_dim, kernel_size=3, act=None),
+                    )
                 )
-            )
 
     @staticmethod
     def _apply_gate(det: Tensor, m: Tensor, gate_mode: str) -> Tensor:
@@ -243,23 +327,34 @@ class SGAEncoder(nn.Module):
     def forward(self, feats: list[Tensor], raw_feats: list[Tensor], x: Tensor) -> list[Tensor]:
         """feats: 各 P 级 projector 输出（语义）；raw_feats: DINOv2 多深度特征；x: 输入图像 (B,3,H,W)。
 
-        每级融合流程（对应 SKYDET SGA 公式 (2)(3)(4)）：
-            ① SGM 语义门控：det' = gate(det, M_att)（模式由 ``gate_mode`` 决定）
-            ② concat：cat([语义 feats[i], det'])
-            ③ 融合层：Conv1×1+BN+GELU+Conv3×3+BN → delta
-            ④ （可选）残差融合：fused = feats[i] + gamma*delta，保底原始语义特征
+        每级融合流程（由 ``fusion_mode`` 决定）：
+            concat（原版，SKYDET SGA 公式 (2)(3)(4)）：
+                ① SGM 语义门控：det' = gate(det, M_att)（模式由 ``gate_mode`` 决定）
+                ② concat：cat([语义 feats[i], det'])
+                ③ 融合层：Conv1×1+BN+GELU+Conv3×3+BN → delta
+                ④ （可选）残差融合：fused = feats[i] + gamma*delta，保底原始语义特征
+            semantic_film（§3.2）：
+                无单通道 SGM；对每个 P 级用 _SemanticFilmBlock 做有界语义调制 + 残差接入。
 
         语义来源用 feats[i]（projector 输出，已处目标尺度、复用预训练权重），
-        替代 SKYDET 中"把 raw ViT 特征逐尺度插值对齐"的步骤——RF-DETR 特有的合理简化；
-        门控源仍为 raw_feats[-1]（最深 DINOv2 特征）。
+        替代 SKYDET 中"把 raw ViT 特征逐尺度插值对齐"的步骤——RF-DETR 特有的合理简化。
         """
-        assert len(feats) == len(self.projector_scale) == len(self.fusion_layers)
+        assert len(feats) == len(self.projector_scale)
         spm_outs = self.spm(x)  # (c2, c3, c4)
+        out: list[Tensor] = []
+
+        if self.fusion_mode == "semantic_film":
+            # 无单通道 SGM：DINO 语义通过各 film block 的 S_s 路径做有界调制，SPM 细节不被硬门控
+            for i, lvl in enumerate(self.projector_scale):
+                det = spm_outs[self._LEVEL_MAP[lvl]]
+                out.append(self.film_blocks[i](feats[i], det))
+            return out
+
+        # ── concat 模式（原版行为，含 SGM 门控）────────────────────────────
         # 为每个待融合的 P 级生成对应尺度的注意力图
         target_shapes = [spm_outs[self._LEVEL_MAP[lvl]].shape for lvl in self.projector_scale]
         # 所有门控模式都调用 SGM，保证注意力 hook（analyze_sga.py）仍能收集注意力图
         attn_maps = self.sgm(raw_feats[-1], target_shapes)
-        out: list[Tensor] = []
         for i, lvl in enumerate(self.projector_scale):
             det = spm_outs[self._LEVEL_MAP[lvl]]
             gated_det = self._apply_gate(det, attn_maps[i], self.gate_mode)  # ① 语义门控（变体）

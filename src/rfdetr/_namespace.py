@@ -63,6 +63,8 @@ _MC_NAMESPACE_FIELDS = {
     "sga_fusion_residual",
     "sga_residual_gamma",
     "sga_attn_bias",
+    "sga_fusion_mode",
+    "sga_residual_alpha_init",
     "num_keypoints_per_class",
     "num_decoder_registers",
     "postprocess_trace_alpha",

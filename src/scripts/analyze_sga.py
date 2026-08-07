@@ -273,9 +273,9 @@ def analyze_attention(
     vis_done = 0
 
     for stem, att in attn_by_image.items():
-        att_up = tnf.interpolate(
-            att[None], size=(RESOLUTION, RESOLUTION), mode="bilinear", align_corners=False
-        )[0, 0]  # [H,W]，与模型分辨率对齐，便于按 GT 框取样
+        att_up = tnf.interpolate(att[None], size=(RESOLUTION, RESOLUTION), mode="bilinear", align_corners=False)[
+            0, 0
+        ]  # [H,W]，与模型分辨率对齐，便于按 GT 框取样
         w_orig, h_orig = image_size_map.get(stem, (RESOLUTION, RESOLUTION))
 
         mask = torch.zeros((RESOLUTION, RESOLUTION))
@@ -343,19 +343,22 @@ def analyze_attention(
         f"样本数(图) : {len(attn_by_image)}",
         f"全局 mean  : {mean:.4f}    std: {std:.4f}",
         f"percentile : p05={p05:.4f}  p50={p50:.4f}  p95={p95:.4f}",
-        f"取值分布   : [0.4,0.6] 占比 {frac_mid*100:.1f}% | <0.3 占比 {frac_lo*100:.1f}% | >0.7 占比 {frac_hi*100:.1f}%",
+        f"取值分布   : [0.4,0.6] 占比 {frac_mid * 100:.1f}% | "
+        f"<0.3 占比 {frac_lo * 100:.1f}% | >0.7 占比 {frac_hi * 100:.1f}%",
         f"目标框内   : {fg_mean:.4f}   (fg_cnt={fg_cnt:.1f} px @640)",
         f"背景       : {bg_mean:.4f}   (bg_cnt={bg_cnt:.1f} px @640)",
         f"框内-背景  : {fg_mean - bg_mean:+.4f}   （>0 说明注意力能区分目标，≈0 说明门控失效）",
         f"有效门控(模式={gate_mode}) 框内均值: {eff_fg_mean:.4f}   背景均值: {eff_bg_mean:.4f}",
-        f"  └ 下界门控应框内≥0.5；残差门控应框内≥1.0；若框内有效门控仍≈0 说明修复未生效",
+        "  └ 下界门控应框内≥0.5；残差门控应框内≥1.0；若框内有效门控仍≈0 说明修复未生效",
         f"热力图已存 : {vis_dir}",
     ]
     print("\n".join(lines), flush=True)
     return lines
 
 
-def load_exp_config(ckpt_path: Path) -> tuple[bool, bool, list[str], str, bool, float, float]:
+def load_exp_config(
+    ckpt_path: Path,
+) -> tuple[bool, bool, list[str], str, bool, float, float, str, float]:
     """从 checkpoint 同目录的 training_config.json 读取模型结构配置。
 
     Args:
@@ -363,8 +366,8 @@ def load_exp_config(ckpt_path: Path) -> tuple[bool, bool, list[str], str, bool, 
 
     Returns:
         ``(use_sga, use_cfe, projector_scale, sga_gate_mode, sga_fusion_residual,
-        sga_residual_gamma, sga_attn_bias)``；配置文件缺失时回退到 SGA 原版
-        ``(True, False, ["P4"], "product", False, 0.1, 0.0)``。
+        sga_residual_gamma, sga_attn_bias, sga_fusion_mode, sga_residual_alpha_init)``；
+        配置文件缺失时回退到 SGA 原版 ``(True, False, ["P4"], "product", False, 0.1, 0.0, "concat", 1e-3)``。
     """
     cfg_path = ckpt_path.parent / "training_config.json"
     if cfg_path.exists():
@@ -379,8 +382,10 @@ def load_exp_config(ckpt_path: Path) -> tuple[bool, bool, list[str], str, bool, 
             bool(model_config.get("sga_fusion_residual", False)),
             float(model_config.get("sga_residual_gamma", 0.1)),
             float(model_config.get("sga_attn_bias", 0.0)),
+            model_config.get("sga_fusion_mode", "concat"),
+            float(model_config.get("sga_residual_alpha_init", 1e-3)),
         )
-    return (True, False, ["P4"], "product", False, 0.1, 0.0)
+    return (True, False, ["P4"], "product", False, 0.1, 0.0, "concat", 1e-3)
 
 
 def main() -> None:
@@ -427,7 +432,17 @@ def main() -> None:
         ckpt = Path(args.checkpoint) if args.checkpoint else Path(args.exp_dir) / "checkpoint_best_total.pth"
         if not ckpt.exists():
             raise FileNotFoundError(f"checkpoint 不存在: {ckpt}")
-        use_sga, use_cfe, proj_scale, gate_mode, fusion_residual, residual_gamma, attn_bias = load_exp_config(ckpt)
+        (
+            use_sga,
+            use_cfe,
+            proj_scale,
+            gate_mode,
+            fusion_residual,
+            residual_gamma,
+            attn_bias,
+            fusion_mode,
+            residual_alpha_init,
+        ) = load_exp_config(ckpt)
         # 命令行显式指定的门控模式优先，便于对旧 checkpoint 套用不同门控做"零训练"推演
         if args.gate_mode is not None:
             gate_mode = args.gate_mode
@@ -436,7 +451,7 @@ def main() -> None:
         print(
             f"[i] 加载 {ckpt} (use_sga={use_sga}, use_cfe={use_cfe}, projector_scale={proj_scale}, "
             f"gate_mode={gate_mode}, fusion_residual={fusion_residual}, residual_gamma={residual_gamma}, "
-            f"attn_bias={attn_bias})",
+            f"attn_bias={attn_bias}, fusion_mode={fusion_mode})",
             flush=True,
         )
         model = test_mod.RFDETRMedium.from_checkpoint(
@@ -448,6 +463,8 @@ def main() -> None:
             sga_fusion_residual=fusion_residual,
             sga_residual_gamma=residual_gamma,
             sga_attn_bias=attn_bias,
+            sga_fusion_mode=fusion_mode,
+            sga_residual_alpha_init=residual_alpha_init,
         )
         _, attn = run_inference(model, test_image_paths, device, LOW_CONF, collect_attn=True)
         del model
@@ -539,10 +556,7 @@ def main() -> None:
                 continue
             row = next(r for r in rows if abs(r["conf"] - th) < 1e-9)
             a = row["all"]
-            lines.append(
-                f"{name:>8} all: TP={a.tp:<5} FP={a.fp:<5} FN={a.fn:<5} "
-                f"R={a.recall:.4f} P={a.precision:.4f}"
-            )
+            lines.append(f"{name:>8} all: TP={a.tp:<5} FP={a.fp:<5} FN={a.fn:<5} R={a.recall:.4f} P={a.precision:.4f}")
 
     print("\n".join(lines), flush=True)
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -552,7 +566,17 @@ def main() -> None:
     # ── 注意力统计 ──────────────────────────────────────────────────────
     if not args.no_attn and attn_by_image:
         # 默认模式针对旧 SGA checkpoint，门控模式从其训练配置读取（旧实验无 sga_* 时回退 product）
-        _use_sga, _use_cfe, _proj, _gate, _fusion, _gamma, _attn_bias = load_exp_config(SGA_CKPT)
+        (
+            _use_sga,
+            _use_cfe,
+            _proj,
+            _gate,
+            _fusion,
+            _gamma,
+            _attn_bias,
+            _fusion_mode,
+            _alpha_init,
+        ) = load_exp_config(SGA_CKPT)
         attn_lines = analyze_attention(
             attn_by_image,
             gt_records,
