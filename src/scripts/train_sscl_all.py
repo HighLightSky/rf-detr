@@ -100,6 +100,11 @@ SSCL_PROTOTYPE_ENABLED = True
 SSCL_PROTOTYPE_MOMENTUM = 0.99  # 原型 EMA 更新系数（0.9 ~ 0.999）
 SSCL_PROTOTYPE_MIN_SAMPLES = 1  # 单批同类样本低于该阈值则跳过该类原型更新
 
+# --- 投影头（把特征投影到低维对比空间再施加对比损失，缓解对共享特征的冲击）---
+SSCL_PROJECTION_ENABLED = True
+SSCL_PROJECTION_DIM = 128  # 投影空间维度（低于 decoder hidden dim）
+SSCL_PROTOTYPE_INSTANCE_POS = True  # 原型模式加入同类别实例正样本，锚定随机初始化投影头的冷启动（可关作消融）
+
 # --- 基类蒸馏：本实验关闭（从 COCO 起步没有合理的 SHWX teacher）---
 SSCL_DISTILL_ENABLED = False
 
@@ -117,6 +122,10 @@ def main() -> None:
     print(f"SSCL: λ={SSCL_LAMBDA}, τ={SSCL_TAU}, ρ={SSCL_RHO}, anchor=全部类别")
     print(f"SSCL 起始 epoch: {SSCL_START_EPOCH}（之前 loss_sscl 权重为 0） | 冻结策略: {SSCL_FREEZE_STRATEGY}")
     print(f"SSCL 语义矩阵: {semantic_matrix_path}")
+    print(
+        f"SSCL 投影头: {'启用' if SSCL_PROJECTION_ENABLED else '关闭'} "
+        f"(dim={SSCL_PROJECTION_DIM}, 实例正样本={SSCL_PROTOTYPE_INSTANCE_POS})"
+    )
 
     # --- 构建模型，使用默认发布权重作为预训练起点 ---
     model = RFDETRMedium(
@@ -168,6 +177,9 @@ def main() -> None:
         sscl_prototype_enabled=SSCL_PROTOTYPE_ENABLED,
         sscl_prototype_momentum=SSCL_PROTOTYPE_MOMENTUM,
         sscl_prototype_min_samples=SSCL_PROTOTYPE_MIN_SAMPLES,
+        sscl_projection_enabled=SSCL_PROJECTION_ENABLED,
+        sscl_projection_dim=SSCL_PROJECTION_DIM,
+        sscl_prototype_instance_pos=SSCL_PROTOTYPE_INSTANCE_POS,
     )
 
     print(f"\n训练完成！输出目录: {output_dir}")

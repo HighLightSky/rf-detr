@@ -22,6 +22,10 @@ SSCL 在 RF-DETR decoder 最后一层输出的 matched foreground query features
 其中 P(i)/N(i) 分别为与 anchor i 同类别/异类别的样本集合，
 w_ij = clamp(1 + rho * S[y_i, y_j], 1, omega_max) 为语义权重，
 S 为 CLIP 类别语义相似度矩阵，rho 控制放大强度，omega_max 为权重上限。
+
+投影头（可选）：当构造时传入 ``projection_dim``，输入特征先经
+ProjectionHead 映射到低维对比空间再计算损失，原型库同步建立在投影空间，
+缓解对比压力对共享特征（同时喂给 class_embed 与 bbox_embed）的直接冲击。
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import torch
 import torch.nn.functional as F  # noqa: N812 -- 项目约定别名（见 AGENTS.md）
 from torch import Tensor, nn
 
+from rfdetr.sscl.projection import ProjectionHead
 from rfdetr.utilities.logger import get_logger
 
 logger = get_logger()
@@ -62,6 +67,14 @@ class SSCLLoss(nn.Module):
             再更新原型，保证各 rank 原型一致（单卡无需，默认关闭）。
         hidden_dim: 原型特征维度。为 ``None`` 时首次更新惰性确定维度
             （生产环境建议传入，见 ``PrototypeBank``）。
+        projection_dim: 投影头输出维度（对比空间维度）。为 ``None`` 时不启用
+            投影头（保持原行为）；非 ``None`` 时把特征先投影到该低维空间再
+            计算损失，原型库维度也改为 ``projection_dim``，且要求 ``hidden_dim``
+            非 None（作为投影头输入维度）。
+        prototype_instance_pos: 原型模式下是否加入同类别实例正样本。开启时
+            正样本 = 本类原型 ∪ 同类别实例（对齐论文 Eq.9），用真实同类实例
+            锚定冷启动（投影头随机初始化时给投影学习提供稳定的正向引力），
+            负样本仍为全部有效原型（语义加权）。默认关闭保持原行为。
     """
 
     def __init__(
@@ -78,6 +91,8 @@ class SSCLLoss(nn.Module):
         prototype_min_samples: int = 1,
         prototype_sync_ddp: bool = False,
         hidden_dim: int | None = None,
+        projection_dim: int | None = None,
+        prototype_instance_pos: bool = False,
     ) -> None:
         super().__init__()
         # 注册为非可训练 buffer，随模型迁移设备并在 checkpoint 中保存
@@ -88,26 +103,50 @@ class SSCLLoss(nn.Module):
         self.anchor_classes = anchor_classes
         self.confusing_classes = confusing_classes
         self.class_names = class_names
+        # 投影头：非 None 时启用，把特征映射到低维对比空间再算损失。
+        # 需显式传入 hidden_dim 作为投影头输入维度（生产路径恒传，见 module_model）。
+        self.projection_dim = projection_dim
+        if projection_dim is not None:
+            if hidden_dim is None:
+                raise ValueError("启用投影头（projection_dim）时必须同时传入 hidden_dim 作为投影头输入维度。")
+            self.projection_head = ProjectionHead(hidden_dim, projection_dim)
         # 原型模式：构造期决定是否创建类别原型库（不可运行期切换）
         self.prototype_mode = prototype_mode
+        # 实例正样本开关：开启时原型模式正样本 = 本类原型 ∪ 同类别实例
+        self.prototype_instance_pos = prototype_instance_pos
         if prototype_mode:
             # 延迟导入，避免与 prototype_bank 模块产生循环导入
             from rfdetr.sscl.prototype_bank import PrototypeBank
 
             self.prototype_bank = PrototypeBank(
                 num_classes=semantic_matrix.shape[0],
-                hidden_dim=hidden_dim,
+                hidden_dim=projection_dim if projection_dim is not None else hidden_dim,
                 momentum=prototype_momentum,
                 min_samples=prototype_min_samples,
                 sync_distributed=prototype_sync_ddp,
             )
+
+    def _project(self, features: Tensor) -> Tensor:
+        """把特征投影到对比空间；未启用投影头时恒等返回。
+
+        Args:
+            features: 输入特征 ``[*, in_dim]``（启用投影头时为 decoder hidden
+                dim，未启用时为任意维度）。
+
+        Returns:
+            投影后的特征 ``[*, proj_dim]``；未启用投影头时返回原特征。
+        """
+        if self.projection_dim is None:
+            return features
+        return self.projection_head(features)
 
     def forward(self, features: Tensor, labels: Tensor) -> Tensor:
         """计算 SSCL 损失。
 
         Args:
             features: matched foreground query features ``[N_fg, hidden_dim]``，
-                即 decoder 最后一层输出中与 GT 匹配的 query 特征。
+                即 decoder 最后一层输出中与 GT 匹配的 query 特征。启用投影头时
+                内部会先投影到对比空间再计算损失。
             labels: 每个 query 匹配到的 GT 类别标签 ``[N_fg]``。
 
         Returns:
@@ -122,11 +161,14 @@ class SSCLLoss(nn.Module):
             raise ValueError(f"features 与 labels 数量不一致: {num_fg} vs {labels.shape[0]}")
         # 原型模式 dispatch 必须在实例模式的 num_fg < 2 零损失判断之前：
         # 原型模式下"每类仅 1 个样本"恰恰是要规避 batch 影响的核心场景，
-        # 不能被提前拦截为零损失。
+        # 不能被提前拦截为零损失。原型模式在 _prototype_forward 内部自行投影。
         if self.prototype_mode:
             return self._prototype_forward(features, labels)
+        # 实例模式：先投影到对比空间（未启用投影头时 _project 恒等）
+        features = self._project(features)
         if num_fg < 2:
-            # 少于 2 个前景样本时无法构成正负样本对，返回零损失
+            # 少于 2 个前景样本时无法构成正负样本对，返回零损失。
+            # 用投影后的特征保持计算图连接（利于 DDP 各参数收到梯度，含投影头）
             return features.sum() * 0.0
 
         # 归一化特征并计算余弦相似度（带温度）
@@ -207,6 +249,8 @@ class SSCLLoss(nn.Module):
         正样本为 anchor 与本类原型的余弦相似度（本类原型有效则恒存在），
         负样本为 anchor 与全部有效类别原型的余弦相似度（按语义权重加权），
         从而每个 anchor 都有稳定的正负锚点，彻底摆脱 batch 内同类样本的构成。
+        启用投影头时特征先投影到对比空间，原型库也建立在投影空间；
+        启用实例正样本时正样本 = 本类原型 ∪ 同类别实例（对齐论文 Eq.9）。
 
         Args:
             features: matched foreground query features ``[N_fg, hidden_dim]``。
@@ -215,6 +259,9 @@ class SSCLLoss(nn.Module):
         Returns:
             标量 SSCL 损失。无有效原型或无有效 anchor 时返回零损失张量。
         """
+        # 先投影到对比空间（未启用投影头时 _project 恒等），使正/负样本与
+        # 原型同处一个几何空间；零损失返回沿用投影后的特征以保持图连接
+        features = self._project(features)
         num_fg = features.shape[0]
         if num_fg == 0:
             return features.sum() * 0.0
@@ -274,11 +321,29 @@ class SSCLLoss(nn.Module):
             sim * weight,
             torch.tensor(neg_inf, device=sim.device),
         )
+        # 本类原型相似度（正样本之一）
         pos_logits = sim.gather(-1, labels.unsqueeze(-1)).squeeze(-1)  # [N]
 
-        log_denominator = torch.logsumexp(denom_logits, dim=-1)  # [N]
-        # 每个 anchor 的损失 = log(denom) - logit(本类原型) = log(1 + Σ_neg/pos) >= 0
-        loss_per_anchor = log_denominator - pos_logits  # [N]
+        if self.prototype_instance_pos:
+            # 同类别实例正样本：正样本 = 本类原型 ∪ 同类别实例（对齐论文 Eq.9）。
+            # 真实同类实例从第一步提供"ground-truth"引力，锚定随机初始化投影头
+            # 的冷启动，负样本仍为全部有效原型（语义加权）。
+            sim_inst = u @ u.T / self.tau  # [N, N]
+            self_identity = torch.eye(sim_inst.shape[0], dtype=torch.bool, device=sim_inst.device)
+            same_class = (labels.unsqueeze(0) == labels.unsqueeze(1)) & ~self_identity  # [N, N]
+            pos_inst = sim_inst.masked_fill(~same_class, neg_inf)  # [N, N]
+            # 分子 = logsumexp(本类原型, 同类别实例)；分母 = 原型项 + 实例正样本项。
+            # 所有正项都在分母中（本类原型权重 1、实例正样本权重 1），保证 loss >= 0。
+            num_logits = torch.cat([pos_logits.unsqueeze(-1), pos_inst], dim=-1)  # [N, 1+N]
+            log_numerator = torch.logsumexp(num_logits, dim=-1)  # [N]
+            denom_logits = torch.cat([denom_logits, pos_inst], dim=-1)  # [N, C+N]
+            log_denominator = torch.logsumexp(denom_logits, dim=-1)  # [N]
+        else:
+            log_numerator = pos_logits  # [N]
+            log_denominator = torch.logsumexp(denom_logits, dim=-1)  # [N]
+
+        # 每个 anchor 的损失 = log(denom) - log(正样本) >= 0
+        loss_per_anchor = log_denominator - log_numerator  # [N]
 
         loss = loss_per_anchor[anchor_mask].mean()
         return loss
@@ -286,10 +351,13 @@ class SSCLLoss(nn.Module):
     def update_prototypes(self, features: Tensor, labels: Tensor) -> None:
         """更新类别原型库（仅原型模式生效，实例模式为 no-op）。
 
+        启用投影头时先把特征投影到对比空间再更新，保证原型库与对比损失
+        处于同一几何空间；未启用时恒等。
+
         Args:
             features: matched foreground query features ``[N_fg, hidden_dim]``
                 （内部会 ``detach``，不参与反向传播）。
             labels: 每个 query 匹配到的 GT 类别标签 ``[N_fg]``。
         """
         if self.prototype_mode:
-            self.prototype_bank.update(features, labels)
+            self.prototype_bank.update(self._project(features), labels)

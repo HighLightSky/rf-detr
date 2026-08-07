@@ -16,6 +16,7 @@ from torch import nn
 from rfdetr.config import RFDETRBaseConfig, TrainConfig
 from rfdetr.models.weights import apply_lora, load_pretrain_weights
 from rfdetr.training.module_model import RFDETRModelModule
+from rfdetr.training.param_groups import get_projection_head_param_dict
 from rfdetr.utilities.tensors import NestedTensor
 
 # ---------------------------------------------------------------------------
@@ -2153,6 +2154,36 @@ class TestConfigureOptimizers:
         lr_at_decay_end = lr_lambda(expected_total_steps)
         assert lr_at_decay_end == pytest.approx(lr_min_factor, abs=1e-6)
 
+    @patch("rfdetr.training.module_model.get_param_dict")
+    def test_optimizer_includes_projection_head_params(self, mock_get_param_dict, tmp_path):
+        """启用投影头时，投影头参数作为独立参数组进入优化器。
+
+        投影头挂在 sscl_loss 上而非 LWDETR 内部，get_param_dict 收集不到，
+        由 get_projection_head_param_dict 手动追加——本测试验证该集成链路。
+        """
+        module, param_dicts = self._setup_module(tmp_path)
+        mock_get_param_dict.return_value = param_dicts
+        head = nn.Linear(8, 4)
+        # 绕过 nn.Module 属性检查，直接挂一个带投影头的假 sscl_loss
+        object.__setattr__(module, "sscl_loss", SimpleNamespace(projection_head=head))
+
+        optimizer = module.configure_optimizers()["optimizer"]
+        head_param_ids = {id(p) for p in head.parameters()}
+        optimizer_param_ids = {id(p) for group in optimizer.param_groups for p in group["params"]}
+        # 投影头参数作为独立参数组进入优化器（关键集成点）
+        assert head_param_ids.issubset(optimizer_param_ids)
+        # 投影头参数组与主参数组并存
+        assert len(optimizer.param_groups) == 2
+
+    @patch("rfdetr.training.module_model.get_param_dict")
+    def test_optimizer_without_projection_head_unchanged(self, mock_get_param_dict, tmp_path):
+        """未启用投影头时参数组数量不变（不新增空参数组）。"""
+        module, param_dicts = self._setup_module(tmp_path)
+        mock_get_param_dict.return_value = param_dicts
+        # 不挂 sscl_loss / 投影头 → getattr 返回 None → 不追加
+        optimizer = module.configure_optimizers()["optimizer"]
+        assert len(optimizer.param_groups) == 1
+
 
 class TestFusedOptimizerResumeStateNormalization:
     """Tests for resume-time fused AdamW state normalization."""
@@ -2604,3 +2635,39 @@ class TestManualOptLRSchedulerStepping:
             module.on_validation_epoch_end()
 
         scheduler.step.assert_not_called()
+
+
+class TestProjectionHeadParamDict:
+    """get_projection_head_param_dict 辅助函数的单元测试。
+
+    投影头挂在 sscl_loss 子模块上而非 LWDETR 内部，get_param_dict 收集不到，
+    该函数负责单独收集为独立参数组。验证各边界场景返回正确。
+    """
+
+    def test_none_returns_empty(self) -> None:
+        """sscl_loss 为 None（未启用 SSCL）时返回空列表。"""
+        assert get_projection_head_param_dict(None, lr=1e-4) == []
+
+    def test_no_projection_head_returns_empty(self) -> None:
+        """sscl_loss 无 projection_head 子模块（未启用投影头）时返回空列表。"""
+        sscl_loss = SimpleNamespace()  # 无 projection_head 属性
+        assert get_projection_head_param_dict(sscl_loss, lr=1e-4) == []
+
+    def test_with_projection_head_returns_one_group(self) -> None:
+        """启用投影头时返回 1 个参数组，lr 正确、params 为投影头可训练参数。"""
+        head = nn.Linear(8, 4)
+        sscl_loss = SimpleNamespace(projection_head=head)
+        result = get_projection_head_param_dict(sscl_loss, lr=3e-5)
+        assert len(result) == 1
+        assert result[0]["lr"] == pytest.approx(3e-5)
+        head_params = list(head.parameters())
+        assert all(any(p is hp for hp in head_params) for p in result[0]["params"])
+        assert len(result[0]["params"]) == len(head_params)
+
+    def test_frozen_head_returns_empty(self) -> None:
+        """投影头参数全部冻结时返回空列表。"""
+        head = nn.Linear(8, 4)
+        for param in head.parameters():
+            param.requires_grad = False
+        sscl_loss = SimpleNamespace(projection_head=head)
+        assert get_projection_head_param_dict(sscl_loss, lr=1e-4) == []

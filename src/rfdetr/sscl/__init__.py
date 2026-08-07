@@ -24,6 +24,7 @@ features 上的对比学习，缓解遥感数据集中舰船细粒度类别的�
 from __future__ import annotations
 
 from rfdetr.sscl.distill_loss import BaseClassDistillLoss
+from rfdetr.sscl.projection import ProjectionHead
 from rfdetr.sscl.prototype_bank import PrototypeBank
 from rfdetr.sscl.semantic_matrix import (
     build_semantic_similarity_matrix,
@@ -38,6 +39,7 @@ __all__ = [
     "SSCLLoss",
     "BaseClassDistillLoss",
     "PrototypeBank",
+    "ProjectionHead",
     "build_semantic_similarity_matrix",
     "save_semantic_matrix",
     "load_semantic_matrix",

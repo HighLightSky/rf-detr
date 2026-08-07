@@ -79,3 +79,30 @@ def get_param_dict(args: Any, model_without_ddp: nn.Module) -> list[dict[str, An
     final_param_dicts = other_param_dicts + backbone_param_lr_pairs + decoder_param_lr_pairs
 
     return final_param_dicts
+
+
+def get_projection_head_param_dict(sscl_loss: nn.Module | None, lr: float) -> list[dict[str, Any]]:
+    """收集 SSCL 投影头可训练参数为独立参数组。
+
+    投影头挂在 ``sscl_loss`` 子模块上而非 model（LWDETR）内部，
+    ``get_param_dict`` 只扫描 model 的 ``named_parameters()``，因此这里单独
+    收集。未启用投影头、无投影头子模块或参数已冻结时返回空列表。
+
+    Args:
+        sscl_loss: SSCL 损失模块（可选含 ``projection_head`` 子模块），
+            可为 ``None``（未启用 SSCL 时）。
+        lr: 投影头参数组的学习率。
+
+    Returns:
+        投影头参数组列表（``[{"params": [...], "lr": lr}]``）；无可训练投影头
+        参数时为空列表。
+    """
+    if sscl_loss is None:
+        return []
+    head = getattr(sscl_loss, "projection_head", None)
+    if head is None:
+        return []
+    params = [p for p in head.parameters() if p.requires_grad]
+    if not params:
+        return []
+    return [{"params": params, "lr": lr}]

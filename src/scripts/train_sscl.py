@@ -31,21 +31,21 @@ from rfdetr.variants import RFDETRMedium
 
 # --- 模型 ---
 MODEL = "medium"
-NUM_CLASSES = 20
+NUM_CLASSES = 25
 # 基线 checkpoint（作为微调起点，同时是蒸馏的 teacher 权重来源）
-_BASE_CHECKPOINT = Path("output/0726-DIOR-rfdetr_medium/checkpoint_best_total.pth")
+_BASE_CHECKPOINT = Path("output/0805-SHWX-data-expand-rfdetr-baseline/checkpoint_best_total.pth")
 
 # --- 数据集 ---
-# DATASET_DIR = "/home/liu/datasets/SHWX-dataset-dict"
-DATASET_DIR = "/home/liu/datasets/DIOR-rfdetr"
+DATASET_DIR = "/home/liu/datasets/SHWX-dataset-dict"
+# DATASET_DIR = "/home/liu/datasets/DIOR-rfdetr"
 # DIOR 是 Roboflow 布局（train/valid/test 各含 _annotations.coco.json），
 # 必须用 "roboflow"；"coco" 走标准 COCO 布局（annotations/instances_*2017.json）。
-DATASET_FILE = "roboflow"
+DATASET_FILE = "yolo"
 
 # --- 训练超参数（阶段 1：SSCL Only，保守微调）---
 EPOCHS = 6
-BATCH_SIZE = 8  # 每 GPU batch size
-GRAD_ACCUM_STEPS = 4  # 有效 batch = 8 × 4 = 32，保证 batch 内有足够同类正样本
+BATCH_SIZE = 32  # 每 GPU batch size
+GRAD_ACCUM_STEPS = 2  # 有效 batch = 8 × 4 = 32，保证 batch 内有足够同类正样本
 NUM_WORKERS = 12
 LR = 1e-5  # 低学习率，保护已有权重（解码器部分）
 LR_ENCODER = 1e-5  # backbone 已冻结，此处仅为占位
@@ -63,7 +63,7 @@ DEVICES = 1
 NUM_NODES = 1
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0804-DIOR-rfdetr_medium_SSCL"
+OUTPUT_DIR = "output/0807-SHWX-SSCL-Proj-原型+实例正样本"
 TENSORBOARD = True
 WANDB = False
 
@@ -80,17 +80,17 @@ RESUME = ""
 # SSCL 配置
 # ============================================================================
 SSCL_ENABLED = True
-# SSCL_SEMANTIC_MATRIX_PATH = "data/semantic_matrix_shwx.pt"
-SSCL_SEMANTIC_MATRIX_PATH = "data/semantic_matrix_dior.pt"
+SSCL_SEMANTIC_MATRIX_PATH = "data/semantic_matrix_shwx.pt"  # SHWX 25 类矩阵
+# SSCL_SEMANTIC_MATRIX_PATH = "data/semantic_matrix_dior.pt"  # DIOR 20 类矩阵（20 类实验时切换）
 SSCL_MATRIX_NORMALIZE = "minmax"  # 语义矩阵后处理: "minmax"（推荐）/"softmax"/"none"
 SSCL_LAMBDA = 0.02  # SSCL 损失权重 λ（0.01 ~ 0.05）
 SSCL_TAU = 0.1  # 对比学习温度 τ
 SSCL_RHO = 0.3  # 语义先验放大系数 ρ（0.2 ~ 0.5）
 SSCL_OMEGA_MAX = 2.0  # 负样本语义权重上限
-# SSCL_ANCHOR_CLASSES = [0, 1, 2, 3]  # 参与计算sscl损失的类别
-# SSCL_CONFUSING_CLASSES = [0, 1, 2, 3]  # 参与充当比较类别的类别
-SSCL_ANCHOR_CLASSES = None
-SSCL_CONFUSING_CLASSES = None
+SSCL_ANCHOR_CLASSES = [0, 1, 2, 3]  # 参与计算sscl损失的类别
+SSCL_CONFUSING_CLASSES = [0, 1, 2, 3]  # 参与充当比较类别的类别
+# SSCL_ANCHOR_CLASSES = None
+# SSCL_CONFUSING_CLASSES = None
 SSCL_START_EPOCH = 0  # 微调场景从第 0 个 epoch 即启用 SSCL（config 默认 30，此处显式覆盖）
 SSCL_FREEZE_STRATEGY = "conservative"  # 在已收敛 checkpoint 上微调，采用保守冻结策略
 
@@ -98,6 +98,11 @@ SSCL_FREEZE_STRATEGY = "conservative"  # 在已收敛 checkpoint 上微调，采
 SSCL_PROTOTYPE_ENABLED = True
 SSCL_PROTOTYPE_MOMENTUM = 0.99  # 原型 EMA 更新系数（0.9 ~ 0.999）
 SSCL_PROTOTYPE_MIN_SAMPLES = 1  # 单批同类样本低于该阈值则跳过该类原型更新
+
+# --- 投影头（把特征投影到低维对比空间再施加对比损失，缓解对共享特征的冲击）---
+SSCL_PROJECTION_ENABLED = True
+SSCL_PROJECTION_DIM = 128  # 投影空间维度（低于 decoder hidden dim）
+SSCL_PROTOTYPE_INSTANCE_POS = True  # 原型模式加入同类别实例正样本，锚定随机初始化投影头的冷启动（可关作消融）
 
 # --- 基类蒸馏 ---
 SSCL_DISTILL_ENABLED = False
@@ -120,6 +125,10 @@ def main() -> None:
     print(f"Batch: {BATCH_SIZE} x {GRAD_ACCUM_STEPS} (有效={BATCH_SIZE * GRAD_ACCUM_STEPS}) | Epochs: {EPOCHS}")
     print(f"SSCL: λ={SSCL_LAMBDA}, τ={SSCL_TAU}, ρ={SSCL_RHO}, anchor={SSCL_ANCHOR_CLASSES}")
     print(f"SSCL 语义矩阵: {semantic_matrix_path}")
+    print(
+        f"SSCL 投影头: {'启用' if SSCL_PROJECTION_ENABLED else '关闭'} "
+        f"(dim={SSCL_PROJECTION_DIM}, 实例正样本={SSCL_PROTOTYPE_INSTANCE_POS})"
+    )
     print(f"蒸馏: {'启用' if SSCL_DISTILL_ENABLED else '关闭（阶段 2 启用）'}")
 
     # --- 构建模型，加载基线 checkpoint 作为微调起点 ---
@@ -178,6 +187,9 @@ def main() -> None:
         sscl_prototype_enabled=SSCL_PROTOTYPE_ENABLED,
         sscl_prototype_momentum=SSCL_PROTOTYPE_MOMENTUM,
         sscl_prototype_min_samples=SSCL_PROTOTYPE_MIN_SAMPLES,
+        sscl_projection_enabled=SSCL_PROJECTION_ENABLED,
+        sscl_projection_dim=SSCL_PROJECTION_DIM,
+        sscl_prototype_instance_pos=SSCL_PROTOTYPE_INSTANCE_POS,
     )
 
     print(f"\n训练完成！输出目录: {output_dir}")

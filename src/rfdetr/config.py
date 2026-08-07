@@ -1220,6 +1220,17 @@ class TrainConfig(BaseConfig):
     sscl_prototype_sync_ddp: bool = False
     """是否在 DDP 多卡时先 ``all_gather`` 各 rank 特征再更新原型，保证各 rank
     原型一致（``register_buffer`` 不会被 DDP 自动同步）。单卡无需，默认关闭。"""
+    sscl_projection_enabled: bool = False
+    """是否启用 SSCL 投影头：先把 matched features 投影到低维对比空间再施加
+    对比损失，缓解对比压力对共享特征（同时喂给 class_embed 与 bbox_embed）的
+    直接冲击。开启后原型库也住在投影空间。"""
+    sscl_projection_dim: int = 128
+    """SSCL 投影头输出维度（对比空间维度），通常低于 decoder hidden dim。
+    仅在 ``sscl_projection_enabled=True`` 时生效。"""
+    sscl_prototype_instance_pos: bool = False
+    """原型模式是否加入同类别实例正样本（对齐论文 Eq.9）。开启时正样本 =
+    本类原型 ∪ 同类别实例，用真实同类实例锚定随机初始化投影头的冷启动；
+    负样本仍为全部有效原型（语义加权）。推荐投影实验开启。"""
 
     @field_validator("progress_bar", mode="before")
     @classmethod

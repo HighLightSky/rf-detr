@@ -43,7 +43,12 @@ class _FakeCriterion:
         return batch_idx, src_idx
 
 
-def _build_module(training: bool, prototype_mode: bool = True) -> RFDETRModelModule:
+def _build_module(
+    training: bool,
+    prototype_mode: bool = True,
+    projection_dim: int | None = None,
+    prototype_instance_pos: bool = False,
+) -> RFDETRModelModule:
     """用 __new__ 绕过重型 __init__，构造最小可测模块。
 
     ``RFDETRModelModule.__new__`` 不会调用 ``nn.Module.__init__``，
@@ -59,6 +64,8 @@ def _build_module(training: bool, prototype_mode: bool = True) -> RFDETRModelMod
             semantic_matrix=_SEMANTIC_MATRIX,
             prototype_mode=prototype_mode,
             hidden_dim=16,
+            projection_dim=projection_dim,
+            prototype_instance_pos=prototype_instance_pos,
         ),
     )
     module.training = training
@@ -94,6 +101,56 @@ class TestSSCLPrototypeCallback:
     def test_callback_instance_mode_no_bank_update(self) -> None:
         """实例模式回调不创建原型库，返回 loss_sscl 键（兼容性）。"""
         module = _build_module(training=True, prototype_mode=False)
+        outputs = {"hs": torch.randn(1, 6, 16)}
+        targets = [{"labels": torch.tensor([3, 3, 1, 1, 2, 4])}]
+        indices = [(torch.tensor([0, 2, 4]), torch.tensor([0, 1, 2]))]
+        result = module._sscl_loss_callback(outputs, targets, indices)
+        assert "loss_sscl" in result
+        assert not hasattr(module.sscl_loss, "prototype_bank")
+
+
+class TestSSCLProjectionCallback:
+    """启用投影头时 SSCL 回调的行为。"""
+
+    def test_callback_projection_updates_bank_in_projection_dim(self) -> None:
+        """训练态 + 投影：回调后原型库维度 == projection_dim，损失有限。"""
+        module = _build_module(training=True, prototype_mode=True, projection_dim=8)
+        outputs = {"hs": torch.randn(1, 6, 16)}
+        targets = [{"labels": torch.tensor([3, 3, 1, 1, 2, 4])}]
+        indices = [(torch.tensor([0, 2, 4]), torch.tensor([0, 2, 4]))]
+
+        result = module._sscl_loss_callback(outputs, targets, indices)
+        assert "loss_sscl" in result
+        assert torch.isfinite(result["loss_sscl"])
+        # 原型库建立在投影空间，维度 == projection_dim
+        bank = module.sscl_loss.prototype_bank
+        assert bank.prototypes.shape[1] == 8
+        # matched 类别 1/2/3 各建立一次原型
+        num_updates = bank.num_updates
+        assert int(num_updates[1].item()) >= 1
+        assert int(num_updates[2].item()) >= 1
+        assert int(num_updates[3].item()) >= 1
+
+    def test_callback_projection_instance_pos_updates_bank(self) -> None:
+        """训练态 + 投影 + 实例正样本：原型照常建立、损失有限。"""
+        module = _build_module(
+            training=True,
+            prototype_mode=True,
+            projection_dim=8,
+            prototype_instance_pos=True,
+        )
+        outputs = {"hs": torch.randn(1, 6, 16)}
+        targets = [{"labels": torch.tensor([3, 3, 1, 1, 2, 4])}]
+        indices = [(torch.tensor([0, 2, 4]), torch.tensor([0, 2, 4]))]
+
+        result = module._sscl_loss_callback(outputs, targets, indices)
+        assert "loss_sscl" in result
+        assert torch.isfinite(result["loss_sscl"])
+        assert module.sscl_loss.prototype_bank.prototypes.shape[1] == 8
+
+    def test_callback_projection_instance_mode_no_bank(self) -> None:
+        """投影 + 实例模式：无原型库，返回 loss_sscl 键。"""
+        module = _build_module(training=True, prototype_mode=False, projection_dim=8)
         outputs = {"hs": torch.randn(1, 6, 16)}
         targets = [{"labels": torch.tensor([3, 3, 1, 1, 2, 4])}]
         indices = [(torch.tensor([0, 2, 4]), torch.tensor([0, 1, 2]))]

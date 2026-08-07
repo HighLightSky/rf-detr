@@ -34,7 +34,7 @@ from rfdetr.datasets.coco import compute_multi_scale_scales
 from rfdetr.models.lwdetr import build_criterion_from_config, build_model_from_config
 from rfdetr.models.weights import apply_lora, interpolate_position_embeddings, load_pretrain_weights
 from rfdetr.training.callbacks.coco_eval import _get_ema_inner_module
-from rfdetr.training.param_groups import get_param_dict
+from rfdetr.training.param_groups import get_param_dict, get_projection_head_param_dict
 from rfdetr.utilities.logger import get_logger
 
 logger = get_logger()
@@ -468,7 +468,9 @@ class RFDETRModelModule(LightningModule):
             )
 
         # 构建 SSCL 对比损失（作用在 matched foreground query features 上）
-        # hidden_dim 恒从 model_config 传入，避免原型库惰性 resize_ 与编译/续训交互
+        # hidden_dim 恒从 model_config 传入，避免原型库惰性 resize_ 与编译/续训交互；
+        # projection_dim 非 None 时启用投影头（把特征映射到低维对比空间再算损失），
+        # 原型库维度随之改为 projection_dim
         self.sscl_loss = SSCLLoss(
             semantic_matrix=semantic_matrix,
             tau=cfg.sscl_tau,
@@ -481,6 +483,8 @@ class RFDETRModelModule(LightningModule):
             prototype_min_samples=cfg.sscl_prototype_min_samples,
             prototype_sync_ddp=cfg.sscl_prototype_sync_ddp,
             hidden_dim=self.model_config.hidden_dim,
+            projection_dim=cfg.sscl_projection_dim if cfg.sscl_projection_enabled else None,
+            prototype_instance_pos=cfg.sscl_prototype_instance_pos,
         )
 
         # 配置冻结策略：默认 "conservative" 冻结 backbone/encoder/bbox 头等，
@@ -512,7 +516,9 @@ class RFDETRModelModule(LightningModule):
             f"anchor={cfg.sscl_anchor_classes}, confusing={cfg.sscl_confusing_classes}, "
             f"start_epoch={cfg.sscl_start_epoch}, freeze={cfg.sscl_freeze_strategy}, "
             f"distill={cfg.sscl_distill_enabled}, "
-            f"prototype={cfg.sscl_prototype_enabled}"
+            f"prototype={cfg.sscl_prototype_enabled}, "
+            f"projection={cfg.sscl_projection_enabled} (dim={cfg.sscl_projection_dim}), "
+            f"instance_pos={cfg.sscl_prototype_instance_pos}"
         )
 
     def _apply_sscl_freeze(self) -> None:
@@ -1254,6 +1260,11 @@ class RFDETRModelModule(LightningModule):
         model_for_params = getattr(self.model, "_orig_mod", self.model)
         param_dicts = get_param_dict(ns, model_for_params)
         param_dicts = [param_group for param_group in param_dicts if param_group["params"].requires_grad]
+        # [SSCL] 投影头参数不在 LWDETR 内部，get_param_dict 收集不到，手动追加为
+        # 独立参数组。须在上一行按 requires_grad 过滤之后追加：该过滤假定每组
+        # params 是单个张量，而本组 params 是列表，提前追加会抛 AttributeError。
+        # getattr 兼容未启用 SSCL（无 sscl_loss 属性）的场景。
+        param_dicts += get_projection_head_param_dict(getattr(self, "sscl_loss", None), tc.lr)
 
         optimizer_cfg = tc.optimizer
         optimizer: torch.optim.Optimizer
