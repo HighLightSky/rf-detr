@@ -38,6 +38,15 @@ USE_CFE = True
 # PROJECTOR_SCALE = ["P4"]  # CFE 开启时改为 ["P3", "P4"]
 PROJECTOR_SCALE = ["P3", "P4"]
 
+# --- SGM 门控/融合变体（P0 修复实验，详见 output/0805-SHWX-SGA-rfdetr/实验报告.md §五）---
+# 门控模式: product(原版) | lower_bound(下界保底 [0.5,1]) | residual(残差 1+M) | ones(SPM-only 消融)
+SGA_GATE_MODE = "product"
+# 融合残差保底: fused = feats[i] + gamma*delta，保留原始 projector 语义特征
+SGA_FUSION_RESIDUAL = False
+SGA_RESIDUAL_GAMMA = 0.1  # 残差融合系数（起步 0.1 更稳）
+# SGM 注意力 logits 初值偏置（>0 使初始注意力≈全通，防早期反向收敛；attn_bias 实验用 +2.0）
+SGA_ATTN_BIAS = 0.0
+
 # --- 数据集 ---
 DATASET_DIR = "/home/liu/datasets/SHWX-dataset-dict"
 DATASET_FILE = "yolo"  # roboflow：Roboflow COCO 格式 (train/_annotations.coco.json)，还有coco yolo
@@ -129,6 +138,10 @@ def main() -> None:
         use_sga=USE_SGA,
         use_cfe=USE_CFE,
         projector_scale=PROJECTOR_SCALE,
+        sga_gate_mode=SGA_GATE_MODE,
+        sga_fusion_residual=SGA_FUSION_RESIDUAL,
+        sga_residual_gamma=SGA_RESIDUAL_GAMMA,
+        sga_attn_bias=SGA_ATTN_BIAS,
     )
 
     # --- 训练 ---

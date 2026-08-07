@@ -529,6 +529,10 @@ class ModelConfig(BaseConfig):
     cfe_act: str = "silu"  # CFE 块激活函数（silu/gelu/relu/none）
     cfe_expansion: float = 1.0  # CFE CSPLayer 通道膨胀系数
     cfe_depth_mult: float = 1.0  # CFE RepNCSPELAN4 深度倍率
+    sga_gate_mode: Literal["product", "lower_bound", "residual", "ones"] = "product"  # SGM 门控模式（P0 修复实验）
+    sga_fusion_residual: bool = False  # 融合残差：fused = feats[i] + gamma*delta，保留 projector 语义基线
+    sga_residual_gamma: float = 0.1  # 残差融合系数
+    sga_attn_bias: float = 0.0  # SGM 注意力 logits 初值偏置（>0 使初始注意力≈全通，防早期反向收敛）
     license: str = "Apache-2.0"
     model_name: str | None = Field(
         default=None,

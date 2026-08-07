@@ -87,6 +87,10 @@ def build_backbone(
     cfe_act: str = "silu",
     cfe_expansion: float = 1.0,
     cfe_depth_mult: float = 1.0,
+    sga_gate_mode: str = "product",
+    sga_fusion_residual: bool = False,
+    sga_residual_gamma: float = 0.1,
+    sga_attn_bias: float = 0.0,
 ) -> Joiner:
     """
     Useful args:
@@ -124,6 +128,10 @@ def build_backbone(
         cfe_act=cfe_act,
         cfe_expansion=cfe_expansion,
         cfe_depth_mult=cfe_depth_mult,
+        sga_gate_mode=sga_gate_mode,
+        sga_fusion_residual=sga_fusion_residual,
+        sga_residual_gamma=sga_residual_gamma,
+        sga_attn_bias=sga_attn_bias,
     )
 
     model = Joiner(backbone, position_embedding_module)

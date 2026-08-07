@@ -212,14 +212,41 @@ def sweep_metrics(gt_records: list[test_mod.BoxRecord], pred_records: list[test_
     return rows
 
 
+def _effective_gate(m: torch.Tensor, gate_mode: str, residual_gamma: float = 0.1) -> torch.Tensor:
+    """把原始 sigmoid 注意力 M 映射为"有效门控"系数（真实作用于 SPM 特征的乘数）。
+
+    Args:
+        m: sigmoid 注意力图（0~1）。
+        gate_mode: 门控模式（product/lower_bound/residual/ones）。
+        residual_gamma: 残差门控的保留系数（当前 SGA 实现未用 gamma 缩放门控，保留参数仅为接口一致性）。
+
+    Returns:
+        与 m 同形状的有效门控系数张量。
+    """
+    if gate_mode == "product":
+        return m  # 原版：目标处可被压到 ≈0
+    if gate_mode == "lower_bound":
+        return 0.5 + 0.5 * m  # 下界门控：范围 [0.5,1]
+    if gate_mode == "residual":
+        return 1.0 + m  # 残差门控：范围 [1,2]
+    if gate_mode == "ones":
+        return torch.ones_like(m)  # SPM-only 消融：恒为 1
+    raise ValueError(f"不支持的门控模式: {gate_mode}，可选: product/lower_bound/residual/ones")
+
+
 def analyze_attention(
     attn_by_image: dict[str, torch.Tensor],
     gt_records: list[test_mod.BoxRecord],
     image_size_map: dict[str, tuple[int, int]],
     vis_dir: Path,
     attn_num: int = 8,
-) -> None:
+    gate_mode: str = "product",
+    residual_gamma: float = 0.1,
+) -> list[str]:
     """统计 SGM 注意力图分布 + 目标框内/背景均值 + 保存可视化热力图。
+
+    除原始 sigmoid M 的统计外，还会按门控模式计算"有效门控"（真实作用于 SPM 的系数）
+    的框内/背景均值，用于验证 P0 修复（下界门控下框内有效门控应 ≥0.5，不再 ≈0）。
 
     Args:
         attn_by_image: {image_id: [1,Hi,Wi] sigmoid 注意力图}。
@@ -227,10 +254,17 @@ def analyze_attention(
         image_size_map: {image_id: (width, height)} 原始尺寸映射。
         vis_dir: 热力图保存目录。
         attn_num: 保存热力图的图像数量上限。
+        gate_mode: 门控模式（影响有效门控的映射）。
+        residual_gamma: 残差融合系数（暂仅用于报告展示，不参与门控映射）。
+
+    Returns:
+        统计文本行列表（供打印/写文件）。
     """
     all_vals: list[torch.Tensor] = []
     fg_sum, fg_cnt = 0.0, 0.0
     bg_sum, bg_cnt = 0.0, 0.0
+    eff_fg_sum, eff_fg_cnt = 0.0, 0.0  # 有效门控的框内累计
+    eff_bg_sum, eff_bg_cnt = 0.0, 0.0  # 有效门控的背景累计
     gt_by_image: dict[str, list[test_mod.BoxRecord]] = defaultdict(list)
     for g in gt_records:
         gt_by_image[g.image_id].append(g)
@@ -260,6 +294,12 @@ def analyze_attention(
         fg_cnt += mask.sum().item()
         bg_sum += (att_up * (1 - mask)).sum().item()
         bg_cnt += (1 - mask).sum().item()
+        # 有效门控 = 真实作用于 SPM 特征的系数（P0 修复变体下应保证目标处不低于下界）
+        att_eff = _effective_gate(att_up, gate_mode, residual_gamma)
+        eff_fg_sum += (att_eff * mask).sum().item()
+        eff_fg_cnt += mask.sum().item()
+        eff_bg_sum += (att_eff * (1 - mask)).sum().item()
+        eff_bg_cnt += (1 - mask).sum().item()
         all_vals.append(att.reshape(-1))
 
         # 保存前若干张图像的热力图（叠加在原图上）
@@ -292,6 +332,9 @@ def analyze_attention(
     frac_hi = float((vals > 0.7).mean())
     fg_mean = fg_sum / fg_cnt if fg_cnt > 0 else float("nan")
     bg_mean = bg_sum / bg_cnt if bg_cnt > 0 else float("nan")
+    # 有效门控的框内/背景均值（关键验证指标：下界门控下框内应 ≥0.5，不再压掉目标处 SPM）
+    eff_fg_mean = eff_fg_sum / eff_fg_cnt if eff_fg_cnt > 0 else float("nan")
+    eff_bg_mean = eff_bg_sum / eff_bg_cnt if eff_bg_cnt > 0 else float("nan")
 
     lines = [
         "=" * 78,
@@ -304,21 +347,24 @@ def analyze_attention(
         f"目标框内   : {fg_mean:.4f}   (fg_cnt={fg_cnt:.1f} px @640)",
         f"背景       : {bg_mean:.4f}   (bg_cnt={bg_cnt:.1f} px @640)",
         f"框内-背景  : {fg_mean - bg_mean:+.4f}   （>0 说明注意力能区分目标，≈0 说明门控失效）",
+        f"有效门控(模式={gate_mode}) 框内均值: {eff_fg_mean:.4f}   背景均值: {eff_bg_mean:.4f}",
+        f"  └ 下界门控应框内≥0.5；残差门控应框内≥1.0；若框内有效门控仍≈0 说明修复未生效",
         f"热力图已存 : {vis_dir}",
     ]
     print("\n".join(lines), flush=True)
     return lines
 
 
-def load_exp_config(ckpt_path: Path) -> tuple[bool, bool, list[str]]:
+def load_exp_config(ckpt_path: Path) -> tuple[bool, bool, list[str], str, bool, float, float]:
     """从 checkpoint 同目录的 training_config.json 读取模型结构配置。
 
     Args:
         ckpt_path: checkpoint 文件路径。
 
     Returns:
-        ``(use_sga, use_cfe, projector_scale)``；配置文件缺失时回退到
-        ``(True, False, ["P4"])``。
+        ``(use_sga, use_cfe, projector_scale, sga_gate_mode, sga_fusion_residual,
+        sga_residual_gamma, sga_attn_bias)``；配置文件缺失时回退到 SGA 原版
+        ``(True, False, ["P4"], "product", False, 0.1, 0.0)``。
     """
     cfg_path = ckpt_path.parent / "training_config.json"
     if cfg_path.exists():
@@ -326,11 +372,15 @@ def load_exp_config(ckpt_path: Path) -> tuple[bool, bool, list[str]]:
 
         model_config = json.loads(cfg_path.read_text(encoding="utf-8")).get("model_config", {})
         return (
-            bool(model_config.get("use_sga", False)),
+            bool(model_config.get("use_sga", True)),
             bool(model_config.get("use_cfe", False)),
             list(model_config.get("projector_scale", ["P4"])),
+            model_config.get("sga_gate_mode", "product"),
+            bool(model_config.get("sga_fusion_residual", False)),
+            float(model_config.get("sga_residual_gamma", 0.1)),
+            float(model_config.get("sga_attn_bias", 0.0)),
         )
-    return (True, False, ["P4"])
+    return (True, False, ["P4"], "product", False, 0.1, 0.0)
 
 
 def main() -> None:
@@ -351,6 +401,18 @@ def main() -> None:
     ap.add_argument("--attn-num", type=int, default=8, help="保存的热力图数量")
     ap.add_argument("--no-attn", action="store_true", help="默认模式跳过注意力统计")
     ap.add_argument("--sga", action="store_true", help="默认模式仅跑 SGA（跳过 Baseline）")
+    ap.add_argument(
+        "--gate-mode",
+        type=str,
+        default=None,
+        help="门控模式（product/lower_bound/residual/ones），默认从 training_config.json 读取",
+    )
+    ap.add_argument(
+        "--residual-gamma",
+        type=float,
+        default=None,
+        help="残差融合系数，默认从 training_config.json 读取",
+    )
     args = ap.parse_args()
 
     device = test_mod.resolve_device("cuda")
@@ -365,13 +427,27 @@ def main() -> None:
         ckpt = Path(args.checkpoint) if args.checkpoint else Path(args.exp_dir) / "checkpoint_best_total.pth"
         if not ckpt.exists():
             raise FileNotFoundError(f"checkpoint 不存在: {ckpt}")
-        use_sga, use_cfe, proj_scale = load_exp_config(ckpt)
+        use_sga, use_cfe, proj_scale, gate_mode, fusion_residual, residual_gamma, attn_bias = load_exp_config(ckpt)
+        # 命令行显式指定的门控模式优先，便于对旧 checkpoint 套用不同门控做"零训练"推演
+        if args.gate_mode is not None:
+            gate_mode = args.gate_mode
+        if args.residual_gamma is not None:
+            residual_gamma = args.residual_gamma
         print(
-            f"[i] 加载 {ckpt} (use_sga={use_sga}, use_cfe={use_cfe}, projector_scale={proj_scale})",
+            f"[i] 加载 {ckpt} (use_sga={use_sga}, use_cfe={use_cfe}, projector_scale={proj_scale}, "
+            f"gate_mode={gate_mode}, fusion_residual={fusion_residual}, residual_gamma={residual_gamma}, "
+            f"attn_bias={attn_bias})",
             flush=True,
         )
         model = test_mod.RFDETRMedium.from_checkpoint(
-            str(ckpt), use_sga=use_sga, use_cfe=use_cfe, projector_scale=proj_scale
+            str(ckpt),
+            use_sga=use_sga,
+            use_cfe=use_cfe,
+            projector_scale=proj_scale,
+            sga_gate_mode=gate_mode,
+            sga_fusion_residual=fusion_residual,
+            sga_residual_gamma=residual_gamma,
+            sga_attn_bias=attn_bias,
         )
         _, attn = run_inference(model, test_image_paths, device, LOW_CONF, collect_attn=True)
         del model
@@ -384,7 +460,18 @@ def main() -> None:
                 flush=True,
             )
             return
-        analyze_attention(attn, gt_records, image_size_map, ckpt.parent / "attention_vis", args.attn_num)
+        attn_lines = analyze_attention(
+            attn,
+            gt_records,
+            image_size_map,
+            ckpt.parent / "attention_vis",
+            args.attn_num,
+            gate_mode=gate_mode,
+            residual_gamma=residual_gamma,
+        )
+        # 把注意力统计落盘，供实验运行器拼装实验报告
+        (ckpt.parent / "attention_stats.txt").write_text("\n".join(attn_lines) + "\n", encoding="utf-8")
+        print(f"[i] 注意力统计已保存: {ckpt.parent / 'attention_stats.txt'}", flush=True)
         return
 
     # ── 默认模式：SGA vs Baseline 阈值扫描 + SGA 注意力统计 ──────────────
@@ -464,7 +551,17 @@ def main() -> None:
 
     # ── 注意力统计 ──────────────────────────────────────────────────────
     if not args.no_attn and attn_by_image:
-        attn_lines = analyze_attention(attn_by_image, gt_records, image_size_map, ATTN_VIS_DIR, args.attn_num)
+        # 默认模式针对旧 SGA checkpoint，门控模式从其训练配置读取（旧实验无 sga_* 时回退 product）
+        _use_sga, _use_cfe, _proj, _gate, _fusion, _gamma, _attn_bias = load_exp_config(SGA_CKPT)
+        attn_lines = analyze_attention(
+            attn_by_image,
+            gt_records,
+            image_size_map,
+            ATTN_VIS_DIR,
+            args.attn_num,
+            gate_mode=_gate,
+            residual_gamma=_gamma,
+        )
         with REPORT_PATH.open("a", encoding="utf-8") as f:
             f.write("\n\n" + "\n".join(attn_lines) + "\n")
 

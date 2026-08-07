@@ -65,6 +65,10 @@ class Backbone(BackboneBase):
         cfe_act: str = "silu",
         cfe_expansion: float = 1.0,
         cfe_depth_mult: float = 1.0,
+        sga_gate_mode: str = "product",
+        sga_fusion_residual: bool = False,
+        sga_residual_gamma: float = 0.1,
+        sga_attn_bias: float = 0.0,
     ) -> None:
         super().__init__()
         # an example name here would be "dinov2_base" or "dinov2_registers_windowed_base"
@@ -139,6 +143,10 @@ class Backbone(BackboneBase):
                 projector_scale=self.projector_scale,
                 hidden_dim=out_channels,
                 sem_channels=self.encoder._out_feature_channels[-1],
+                gate_mode=sga_gate_mode,
+                fusion_residual=sga_fusion_residual,
+                residual_gamma=sga_residual_gamma,
+                attn_bias=sga_attn_bias,
             )
             if use_sga
             else None

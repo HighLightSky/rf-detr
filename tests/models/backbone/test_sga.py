@@ -216,3 +216,121 @@ class TestSGAIntegration:
             param = name2param[name]
             group = next(g for g in groups if g["params"] is param)
             assert group["lr"] == ns.lr, f"{name} lr={group['lr']} 应等于满 LR {ns.lr}"
+
+
+class TestGateModes:
+    """SGM 门控/融合变体（P0 修复实验）的行为与参数形状不变性测试。
+
+    所有变体必须参数形状一致（与既有 checkpoint resume 兼容），默认模式
+    （product + 无残差）行为与原版逐元素乘法一致。
+    """
+
+    GATE_MODES = ["product", "lower_bound", "residual", "ones"]
+
+    @pytest.mark.parametrize("gate_mode", GATE_MODES)
+    @pytest.mark.parametrize("fusion_residual", [False, True])
+    def test_forward_shape_and_param_count_invariant(
+        self, gate_mode: str, fusion_residual: bool
+    ) -> None:
+        """4 门控 × 2 融合共 8 组合：输出形状一致，且参数量完全一致（resume 兼容）。"""
+        enc = SGAEncoder(
+            ["P4"],
+            hidden_dim=256,
+            sem_channels=8,
+            gate_mode=gate_mode,
+            fusion_residual=fusion_residual,
+            residual_gamma=0.1,
+        )
+        feats = [torch.rand(2, 256, 8, 8)]
+        raw = [torch.rand(2, 8, 16, 16)] * 4
+        out = enc(feats, raw, torch.rand(2, 3, 128, 128))
+        assert out[0].shape == (2, 256, 8, 8)
+
+        ref = SGAEncoder(["P4"], hidden_dim=256, sem_channels=8)  # 默认模式作参数量参照
+        assert sum(p.numel() for p in enc.parameters()) == sum(
+            p.numel() for p in ref.parameters()
+        )
+
+    @pytest.mark.parametrize(
+        ("gate_mode", "expect"),
+        [
+            # (模式, m=0 时的期望)
+            ("product", 0.0),  # 原版：目标处 M→0 时 SPM 被完全关掉
+            ("lower_bound", 0.5),  # 下界门控：M→0 仍保留一半 SPM
+            ("residual", 1.0),  # 残差门控：M→0 时 det 完整保留
+            ("ones", 1.0),  # SPM-only 消融：恒为 1
+        ],
+    )
+    def test_apply_gate_lower_bound(self, gate_mode: str, expect: float) -> None:
+        """门控在 M=0 时的取值（验证各模式的下界保底行为）。"""
+        det = torch.full((1, 1, 4, 4), 2.0)
+        m = torch.zeros((1, 1, 4, 4))
+        out = SGAEncoder._apply_gate(det, m, gate_mode)
+        assert torch.allclose(out, torch.full_like(out, 2.0 * expect))
+
+    def test_apply_gate_upper_endpoints(self) -> None:
+        """门控在 M=1 时的取值：lower_bound→det、residual→2*det、product→det、ones→det。"""
+        det = torch.full((1, 1, 4, 4), 2.0)
+        ones = torch.ones((1, 1, 4, 4))
+        assert torch.allclose(SGAEncoder._apply_gate(det, ones, "lower_bound"), det)
+        assert torch.allclose(SGAEncoder._apply_gate(det, ones, "residual"), 2.0 * det)
+        assert torch.allclose(SGAEncoder._apply_gate(det, ones, "product"), det)
+        assert torch.allclose(SGAEncoder._apply_gate(det, ones, "ones"), det)
+
+    def test_apply_gate_rejects_invalid_mode(self) -> None:
+        """非法门控模式应抛 ValueError。"""
+        det = torch.rand(1, 1, 4, 4)
+        m = torch.rand(1, 1, 4, 4)
+        with pytest.raises(ValueError, match="不支持的门控模式"):
+            SGAEncoder._apply_gate(det, m, "bogus")
+
+    def test_constructor_rejects_invalid_mode(self) -> None:
+        """SGAEncoder 构造时也应拒绝非法门控模式。"""
+        with pytest.raises(ValueError, match="不支持的门控模式"):
+            SGAEncoder(["P4"], hidden_dim=256, sem_channels=8, gate_mode="bogus")
+
+    def test_residual_fusion_keeps_baseline(self) -> None:
+        """残差融合时 gamma=0 输出应与 feats 完全一致（纯基线路径）。"""
+        enc = SGAEncoder(
+            ["P4"], hidden_dim=256, sem_channels=8, gate_mode="product", fusion_residual=True, residual_gamma=0.0
+        )
+        feats = [torch.rand(2, 256, 8, 8)]
+        raw = [torch.rand(2, 8, 16, 16)] * 4
+        out = enc(feats, raw, torch.rand(2, 3, 128, 128))
+        # gamma=0 → fused = feats[i] + 0*delta = feats[i]
+        assert torch.allclose(out[0], feats[0])
+
+
+class TestAttnBias:
+    """SGM 注意力初值偏置（attn_bias 变体）的行为测试。
+
+    attn_bias 只改注意力 logits 的初值、不增参数：+2.0 使初始 sigmoid 注意力≈全通（≈0.88），
+    防止训练早期就向「目标处抑制」方向收敛（1ep 已观察到该坏方向）。
+    """
+
+    def test_initial_attention_all_pass_with_bias(self) -> None:
+        """init_logit_bias=+2.0 时初始注意力应≈全通（均值 >0.8）；默认 0.0 时≈0.5。"""
+        sem = torch.rand(2, 8, 16, 16)
+        targets = [torch.Size([2, 8, 8, 8])]
+        biased = SemanticGuidingModule(sem_channels=8, init_logit_bias=2.0)
+        m_b = biased(sem, targets)[0].detach()
+        assert float(m_b.mean()) > 0.8, f"bias=+2 初始注意力应接近全通，均值={float(m_b.mean()):.4f}"
+        default = SemanticGuidingModule(sem_channels=8)
+        m_d = default(sem, targets)[0].detach()
+        assert 0.3 < float(m_d.mean()) < 0.7, f"默认初值应≈0.5，均值={float(m_d.mean()):.4f}"
+
+    def test_attn_bias_does_not_change_param_count(self) -> None:
+        """attn_bias 只改初值不增参数，参数量应与默认完全一致（resume 兼容）。"""
+        ref = SGAEncoder(["P4"], hidden_dim=256, sem_channels=8)
+        enc = SGAEncoder(["P4"], hidden_dim=256, sem_channels=8, attn_bias=2.0)
+        assert sum(p.numel() for p in enc.parameters()) == sum(p.numel() for p in ref.parameters())
+
+    def test_attn_bias_forward_shapes(self) -> None:
+        """attn_bias 变体（product 门控 + 残差融合）前向输出形状正常。"""
+        enc = SGAEncoder(
+            ["P4"], hidden_dim=256, sem_channels=8, gate_mode="product", fusion_residual=True, attn_bias=2.0
+        )
+        feats = [torch.rand(2, 256, 8, 8)]
+        raw = [torch.rand(2, 8, 16, 16)] * 4
+        out = enc(feats, raw, torch.rand(2, 3, 128, 128))
+        assert out[0].shape == (2, 256, 8, 8)

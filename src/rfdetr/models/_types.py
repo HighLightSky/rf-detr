@@ -50,6 +50,10 @@ class BuilderArgs(Protocol):
     cfe_act: str
     cfe_expansion: float
     cfe_depth_mult: float
+    sga_gate_mode: str
+    sga_fusion_residual: bool
+    sga_residual_gamma: float
+    sga_attn_bias: float
     num_keypoints_per_class: list[int]
     num_decoder_registers: int
     projector_scale: list[str]

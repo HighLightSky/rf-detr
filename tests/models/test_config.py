@@ -1134,6 +1134,63 @@ class TestUseSgaConfig:
         assert ns.use_sga is True
 
 
+class TestSgaConfig:
+    """``sga_gate_mode`` / ``sga_fusion_residual`` / ``sga_residual_gamma`` / ``sga_attn_bias`` 的默认值、序列化与 namespace 透传。"""
+
+    def test_defaults_reproduce_original(self) -> None:
+        """默认值应完全复现原版 SGA 行为（product + 无残差 + gamma=0.1 + attn_bias=0）。"""
+        mc = RFDETRMediumConfig()
+        assert mc.sga_gate_mode == "product"
+        assert mc.sga_fusion_residual is False
+        assert mc.sga_residual_gamma == 0.1
+        assert mc.sga_attn_bias == 0.0
+
+    def test_rejects_invalid_gate_mode(self) -> None:
+        """sga_gate_mode 只接受 product/lower_bound/residual/ones。"""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            RFDETRMediumConfig(sga_gate_mode="bogus", num_classes=5)
+
+    def test_round_trip_variant(self) -> None:
+        """变体配置可构造且经 model_dump 后能重建。"""
+        mc = RFDETRMediumConfig(
+            use_sga=True,
+            sga_gate_mode="lower_bound",
+            sga_fusion_residual=True,
+            sga_residual_gamma=0.1,
+            sga_attn_bias=2.0,
+            num_classes=5,
+        )
+        assert mc.sga_gate_mode == "lower_bound"
+        assert mc.sga_fusion_residual is True
+        assert mc.sga_attn_bias == 2.0
+        reloaded = RFDETRMediumConfig(**mc.model_dump())
+        assert reloaded.sga_gate_mode == "lower_bound"
+        assert reloaded.sga_fusion_residual is True
+        assert reloaded.sga_residual_gamma == 0.1
+        assert reloaded.sga_attn_bias == 2.0
+
+    def test_namespace_forwards_sga_fields(self) -> None:
+        """_namespace_from_configs 应把 sga_* 字段透传到命名空间（供 build_model 读取）。"""
+        from rfdetr._namespace import _namespace_from_configs
+
+        mc = RFDETRMediumConfig(
+            use_sga=True,
+            sga_gate_mode="residual",
+            sga_fusion_residual=True,
+            sga_residual_gamma=0.05,
+            sga_attn_bias=2.0,
+            num_classes=5,
+        )
+        tc = TrainConfig(dataset_dir="/tmp")
+        ns = _namespace_from_configs(mc, tc)
+        assert ns.sga_gate_mode == "residual"
+        assert ns.sga_fusion_residual is True
+        assert ns.sga_residual_gamma == 0.05
+        assert ns.sga_attn_bias == 2.0
+
+
 class TestTrainConfigAugmentationBackendSerialization:
     """Serialization contract for ``TrainConfig.augmentation_backend`` used by checkpoint writers (Item #6).
 
