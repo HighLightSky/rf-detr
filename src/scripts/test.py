@@ -17,8 +17,10 @@ import subprocess
 import sys
 import threading
 import time
+from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import cv2
 import torch
@@ -28,8 +30,8 @@ from torch.utils.data import DataLoader, Dataset
 # ══════════════════════════════════════════════════════════════════════
 #  数据集选择 —— 切换数据集只需改这里
 # ══════════════════════════════════════════════════════════════════════
-DATASET = "dior"    # 可选: "shwx"（YOLO 格式）| "dior"（Roboflow COCO 格式）
-SAVE_FD_FN = False  # 是否保存FN/FD可视化
+DATASET = "shwx"    # 可选: "shwx"（YOLO 格式）| "dior"（Roboflow COCO 格式）
+SAVE_FD_FN = True  # 是否保存FN/FD可视化
 
 # ── 项目路径 ───────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -66,7 +68,7 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         "image_dir": "images/test",
         "label_format": "yolo",
         "label_dir": "labels/test",
-        "exp_output_dir": "output/0804-SHWX-rfdetr_medium_SSCL+prototype",
+        "exp_output_dir": "output/0805-SHWX-data-expand-rfdetr-baseline",
         "checkpoint_file": "checkpoint_best_total.pth",
         "num_classes": 25,
         "vehicle_class_ids": {24},  # FSC 发射车，比赛规则按车辆目标 IoU=0.35
@@ -259,17 +261,227 @@ def release_cuda_cache(device: str) -> None:
         torch.cuda.empty_cache()
 
 
+def format_eval_line(name: str, result: EvalResult) -> str:
+    """把单组比赛评测结果格式化为一行（控制台与结果报告共用）。
+
+    Args:
+        name: 组名（如 ``all``/``ship`` 或类别名）。
+        result: 单组比赛评测结果。
+
+    Returns:
+        格式化后的评测结果行。
+    """
+    return (
+        f"{name:<11s}TP={result.tp:<7d}FP={result.fp:<7d}FN={result.fn:<7d}"
+        f"Recall={result.recall:.4f} FDR={result.fdr:.4f} Precision={result.precision:.4f}"
+    )
+
+
 def print_eval_result(name: str, result: EvalResult) -> None:
     """打印单组比赛评测结果。"""
-    print(
-        f"{name:<10s} "
-        f"TP={result.tp:<6d} "
-        f"FP={result.fp:<6d} "
-        f"FN={result.fn:<6d} "
-        f"Recall={result.recall:.4f} "
-        f"FDR={result.fdr:.4f} "
-        f"Precision={result.precision:.4f}"
+    print(format_eval_line(name, result))
+
+
+def format_macro_line(name: str, macro: Mapping[str, float]) -> str:
+    """把大类下小类指标的 macro 平均结果格式化为一行。
+
+    Args:
+        name: 大类名（如 ``ship``/``aircraft``/``vehicle``）或 ``total``。
+        macro: 含 ``avg_tp``/``avg_fp``/``avg_fn``/``recall``/``fdr``/``precision``
+            六项的 macro 平均指标。
+
+    Returns:
+        格式化后的 macro 平均结果行。
+    """
+    return (
+        f"{name:<11s}avgTP={macro['avg_tp']:.2f} avgFP={macro['avg_fp']:6.2f} "
+        f"avgFN={macro['avg_fn']:6.2f} avgRecall={macro['recall']:.4f} "
+        f"avgFDR={macro['fdr']:.4f} avgPrecision={macro['precision']:.4f}"
     )
+
+
+def compute_group_macro_averages(
+    per_class_results: Mapping[str, EvalResult],
+    class_to_group: Mapping[int, str],
+    class_names: Mapping[int, str],
+) -> dict[str, dict[str, float]]:
+    """计算每个大类下小类指标的平均值（macro 平均）。
+
+    对大类中的每个小类，先按比赛口径计算各项指标（TP/FP/FN、召回率、虚警率、
+    精确率），再直接对同大类下所有小类的指标取算术平均，而不是先累计样本数再
+    计算指标。例如船的召回率 = 四型船（驱护舰、航母、两栖船、民船）召回率的
+    平均值，飞机与车辆同理。
+
+    Args:
+        per_class_results: ``{类别名: EvalResult}`` 的逐类评估结果。
+        class_to_group: ``{类别 id: 大类名}`` 映射。
+        class_names: ``{类别 id: 类别名}`` 映射。
+
+    Returns:
+        ``{大类名: {"avg_tp": ..., "avg_fp": ..., "avg_fn": ..., "recall": ...,
+        "fdr": ..., "precision": ...}}``，大类顺序按其内最小类别 id 升序排列
+        （即舰船→飞机→车辆）。
+    """
+    # 把 {类别id: 大类} 反转为 {大类: [类别id]}，类别 id 升序
+    group_to_class_ids: dict[str, list[int]] = defaultdict(list)
+    for class_id, group_name in sorted(class_to_group.items()):
+        group_to_class_ids[group_name].append(class_id)
+
+    # 按大类内最小类别 id 排序大类，保证舰船→飞机→车辆的展示顺序
+    group_macro: dict[str, dict[str, float]] = {}
+    for group_name, class_ids in sorted(
+        group_to_class_ids.items(),
+        key=lambda item: min(item[1]),
+    ):
+        # 测试集中不存在（无真实框也无预测）的小类取全零结果，保持按全部小类平均
+        class_results = [
+            per_class_results.get(class_names[class_id], EvalResult(tp=0, fp=0, fn=0))
+            for class_id in class_ids
+        ]
+        num_classes = len(class_results)
+        group_macro[group_name] = {
+            "avg_tp": sum(result.tp for result in class_results) / num_classes,
+            "avg_fp": sum(result.fp for result in class_results) / num_classes,
+            "avg_fn": sum(result.fn for result in class_results) / num_classes,
+            "recall": sum(result.recall for result in class_results) / num_classes,
+            "fdr": sum(result.fdr for result in class_results) / num_classes,
+            "precision": sum(result.precision for result in class_results) / num_classes,
+        }
+    return group_macro
+
+
+def compute_total_metrics(group_macro: Mapping[str, Mapping[str, float]]) -> dict[str, float]:
+    """计算总指标：各大类平均指标再取算术平均（即（船+飞机+车辆）/3）。
+
+    Args:
+        group_macro: ``compute_group_macro_averages`` 的返回结果。
+
+    Returns:
+        与单大类 macro 相同键结构的六项总指标。
+    """
+    metric_keys = ("avg_tp", "avg_fp", "avg_fn", "recall", "fdr", "precision")
+    num_groups = len(group_macro)
+    if num_groups == 0:
+        return {key: 0.0 for key in metric_keys}
+    return {
+        key: sum(group[key] for group in group_macro.values()) / num_groups
+        for key in metric_keys
+    }
+
+
+def build_test_report(
+    *,
+    test_image_paths: list[Path],
+    gt_records: list[BoxRecord],
+    pred_records: list[BoxRecord],
+    throughput: float,
+    timed_images: int,
+    gpu_util: float | None,
+    eval_results: dict[str, EvalResult | dict[str, EvalResult]],
+    group_macro: dict[str, dict[str, float]],
+    total_macro: dict[str, float],
+    per_class_results: dict[str, EvalResult | dict[str, EvalResult]],
+) -> list[str]:
+    """组装 test_result.txt 报告文本行列表。
+
+    Args:
+        test_image_paths: 测试图像路径列表。
+        gt_records: 真实框记录列表。
+        pred_records: 预测框记录列表。
+        throughput: 稳态推理吞吐（img/s）。
+        timed_images: 参与稳态计时的图像数。
+        gpu_util: 推理期间 GPU 平均利用率（%），采样失败时为 ``None``。
+        eval_results: 比赛指标评估结果（``all`` + 各大大类）。
+        group_macro: 每个大类下小类指标的 macro 平均结果。
+        total_macro: 各大类平均指标再取平均的总指标。
+        per_class_results: 细粒度逐类评估结果。
+
+    Returns:
+        报告文本行列表。
+    """
+    sep = "=" * 80
+    dash = "-" * 80
+    report_lines: list[str] = []
+
+    # ── 报告头 ──────────────────────────────────────────────────────
+    report_lines.extend(
+        [
+            sep,
+            "RF-DETR 测试结果报告",
+            f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"数据集: {DATASET}",
+            f"权重: {CHECKPOINT_PATH}",
+            sep,
+        ]
+    )
+
+    # ── 测试数据概况 ────────────────────────────────────────────────
+    report_lines.extend(
+        [
+            f"测试图像数: {len(test_image_paths)}",
+            f"真实框数: {len(gt_records)}",
+            f"预测框数: {len(pred_records)}",
+            f"置信度阈值: {CONF_THRESHOLD}",
+            "IoU 阈值: " + "，".join(f"{key}={value:.2f}" for key, value in GROUP_IOU_THRESHOLDS.items()),
+            sep,
+        ]
+    )
+
+    # ── 推理测速结果 ────────────────────────────────────────────────
+    report_lines.append("推理测速结果")
+    report_lines.append(f"GPU 批量大小: {BATCH_SIZE}  |  CPU 预取 worker 数: {NUM_WORKERS}")
+    report_lines.append(
+        f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {timed_images / throughput:.1f}s）"
+    )
+    if gpu_util is not None:
+        report_lines.append(f"推理期间 GPU 平均利用率: {gpu_util:.1f}%")
+    report_lines.append(sep)
+
+    # ── 比赛指标评估结果（大类聚合）──────────────────────────────────
+    report_lines.append("比赛指标评估结果（测试集）")
+    report_lines.append(format_eval_line("all", eval_results["all"]))
+    for group_name, group_result in eval_results["groups"].items():
+        report_lines.append(format_eval_line(group_name, group_result))
+    report_lines.append(dash)
+
+    # ── 每个大类下小类指标的平均值（macro 平均）──────────────────────
+    report_lines.append("每个大类下小类指标的平均值（macro 平均）")
+    report_lines.append(dash)
+    for group_name, macro in group_macro.items():
+        report_lines.append(format_macro_line(group_name, macro))
+    report_lines.append(dash)
+
+    # ── 总指标（各大类平均指标再取平均）──────────────────────────────
+    report_lines.append("总指标（各大类平均指标再取算术平均，即（船+飞机+车辆）/3）")
+    report_lines.append(dash)
+    report_lines.append(format_macro_line("total", total_macro))
+    report_lines.append(dash)
+
+    # ── 细粒度类别指标 ──────────────────────────────────────────────
+    report_lines.append("细粒度类别指标")
+    report_lines.append(dash)
+    for class_name in sorted(per_class_results["groups"].keys()):
+        report_lines.append(format_eval_line(class_name, per_class_results["groups"][class_name]))
+    report_lines.append(sep)
+
+    # ── 生成的可视化文件 ────────────────────────────────────────────
+    report_lines.append("生成的可视化文件")
+    report_lines.append(f"混淆矩阵: {EXP_OUTPUT_DIR / 'confusion_matrix.png'}")
+    report_lines.append(f"FP 可视化目录: {FP_DIR}")
+    report_lines.append(f"FN 可视化目录: {FN_DIR}")
+
+    return report_lines
+
+
+def write_test_result(report_lines: list[str], output_path: Path) -> None:
+    """把测试结果报告写入实验文件夹中的 test_result.txt。
+
+    Args:
+        report_lines: 报告文本行列表。
+        output_path: 输出文件路径（一般为 ``EXP_OUTPUT_DIR / "test_result.txt"``）。
+    """
+    output_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+    print(f"[完成] 测试结果已保存至: {output_path}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -611,6 +823,25 @@ if __name__ == "__main__":
         if result.tp + result.fn > 0:  # 只打印测试集中存在的类别
             print_eval_result(class_name, result)
 
+    # ── 每个大类下小类指标的平均值（macro 平均）与总指标 ──────────────
+    group_macro = compute_group_macro_averages(
+        per_class_results["groups"],
+        CLASS_TO_GROUP,
+        CLASS_NAMES,
+    )
+    total_macro = compute_total_metrics(group_macro)
+
+    print("\n" + "-" * 80)
+    print("每个大类下小类指标的平均值（macro 平均）")
+    print("-" * 80)
+    for group_name, macro in group_macro.items():
+        print(format_macro_line(group_name, macro))
+
+    print("\n" + "-" * 80)
+    print("总指标（各大类平均指标再取算术平均，即（船+飞机+车辆）/3）")
+    print("-" * 80)
+    print(format_macro_line("total", total_macro))
+
     # ── 混淆矩阵可视化 ───────────────────────────────────────────────
     print("\n[i] 正在生成混淆矩阵分析图...")
     cm = build_confusion_matrix(
@@ -649,3 +880,18 @@ if __name__ == "__main__":
             FN_DIR,
         )
         print("[完成] FP/FN 可视化保存完成")
+
+    # ── 保存测试结果报告到实验文件夹 ─────────────────────────────────
+    report_lines = build_test_report(
+        test_image_paths=test_image_paths,
+        gt_records=gt_records,
+        pred_records=pred_records,
+        throughput=throughput,
+        timed_images=timed_images,
+        gpu_util=gpu_util,
+        eval_results=eval_results,
+        group_macro=group_macro,
+        total_macro=total_macro,
+        per_class_results=per_class_results,
+    )
+    write_test_result(report_lines, EXP_OUTPUT_DIR / "test_result.txt")
