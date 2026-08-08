@@ -50,6 +50,16 @@ COLOR_TP = (0, 255, 0)       # 绿色 — 正确预测
 COLOR_FP = (0, 0, 255)       # 红色 — 虚警
 COLOR_FN_GT = (0, 165, 255)  # 橙色 — 漏检的真实框
 
+# ── PIL 中文字体候选路径 ─────────────────────────────────────────────
+# cv2 的 HERSHEY 字体不支持中文，绘制标题条时用 PIL 渲染；按优先级依次尝试，
+# 全部缺失时回退到 PIL 默认字体。
+_CJK_FONT_PATHS = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+]
+
 
 def clear_vis_dirs(
     fp_dir: str | Path,
@@ -215,6 +225,54 @@ def load_image(image_id: str, test_image_paths: list[Path]) -> "cv2.Mat | None":
     return None
 
 
+def _compose_side_by_side(
+    left: "cv2.Mat",
+    right: "cv2.Mat",
+    left_label: str,
+    right_label: str,
+) -> "cv2.Mat":
+    """把左右两张图水平拼接为一张对比图，顶部各带中文标题条。
+
+    cv2 自带的 HERSHEY 字体不支持中文，因此标题条改用 PIL 绘制后再转回 BGR。
+    左右两张图来自同一张原始图像的不同标注版本，尺寸一致，可直接水平拼接。
+
+    Args:
+        left: 左面板图像（BGR）。
+        right: 右面板图像（BGR）。
+        left_label: 左面板标题文字。
+        right_label: 右面板标题文字。
+
+    Returns:
+        水平拼接后的对比图（BGR），宽度为左右两图宽度之和。
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    def _with_title_bar(img: "cv2.Mat", label: str) -> "cv2.Mat":
+        """给单张图顶部加一个深色标题条并绘制中文标题。"""
+        header_h = 30
+        height, width = img.shape[:2]
+        canvas = np.full((height + header_h, width, 3), 38, dtype=np.uint8)
+        canvas[header_h:, :, :] = img
+
+        pil_img = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+        font = None
+        for path in _CJK_FONT_PATHS:
+            try:
+                font = ImageFont.truetype(path, 18)
+                break
+            except OSError:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+        draw.text((10, 6), label, fill=(255, 255, 255), font=font)
+        return cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
+
+    left_panel = _with_title_bar(left, left_label)
+    right_panel = _with_title_bar(right, right_label)
+    return np.hstack((left_panel, right_panel))
+
+
 def save_fp_fn_visualizations(
     fp_images: dict[int, set[str]],
     fn_images: dict[int, set[str]],
@@ -229,12 +287,11 @@ def save_fp_fn_visualizations(
 ) -> None:
     """按类别保存 FP/FN 可视化图像。
 
-    保存结构::
+    每张图只保存一张**左右拼接对比图**：左侧为带 GT 标注的原始图，右侧为带
+    预测框的图，两张图各自顶部带中文标题条，方便上下/左右对照查看。保存结构::
 
-        {fp_dir}/{类名}/labeled_{image_id}.jpg  — 带 GT 标注的原始图
-        {fp_dir}/{类名}/pred_{image_id}.jpg     — 带预测框的图（TP 绿色 / FP 红色）
-        {fn_dir}/{类名}/labeled_{image_id}.jpg  — 带 GT 标注的原始图
-        {fn_dir}/{类名}/pred_{image_id}.jpg     — 带预测框的图
+        {fp_dir}/{类名}/{image_id}.jpg  — 左：GT 标注图；右：预测图（TP 绿色 / FP 红色）
+        {fn_dir}/{类名}/{image_id}.jpg  — 左：GT 标注图（FN 橙色）；右：预测图（TP 绿色 / FP 红色）
 
     Args:
         fp_images: class_id → 存在 FP 的 image_id 集合。
@@ -285,8 +342,11 @@ def save_fp_fn_visualizations(
                 _draw_box_label(predicted, x1, y1, x2, y2,
                                 f"{class_names[fp.class_id]}(FP)", COLOR_FP)
 
-            cv2.imwrite(str(fp_dir / cls_name / f"labeled_{image_id}.jpg"), labeled)
-            cv2.imwrite(str(fp_dir / cls_name / f"pred_{image_id}.jpg"), predicted)
+            # 左右拼接对比图：左 GT 标注、右预测框（TP 绿 / FP 红），保存为单张
+            combined = _compose_side_by_side(
+                labeled, predicted, "GT（真实框）", "Pred（模型预测）"
+            )
+            cv2.imwrite(str(fp_dir / cls_name / f"{image_id}.jpg"), combined)
             total_fp_images += 1
 
     # ── 保存 FN 可视化 ──────────────────────────────────────────────
@@ -318,8 +378,11 @@ def save_fp_fn_visualizations(
                 _draw_box_label(predicted, x1, y1, x2, y2,
                                 f"{class_names[fp.class_id]}(FP)", COLOR_FP)
 
-            cv2.imwrite(str(fn_dir / cls_name / f"labeled_{image_id}.jpg"), labeled)
-            cv2.imwrite(str(fn_dir / cls_name / f"pred_{image_id}.jpg"), predicted)
+            # 左右拼接对比图：左 GT 标注（FN 橙色）、右预测框（TP 绿 / FP 红），保存为单张
+            combined = _compose_side_by_side(
+                labeled, predicted, "GT（真实框）", "Pred（模型预测）"
+            )
+            cv2.imwrite(str(fn_dir / cls_name / f"{image_id}.jpg"), combined)
             total_fn_images += 1
 
     # 打印统计

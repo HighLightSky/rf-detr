@@ -63,7 +63,7 @@ DEVICES = 1
 NUM_NODES = 1
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0807-SHWX-SSCL-Proj-原型+实例正样本"
+OUTPUT_DIR = "output/0807-SHWX-SSCL-Proj-纯原型"
 TENSORBOARD = True
 WANDB = False
 
@@ -102,7 +102,7 @@ SSCL_PROTOTYPE_MIN_SAMPLES = 1  # 单批同类样本低于该阈值则跳过该�
 # --- 投影头（把特征投影到低维对比空间再施加对比损失，缓解对共享特征的冲击）---
 SSCL_PROJECTION_ENABLED = True
 SSCL_PROJECTION_DIM = 128  # 投影空间维度（低于 decoder hidden dim）
-SSCL_PROTOTYPE_INSTANCE_POS = True  # 原型模式加入同类别实例正样本，锚定随机初始化投影头的冷启动（可关作消融）
+SSCL_PROTOTYPE_INSTANCE_POS = False  # 原型模式加入同类别实例正样本，锚定随机初始化投影头的冷启动（可关作消融）
 
 # --- 基类蒸馏 ---
 SSCL_DISTILL_ENABLED = False
