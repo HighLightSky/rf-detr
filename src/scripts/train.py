@@ -66,9 +66,14 @@ DEVICES = 1               # GPU 数量
 NUM_NODES = 1             # 节点数
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0805-SHWX-data-expand-rfdetr-baseline"   # 输出目录
+OUTPUT_DIR = "output/0808-SHWX-rfdetr-baseline-frozen_backbone"   # 输出目录
 TENSORBOARD = True                  # 是否启用 TensorBoard
 WANDB = False                       # 是否启用 Wandb
+
+# --- 骨干冻结（对比实验变量） ---
+# 冻结 DINOv2 骨干，仅训练 projector/decoder/分类/回归头。
+# 与 output/0805-SHWX-data-expand-rfdetr-baseline（全量微调）构成"唯一变量=骨干是否冻结"的对比。
+FREEZE_ENCODER = True
 
 # --- EMA (指数移动平均) ---
 USE_EMA = True            # 关闭 EMA，节省约 1 倍模型权重的显存
@@ -113,6 +118,7 @@ def main() -> None:
         num_classes=NUM_CLASSES,
         resolution=default_resolution,
         gradient_checkpointing=True,
+        freeze_encoder=FREEZE_ENCODER,
     )
 
     # --- 训练 ---

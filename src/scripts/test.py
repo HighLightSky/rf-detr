@@ -68,7 +68,7 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         "image_dir": "images/test",
         "label_format": "yolo",
         "label_dir": "labels/test",
-        "exp_output_dir": "output/0805-SHWX-data-expand-rfdetr-baseline",
+        "exp_output_dir": "output/0808-SHWX-rfdetr-baseline-frozen_backbone",
         "checkpoint_file": "checkpoint_best_total.pth",
         "num_classes": 25,
         "vehicle_class_ids": {24},  # FSC 发射车，比赛规则按车辆目标 IoU=0.35
