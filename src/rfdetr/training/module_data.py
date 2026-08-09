@@ -20,6 +20,7 @@ from rfdetr.config import AugmentationBackend, ModelConfig, TrainConfig
 from rfdetr.datasets import build_dataset
 from rfdetr.datasets.aug_configs import AUG_CONFIG
 from rfdetr.datasets.mosaic import MosaicDataset
+from rfdetr.datasets.rare_class_oversample import RareClassOversampleDataset
 from rfdetr.utilities.box_ops import box_xyxy_to_cxcywh
 from rfdetr.utilities.logger import get_logger
 from rfdetr.utilities.tensors import make_collate_fn
@@ -256,7 +257,8 @@ class RFDETRDataModule(LightningDataModule):
                     "Set augmentation_backend='cpu' or 'albumentations' when use_grouppose_keypoints=True."
                 )
             if self._dataset_train is None:
-                self._dataset_train = build_dataset("train", ns, resolution)
+                raw_train_dataset = build_dataset("train", ns, resolution)
+                self._dataset_train = raw_train_dataset
                 # 如果配置了 mosaic 增强，包装训练数据集
                 mosaic_p = getattr(self.train_config, "mosaic_p", 0.0)
                 if mosaic_p > 0:
@@ -266,6 +268,23 @@ class RFDETRDataModule(LightningDataModule):
                         output_size=(resolution, resolution),
                     )
                     logger.info("Mosaic 增强已启用，触发概率: %.2f", mosaic_p)
+                # 少数类重采样（默认关闭 → 不构造包装器，训练行为与基线逐位一致）
+                if getattr(self.train_config, "rare_class_oversample", False):
+                    self._dataset_train = RareClassOversampleDataset(
+                        self._dataset_train,
+                        rare_class_ids=list(
+                            getattr(self.train_config, "rare_class_oversample_class_ids", []) or []
+                        ),
+                        oversample_factor=int(
+                            getattr(self.train_config, "rare_class_oversample_factor", 2)
+                        ),
+                        info_dataset=raw_train_dataset,
+                    )
+                    logger.info(
+                        "少数类重采样已启用: len %d → %d",
+                        len(raw_train_dataset),
+                        len(self._dataset_train),
+                    )
             if self._dataset_val is None:
                 self._dataset_val = build_dataset("val", ns, resolution)
             # Build Kornia pipeline (once); use _kornia_setup_done so fallback paths

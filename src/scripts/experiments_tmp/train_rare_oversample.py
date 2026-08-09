@@ -23,7 +23,8 @@ from rfdetr.variants import RFDETRLargeDeprecated, RFDETRMedium, RFDETRNano, RFD
 # ============================================================================
 
 # --- 模型 ---
-MODEL = "large"           # 可选: nano, small, medium, large
+# 实验一：少数类重采样（对照 0805-SHWX-data-expand-rfdetr-baseline，唯一变量为重采样开关）
+MODEL = "medium"          # 可选: nano, small, medium, large
 
 # --- 数据集 ---
 DATASET_DIR = "/home/liu/wzt/datasets/SHWX-dataset-dict"
@@ -32,12 +33,12 @@ DATASET_FILE = "yolo"            # roboflow：Roboflow COCO 格式 (train/_annot
 # --- 训练超参数 ---
 NUM_CLASSES = 25          # 类别数
 EPOCHS = 100              # 训练轮数
-BATCH_SIZE = 8            # 每 GPU 的 batch size
+BATCH_SIZE = 16           # 每 GPU 的 batch size（与 0805 基线一致）
 NUM_WORKERS = 12           # DataLoader 工作进程数
 LR = 1e-4                 # 基础学习率
 LR_ENCODER = 1.5e-4       # 编码器（backbone）学习率
 WEIGHT_DECAY = 1e-4       # 权重衰减
-GRAD_ACCUM_STEPS = 8      # 梯度累积步数（有效 batch = BATCH_SIZE * GRAD_ACCUM_STEPS）
+GRAD_ACCUM_STEPS = 4      # 梯度累积步数（有效 batch = BATCH_SIZE * GRAD_ACCUM_STEPS = 64，与 0805 基线一致）
 CLIP_MAX_NORM = 0.1       # 梯度裁剪
 
 # --- 学习率调度 ---
@@ -64,7 +65,7 @@ MOSAIC_P = 0.8
 # 将训练集长度扩展 RARE_CLASS_OVERSAMPLE_FACTOR 倍，扩展段循环映射到包含
 # RARE_CLASS_OVERSAMPLE_CLASS_IDS 中任意类别的图片，提升稀有类训练参与度
 # （SHWX: HM 航母仅 6 框、LQS 两栖舰仅 15 框，训练中几乎不会被采样到）。
-RARE_CLASS_OVERSAMPLE = False          # 重采样开关
+RARE_CLASS_OVERSAMPLE = True           # 重采样开关（本实验开启）
 RARE_CLASS_OVERSAMPLE_FACTOR = 2       # 倍率（总长度 = 原长 × factor，可做 2/4/8 消融）
 RARE_CLASS_OVERSAMPLE_CLASS_IDS = [0, 1]   # 0=HM 航母, 1=LQS 两栖舰
 
@@ -74,7 +75,7 @@ DEVICES = 1               # GPU 数量
 NUM_NODES = 1             # 节点数
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0809-SHWX-rfdetr-large-baseline"   # 输出目录
+OUTPUT_DIR = "output/0810-SHWX-rfdetr-medium-rare-oversample"   # 输出目录
 TENSORBOARD = True                  # 是否启用 TensorBoard
 WANDB = False                       # 是否启用 Wandb
 

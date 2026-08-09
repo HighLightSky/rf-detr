@@ -1107,6 +1107,19 @@ class TrainConfig(BaseConfig):
     eval_masks_head_resolution: bool = False
     aug_config: Optional[Dict[str, Any]] = None
     mosaic_p: float = Field(default=0.0, ge=0.0, le=1.0, description="Mosaic 增强触发概率，0 表示关闭。")
+    rare_class_oversample: bool = Field(
+        default=False,
+        description="少数类重采样开关：为 True 时训练集长度扩展 rare_class_oversample_factor 倍，扩展段循环映射到包含 rare_class_oversample_class_ids 中任意类别的图片。默认关闭，不影响基线行为。",
+    )
+    rare_class_oversample_factor: int = Field(
+        default=2,
+        ge=1,
+        description="少数类重采样倍率：总长度 = 原长度 × factor。",
+    )
+    rare_class_oversample_class_ids: list[int] = Field(
+        default_factory=list,
+        description="视为少数类的类别 id 列表（SHWX: 0=HM 航母, 1=LQS 两栖舰）。为空时退化为直通。",
+    )
     scale_jitter: bool = True
     augmentation_backend: AugmentationBackend | Literal["cpu", "auto"] = "cpu"
     save_dataset_grids: bool = False
