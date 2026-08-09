@@ -64,12 +64,12 @@ def _label_keyed_names(names_by_id: dict[int, str]) -> dict[int, str]:
 # ══════════════════════════════════════════════════════════════════════
 DATASET_CONFIGS: dict[str, dict[str, Any]] = {
     "shwx": {
-        "data_dir": "/home/liu/datasets/SHWX-dataset-dict",
+        "data_dir": "/home/liu/wzt/datasets/SHWX-dataset-dict",
         "image_dir": "images/test",
         "label_format": "yolo",
         "label_dir": "labels/test",
-        "exp_output_dir": "output/0808-SHWX-SemHead/0808-SHWX-SemHead-e1a-full",
-        "checkpoint_file": "checkpoint_best_total.pth",
+        "exp_output_dir": "output/0809-SHWX-rfdetr-large-baseline",
+        "checkpoint_file": "checkpoint_best_regular.pth",
         "num_classes": 25,
         "vehicle_class_ids": {24},  # FSC 发射车，比赛规则按车辆目标 IoU=0.35
         "class_names": _label_keyed_names(SHWX_CLASS_NAMES),
