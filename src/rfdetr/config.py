@@ -1232,6 +1232,54 @@ class TrainConfig(BaseConfig):
     本类原型 ∪ 同类别实例，用真实同类实例锚定随机初始化投影头的冷启动；
     负样本仍为全部有效原型（语义加权）。推荐投影实验开启。"""
 
+    # ------------------------------------------------------------------
+    # 语义分类头（SemanticResidual，默认全关）
+    # 见 docs/改进方案-SSCL/RF-DETR语义分类头改进方案.md
+    # ------------------------------------------------------------------
+    semantic_head_enabled: bool = False
+    """语义分类头总开关。开启后在 decoder 分类 logits 上叠加语义残差增量。"""
+    semantic_fsem_path: str | None = None
+    """f_sem 产物路径（``fsem_shwx.pt``，含 S 矩阵），由 stage0_train_fsem.py 产出。"""
+    semantic_channel_stats_path: str | None = None
+    """通道 TF-IDF 统计路径（``channel_stats_shwx.pt``），由 stage0_train_fsem.py 产出。"""
+    semantic_mask_enabled: bool = True
+    """是否启用通道掩码增量（``mask_delta``）。关闭（M=1）时等价于纯语义方向注入
+    （消融实验 E2b）。"""
+    semantic_alpha_enabled: bool = True
+    """是否启用语义方向增量（``sem_delta``）。关闭（α=0）时等价于仅通道掩码
+    （消融实验 E1c）。"""
+    semantic_alpha_learnable: bool = True
+    """α 是否可学习。关闭时 α 冻结在初始值（消融实验 E3b，验证 α 自适应的价值）。"""
+    semantic_parallel_logit: bool = False
+    """平行 logit 结构开关（保留用于结构对比实验）。平行模式 = 仅叠加 ``α·(hs@Sᵀ)``，
+    与"残差 + 掩码关闭"数学等价（E1b 与 E2b 对照）。"""
+    semantic_alpha_init: float = 0.1
+    """base 类 α 初始值。α 为语义注入强度，clamp 到 [0, semantic_alpha_max]。"""
+    semantic_novel_alpha_init: float = 0.1
+    """novel 类（少样本舰船类）α 初始值，通常略高于 base（消融实验 E3c 置 0.5）。"""
+    semantic_alpha_max: float = 2.0
+    """α 上限，防止语义项把舰船 logit 整体抬高引发 FP。"""
+    semantic_mask_tau: float = 1.0
+    """掩码软度 τ_mask：``M = sigmoid((θ − r)/τ_mask)``。rank 范围 [1,d] 很大，
+    实际有效 τ = max(该值, d/16)（d=256 时≈16），保证 soft 带覆盖约 1/4 通道、
+    θ 梯度存活（过小会让 M≈1 饱和、掩码学不动）。"""
+    semantic_theta_init: float = 0.0
+    """θ 初始化偏移：``θ = d + semantic_theta_init·τ_mask``。默认 0（θ=d），M 对
+    最差通道≈0.5、对多数通道≈1，初始接近"全保留"但掩码梯度存活；可加大让掩码
+    初始更激进（更早收窄）。"""
+    semantic_novel_classes: list[int] | None = None
+    """novel 类（少样本类）索引列表。该类 α 用 ``semantic_novel_alpha_init``。
+    默认 None（训练脚本显式传 [0,1,2,3] 舰船类）。"""
+    semantic_frozen_threshold_classes: list[int] | None = None
+    """θ 冻结于初始值（base 均值语义）的类别索引。少样本类样本太少学不准，
+    默认 None（训练脚本显式传 [0,1,2,3]）。"""
+    semantic_lr: float = 1e-4
+    """α/θ 独立参数组学习率。标量参数需足够 LR，否则学不出来（投影头同款教训）。"""
+    semantic_align_classes: list[int] | None = None
+    """对齐监控逐类输出的类别列表，默认 None（训练脚本显式传 novel 类）。"""
+    semantic_monitor_log_interval: int = 100
+    """语义头监控采样步间隔（每 N 步采样一次，epoch 末聚合输出到 train/sem/*）。"""
+
     @field_validator("progress_bar", mode="before")
     @classmethod
     def _coerce_legacy_progress_bar(cls, value: Any) -> Any:

@@ -16,28 +16,28 @@ from __future__ import annotations
 from pathlib import Path
 
 from rfdetr.datasets.aug_configs import AUG_AERIAL
-from rfdetr.variants import RFDETRLarge, RFDETRMedium, RFDETRNano, RFDETRSmall
+from rfdetr.variants import RFDETRLargeDeprecated, RFDETRMedium, RFDETRNano, RFDETRSmall
 
 # ============================================================================
 # 训练参数 —— 在这里修改配置
 # ============================================================================
 
 # --- 模型 ---
-MODEL = "medium"          # 可选: nano, small, medium, large
+MODEL = "large"           # 可选: nano, small, medium, large
 
 # --- 数据集 ---
-DATASET_DIR = "/home/liu/datasets/SHWX-dataset-dict"
+DATASET_DIR = "/home/liu/wzt/datasets/SHWX-dataset-dict"
 DATASET_FILE = "yolo"            # roboflow：Roboflow COCO 格式 (train/_annotations.coco.json)，还有coco yolo
 
 # --- 训练超参数 ---
 NUM_CLASSES = 25          # 类别数
 EPOCHS = 100              # 训练轮数
-BATCH_SIZE = 16            # 每 GPU 的 batch size
+BATCH_SIZE = 8            # 每 GPU 的 batch size
 NUM_WORKERS = 12           # DataLoader 工作进程数
 LR = 1e-4                 # 基础学习率
 LR_ENCODER = 1.5e-4       # 编码器（backbone）学习率
 WEIGHT_DECAY = 1e-4       # 权重衰减
-GRAD_ACCUM_STEPS = 4      # 梯度累积步数（有效 batch = BATCH_SIZE * GRAD_ACCUM_STEPS）
+GRAD_ACCUM_STEPS = 8      # 梯度累积步数（有效 batch = BATCH_SIZE * GRAD_ACCUM_STEPS）
 CLIP_MAX_NORM = 0.1       # 梯度裁剪
 
 # --- 学习率调度 ---
@@ -66,17 +66,18 @@ DEVICES = 1               # GPU 数量
 NUM_NODES = 1             # 节点数
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0808-SHWX-rfdetr-baseline-frozen_backbone"   # 输出目录
+OUTPUT_DIR = "output/0809-SHWX-rfdetr-large-baseline"   # 输出目录
 TENSORBOARD = True                  # 是否启用 TensorBoard
 WANDB = False                       # 是否启用 Wandb
 
-# --- 骨干冻结（对比实验变量） ---
-# 冻结 DINOv2 骨干，仅训练 projector/decoder/分类/回归头。
-# 与 output/0805-SHWX-data-expand-rfdetr-baseline（全量微调）构成"唯一变量=骨干是否冻结"的对比。
-FREEZE_ENCODER = True
+# --- 骨干微调 ---
+# 原版默认是全量微调（freeze_encoder=False）。
+# 0805（全量微调）vs 0808（冻结骨干）对比实验表明：冻结 DINOv2 骨干后
+# ship 类 Recall 从 0.80 暴跌到 0.42，全量微调明显更优。
+FREEZE_ENCODER = False
 
 # --- EMA (指数移动平均) ---
-USE_EMA = True            # 关闭 EMA，节省约 1 倍模型权重的显存
+USE_EMA = True            # EMA 提升收敛稳定性与最终精度，原版默认开启
 
 # --- 验证 ---
 EVAL_INTERVAL = 5         # 每隔 N 个 epoch 验证一次（减少 CPU 阻塞，加快训练）
@@ -93,7 +94,11 @@ _MODEL_REGISTRY: dict[str, tuple[type, int]] = {
     "nano": (RFDETRNano, 384),
     "small": (RFDETRSmall, 512),
     "medium": (RFDETRMedium, 640),
-    "large": (RFDETRLarge, 768),
+    # 原版 Large（DINOv2-Base 骨干，135M 参数，medium 的 4 倍）。
+    # 注意：新版 RFDETRLarge(2026) 的骨干与 medium 相同（ViT-S），只是分辨率 704；
+    # 真正更大的骨干是这里的 RFDETRLargeDeprecated（已标记废弃但功能完整）。
+    # 原生分辨率 560，位置编码 PE=37 与预训练权重绑定，不能随意改分辨率。
+    "large": (RFDETRLargeDeprecated, 560),
 }
 
 

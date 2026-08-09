@@ -68,7 +68,7 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         "image_dir": "images/test",
         "label_format": "yolo",
         "label_dir": "labels/test",
-        "exp_output_dir": "output/0808-SHWX-rfdetr-baseline-frozen_backbone",
+        "exp_output_dir": "output/0808-SHWX-SemHead/0808-SHWX-SemHead-e1a-full",
         "checkpoint_file": "checkpoint_best_total.pth",
         "num_classes": 25,
         "vehicle_class_ids": {24},  # FSC 发射车，比赛规则按车辆目标 IoU=0.35
@@ -759,6 +759,13 @@ if __name__ == "__main__":
     device = resolve_device(DEVICE)
     print(f"[i] 正在从 {CHECKPOINT_PATH} 加载 RF-DETR 模型...")
     model = RFDETRMedium.from_checkpoint(str(CHECKPOINT_PATH))
+    # [SemHead] 若 checkpoint 含语义头权重（语义分类头实验），重建语义残差模块，
+    # 保证离线推理与训练前向一致（from_checkpoint 不经过 module_model 的装配逻辑）。
+    from rfdetr.sscl.semantic_head import attach_from_checkpoint
+
+    _ckpt_sd = torch.load(str(CHECKPOINT_PATH), map_location="cpu", weights_only=True)
+    attach_from_checkpoint(model.model.model, _ckpt_sd.get("model", _ckpt_sd))
+    del _ckpt_sd
     pred_records, throughput, gpu_util, timed_images = predict_batched_to_records(
         model,
         test_image_paths,

@@ -14,6 +14,7 @@ CLIP 只参与本模块的离线计算，不参与在线训练或推理。
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import torch
@@ -26,16 +27,36 @@ logger = get_logger()
 # 默认 CLIP 模型名称（HuggingFace），首次运行会自动下载权重
 DEFAULT_CLIP_MODEL_NAME = "openai/clip-vit-large-patch14"
 
+# 本机离线缓存的 CLIP 权重路径（网络不可用时的备选；与 build_semantic_matrix.py 一致）
+_LOCAL_CLIP_CACHE_PATH = "/home/liu/wzt/Ruiyingshizong/AeroGen/ckpt/clip/clip-vit-large-patch14"
 
-def build_semantic_similarity_matrix(
+
+def _resolve_clip_model(model_name: str) -> str:
+    """解析 CLIP 模型：优先使用本地离线缓存路径（若存在）。
+
+    Args:
+        model_name: 调用方传入的模型名或路径。
+
+    Returns:
+        本地缓存路径（当它存在时），否则原样返回 ``model_name``。
+    """
+    if os.path.exists(_LOCAL_CLIP_CACHE_PATH):
+        return _LOCAL_CLIP_CACHE_PATH
+    return model_name
+
+
+def encode_class_text_embeddings(
     class_prompts: dict[int, list[str]],
     model_name: str = DEFAULT_CLIP_MODEL_NAME,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
 ) -> torch.Tensor:
-    """使用 CLIP 文本编码器构建类别语义相似度矩阵。
+    """使用 CLIP 文本编码器将每个类别的 prompt 编码为文本向量。
 
-    对每个类别的所有 prompt 逐条编码后取平均作为该类别的文本向量，
-    再计算任意两个类别向量间的余弦相似度。
+    对每个类别的所有 prompt 逐条编码后取平均作为该类别的文本向量。
+    每个 prompt 的向量在投影后先做 L2 归一化再取平均（与
+    ``build_semantic_similarity_matrix`` 的内部约定一致），但最终返回的
+    类别均值向量**不再整体归一化**——留给调用方决定（语义相似度矩阵
+    需要归一化后算余弦；f_sem 投影训练时会在损失内部归一化）。
 
     Args:
         class_prompts: ``{class_id: [prompt_1, prompt_2, ...]}`` 映射。
@@ -43,7 +64,8 @@ def build_semantic_similarity_matrix(
         device: 计算设备，默认自动选择 CUDA/CPU。
 
     Returns:
-        形状 ``[num_classes, num_classes]`` 的余弦相似度矩阵，对角线上为 1。
+        形状 ``[num_classes, D]`` 的类别文本向量（D=768，CLIP ViT-L 的
+        text projection 输出维度），行序与 ``sorted(class_prompts.keys())`` 一致。
 
     Raises:
         ValueError: 当 ``class_prompts`` 为空或存在无 prompt 的类别时抛出。
@@ -52,6 +74,12 @@ def build_semantic_similarity_matrix(
         raise ValueError("class_prompts 不能为空。")
     if any(len(prompts) == 0 for prompts in class_prompts.values()):
         raise ValueError("每个类别至少需要 1 个 prompt。")
+
+    # 强制 transformers/huggingface_hub 离线模式（与 build_semantic_matrix.py 一致）：
+    # 本机无外网时避免 from_pretrained 尝试访问网络；有本地缓存时直接读缓存。
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    model_name = _resolve_clip_model(model_name)
 
     # 延迟导入 transformers，避免未安装时拖慢包导入。
     # 注：transformers 5.x 中 CLIPModel 不再内置 tokenizer，需单独加载。
@@ -91,8 +119,32 @@ def build_semantic_similarity_matrix(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+    return torch.stack(class_vectors, dim=0)
+
+
+def build_semantic_similarity_matrix(
+    class_prompts: dict[int, list[str]],
+    model_name: str = DEFAULT_CLIP_MODEL_NAME,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+) -> torch.Tensor:
+    """使用 CLIP 文本编码器构建类别语义相似度矩阵。
+
+    复用 ``encode_class_text_embeddings`` 得到类别文本向量，整体归一化后
+    计算任意两个类别向量间的余弦相似度。
+
+    Args:
+        class_prompts: ``{class_id: [prompt_1, prompt_2, ...]}`` 映射。
+        model_name: HuggingFace CLIP 模型名称。
+        device: 计算设备，默认自动选择 CUDA/CPU。
+
+    Returns:
+        形状 ``[num_classes, num_classes]`` 的余弦相似度矩阵，对角线上为 1。
+
+    Raises:
+        ValueError: 当 ``class_prompts`` 为空或存在无 prompt 的类别时抛出。
+    """
     # 堆叠为 [C, D] 并归一化，计算余弦相似度矩阵
-    vectors = F.normalize(torch.stack(class_vectors, dim=0), dim=-1)
+    vectors = F.normalize(encode_class_text_embeddings(class_prompts, model_name, device), dim=-1)
     matrix = vectors @ vectors.T
     # 数值误差可能导致对角线略偏离 1，强制修正
     matrix = matrix.clamp(min=-1.0, max=1.0)

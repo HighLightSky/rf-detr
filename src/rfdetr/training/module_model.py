@@ -34,7 +34,11 @@ from rfdetr.datasets.coco import compute_multi_scale_scales
 from rfdetr.models.lwdetr import build_criterion_from_config, build_model_from_config
 from rfdetr.models.weights import apply_lora, interpolate_position_embeddings, load_pretrain_weights
 from rfdetr.training.callbacks.coco_eval import _get_ema_inner_module
-from rfdetr.training.param_groups import get_param_dict, get_projection_head_param_dict
+from rfdetr.training.param_groups import (
+    get_param_dict,
+    get_projection_head_param_dict,
+    get_semantic_head_param_dict,
+)
 from rfdetr.utilities.logger import get_logger
 
 logger = get_logger()
@@ -396,9 +400,18 @@ class RFDETRModelModule(LightningModule):
         # they are constructed with a config that matches the current model head.
         self.criterion, self.postprocess = build_criterion_from_config(self.model_config, self.train_config)
 
-        # [SSCL] 若启用 SSCL（语义相似度引导的对比学习），初始化冻结策略、
-        # 对比损失与基类蒸馏。必须在 configure_optimizers() 之前调用，
-        # 确保优化器只包含解冻后的可训练参数。
+        # [SSCL + SemHead] 语义头/对比学习初始化顺序（必须在 configure_optimizers()
+        # 之前调用，确保优化器只包含解冻后的可训练参数）：
+        # 1) 先装配语义头（创建 α/θ 参数与 S/rank buffer）——必须在冻结之前，
+        #    否则 freeze 会把 requires_grad 全部置 False；
+        # 2) 保守冻结策略同时覆盖 SSCL 与"仅语义头"场景（E4c 关闭 SSCL 时仍生效）；
+        # 3) 再初始化 SSCL 损失与基类蒸馏。
+        if self.train_config.semantic_head_enabled:
+            self._setup_semantic_head()
+        if (self.train_config.sscl_enabled or self.train_config.semantic_head_enabled) and (
+            self.train_config.sscl_freeze_strategy == "conservative"
+        ):
+            self._apply_sscl_freeze()
         if self.train_config.sscl_enabled:
             self._setup_sscl()
 
@@ -487,15 +500,10 @@ class RFDETRModelModule(LightningModule):
             prototype_instance_pos=cfg.sscl_prototype_instance_pos,
         )
 
-        # 配置冻结策略：默认 "conservative" 冻结 backbone/encoder/bbox 头等，
-        # 仅解冻 decoder 最后一层与分类头，让 SSCL 能真正重塑 query 特征空间
-        # （适合在已收敛 checkpoint 上微调）；"none" 时保持全量微调，适合
-        # 从预训练直接开始训练、由常规损失先学基类的实验。
-        if cfg.sscl_freeze_strategy == "conservative":
-            self._apply_sscl_freeze()
-        elif cfg.sscl_freeze_strategy == "none":
+        # 冻结策略校验（实际冻结在 __init__ 中统一应用，同时覆盖 SSCL 与语义头场景）。
+        if cfg.sscl_freeze_strategy == "none":
             logger.info("[SSCL] 冻结策略为 none：保持全量微调，不冻结任何参数")
-        else:
+        elif cfg.sscl_freeze_strategy != "conservative":
             raise ValueError(
                 f"不支持的 sscl_freeze_strategy: {cfg.sscl_freeze_strategy}，可选: 'conservative', 'none'"
             )
@@ -509,8 +517,25 @@ class RFDETRModelModule(LightningModule):
         self.criterion.weight_dict["loss_sscl"] = cfg.sscl_lambda
 
         # 注册 SSCL 回调：在 criterion forward() 内复用 Hungarian matching
-        # 的 indices，避免重复匹配
-        self.criterion.set_sscl_loss_fn(self._sscl_loss_callback)
+        # 的 indices，避免重复匹配。若同时启用语义头，把监控回调与 SSCL 回调
+        # 组合成单一回调注册（set_sscl_loss_fn 是单槽）。
+        if getattr(self, "_semantic_monitor", None) is not None:
+            sscl_cb = self._sscl_loss_callback
+            monitor_cb = self._semantic_monitor_callback
+
+            def combined(
+                outputs: dict[str, Any],
+                targets: list[dict[str, Tensor]],
+                indices: list[tuple[Tensor, Tensor]],
+            ) -> dict[str, Tensor]:
+                """组合回调：先算 SSCL 损失，再更新语义监控（返回空 dict 不污染 loss）。"""
+                merged = dict(sscl_cb(outputs, targets, indices))
+                monitor_cb(outputs, targets, indices)
+                return merged
+
+            self.criterion.set_sscl_loss_fn(combined)
+        else:
+            self.criterion.set_sscl_loss_fn(self._sscl_loss_callback)
         logger.info(
             f"[SSCL] 已启用：λ={cfg.sscl_lambda}, τ={cfg.sscl_tau}, ρ={cfg.sscl_rho}, "
             f"anchor={cfg.sscl_anchor_classes}, confusing={cfg.sscl_confusing_classes}, "
@@ -545,6 +570,19 @@ class RFDETRModelModule(LightningModule):
         # 解冻分类头
         for param in model.class_embed.parameters():
             param.requires_grad = True
+        # [SemHead] 语义参数纳入可训练（冻结全部后这里按配置恢复，与"先全冻结
+        # 再选择性解冻"的既有策略一致）：α 由 alpha_enabled+learnable 决定，
+        # θ 在 frozen_threshold_classes 上保持冻结（novel 类样本太少学不准，
+        # 通过梯度置零 hook 实现）。注意：θ 是整张量参数，只能整张量设
+        # requires_grad，冻结按类别走 _frozen_theta_mask。
+        if getattr(model, "semantic_residual", None) is not None:
+            cfg = self.train_config
+            sr = model.semantic_residual
+            frozen_theta = list(cfg.semantic_frozen_threshold_classes or [])
+            sr.alpha.requires_grad = bool(cfg.semantic_alpha_enabled and cfg.semantic_alpha_learnable)
+            sr.theta.requires_grad = bool(cfg.semantic_mask_enabled)
+            sr.set_frozen_theta_classes(frozen_theta)
+            logger.info(f"[SemHead] 语义参数可训练性恢复完成：{sr.describe_freeze()}")
         logger.info("[SSCL] 冻结策略已应用：仅 decoder 最后一层 + decoder norm + class_embed 可训练")
 
     def _sscl_loss_callback(
@@ -599,6 +637,118 @@ class RFDETRModelModule(LightningModule):
         features = hs[idx]
         labels = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
         return features, labels
+
+    def _setup_semantic_head(self) -> None:
+        """装配语义分类头（SemanticResidual）与训练监控。
+
+        从 f_sem/通道统计产物构建语义残差模块挂到 ``model.semantic_residual``，
+        并实例化 ``SemanticMonitor`` 累加器。冻结矩阵（novel 类 θ 冻结、α 可学习性）
+        在 ``_apply_sscl_freeze`` 中统一恢复。若 SSCL 未启用（仅语义头场景），
+        直接注册监控回调到 criterion。
+        """
+        from rfdetr.sscl import SemanticResidual, SemanticMonitor
+
+        cfg = self.train_config
+        model = self.model
+        # DETR 约定：class_embed.out_features = 前景类数 + 1（background 占最后一位），
+        # 语义头只作用于前景类，background 列在 lwdetr 前向中用 0 增量补齐。
+        num_classes = int(model.class_embed.out_features) - 1
+        hidden_dim = int(self.model_config.hidden_dim)
+        model.semantic_residual = SemanticResidual.build(cfg, num_classes, hidden_dim)
+
+        # novel/base 类划分（默认 novel=舰船 0-3、base=飞机 4-23 + FSC 24）
+        novel_classes = cfg.semantic_novel_classes or [0, 1, 2, 3]
+        base_classes = [c for c in range(num_classes) if c not in set(novel_classes)]
+        align_classes = cfg.semantic_align_classes or novel_classes
+        # 监控日志的类别名：优先用配置传入的 class_names，否则用 SHWX 提示词表
+        # （语义头实验当前仅在 SHWX 上进行），再退化为 c{id}
+        if cfg.class_names:
+            class_names = list(cfg.class_names)
+        else:
+            try:
+                from rfdetr.sscl.prompts import SHWX_CLASS_NAMES
+
+                class_names = [SHWX_CLASS_NAMES.get(c, f"c{c}") for c in range(num_classes)]
+            except Exception:
+                class_names = [f"c{c}" for c in range(num_classes)]
+        self._semantic_monitor = SemanticMonitor(
+            class_names=class_names,
+            novel_classes=novel_classes,
+            base_classes=base_classes,
+            align_classes=align_classes,
+            num_classes=num_classes,
+        )
+
+        # 仅语义头（无 SSCL）时直接注册监控回调（复用 criterion 的 Hungarian indices）
+        if not cfg.sscl_enabled:
+            self.criterion.set_sscl_loss_fn(self._semantic_monitor_callback)
+        logger.info(f"[SemHead] 语义头已装配：{model.semantic_residual.describe_freeze()}")
+
+    def _semantic_monitor_callback(
+        self,
+        outputs: dict[str, Any],
+        targets: list[dict[str, Tensor]],
+        indices: list[tuple[Tensor, Tensor]],
+    ) -> dict[str, Tensor]:
+        """语义监控回调，在 criterion forward() 内被调用（每 ``semantic_monitor_log_interval`` 步采样一次）。
+
+        复用 Hungarian matching 提取 matched 特征，从 ``outputs["semantic_stats"]``
+        读取掩码/语义增量，计算贡献占比与对齐余弦，喂给 ``SemanticMonitor``。
+
+        Args:
+            outputs: 模型输出字典（含 ``"semantic_stats"`` 与 ``"hs"``）。
+            targets: 目标字典列表。
+            indices: Hungarian matching 结果。
+
+        Returns:
+            空字典（监控不产生损失，避免污染 loss_dict 与 train/* 日志键）。
+        """
+        interval = int(getattr(self.train_config, "semantic_monitor_log_interval", 100))
+        if self.global_step % interval != 0:
+            return {}
+        if "semantic_stats" not in outputs or getattr(self, "_semantic_monitor", None) is None:
+            return {}
+        stats = outputs["semantic_stats"]
+        monitor: SemanticMonitor = self._semantic_monitor
+
+        # matched 特征与标签（用于对齐余弦与贡献占比的类别分组）
+        features, labels = self._extract_matched_query_features(outputs["hs"], indices, targets)
+        s_matrix = self.model.semantic_residual.S
+        alpha = stats["alpha"]  # [C]
+        theta = stats["theta"]  # [C]
+        m = stats["M"]  # [C, d]
+
+        # 贡献占比：|增量| / (|原版 logits|+ε)，按类别聚合（matched 部分）。
+        # 增量是 [L, B, Q, C] 全层栈，pred_logits 是最后一层，取 [-1] 对齐。
+        pred_logits = outputs["pred_logits"]
+        idx = self.criterion._get_src_permutation_idx(indices)
+        matched_logits = pred_logits[idx]  # [N_fg, C+1]（末位为 background）
+        matched_sem = stats["sem_delta"][-1][idx]  # [N_fg, C] 前景类增量
+        matched_mask = stats["mask_delta"][-1][idx]
+        num_classes = int(self.model.class_embed.out_features) - 1  # 前景类数
+        # 贡献占比分母只统计前景类 logits（切掉 background 列）
+        matched_fg = matched_logits[:, :num_classes]
+        ratio_sem = torch.zeros(num_classes, device=matched_logits.device)
+        ratio_mask = torch.zeros(num_classes, device=matched_logits.device)
+        for c in range(num_classes):
+            sel = labels == c
+            if sel.any():
+                denom = matched_fg[sel].abs().sum() + 1e-6
+                ratio_sem[c] = matched_sem[sel].abs().sum() / denom
+                ratio_mask[c] = matched_mask[sel].abs().sum() / denom
+
+        # 对齐余弦：每类 matched 特征均值与 s_c 的余弦（验证特征是否向语义方向靠拢）
+        with torch.no_grad():
+            s_norm = torch.nn.functional.normalize(s_matrix, dim=-1)
+            align = torch.zeros(num_classes, device=features.device)
+            for c in range(num_classes):
+                sel = labels == c
+                if sel.any():
+                    h_mean = torch.nn.functional.normalize(features[sel].mean(dim=0), dim=-1)
+                    align[c] = torch.nn.functional.cosine_similarity(h_mean.unsqueeze(0), s_norm[c].unsqueeze(0))
+
+        monitor.update({"alpha": alpha, "theta": theta, "M": m, "ratio_sem": ratio_sem, "ratio_mask": ratio_mask, "align": align})
+        return {}
 
     def _setup_sscl_distill(self) -> None:
         """构建教师模型与基类蒸馏损失。
@@ -1017,12 +1167,37 @@ class RFDETRModelModule(LightningModule):
             return
         scheduler.step()
 
+    def on_after_backward(self) -> None:
+        """采集语义头 α/θ 的梯度范数供监控（自动优化路径 backward 完成后触发）。
+
+        在 no_grad 下**只读取** α/θ 的 ``.grad`` 范数喂给 SemanticMonitor，绝不置空：
+        PTL 自动优化路径在 optimizer.step() 前依赖这些梯度更新 α/θ，清空会导致
+        语义参数永远不更新。梯度累积（accumulate_grad_batches>1）时读取的是当前
+        累计梯度，用于监控"是否在学"仍具代表性。仅在语义头启用时执行。
+        """
+        monitor = getattr(self, "_semantic_monitor", None)
+        semantic_residual = getattr(self.model, "semantic_residual", None)
+        if monitor is None or semantic_residual is None:
+            return
+        with torch.no_grad():
+            alpha_grad = semantic_residual.alpha.grad
+            theta_grad = semantic_residual.theta.grad
+            if alpha_grad is not None:
+                monitor.update_grad_norms(alpha_grad.detach(), theta_grad.detach() if theta_grad is not None else None)
+            else:
+                # 无梯度（冻结参数）时也上报，便于监控确认冻结生效
+                monitor.update_grad_norms(None, None)
+
     def on_train_epoch_end(self) -> None:
         """Step epoch-interval (non-plateau) schedulers on the manual-optimization path.
 
         The automatic-optimization path leaves scheduler stepping entirely to Lightning; only the manual keypoint loop
-        steps schedulers itself.
+        steps schedulers itself. 语义头监控指标在此统一输出到 ``train/sem/*``。
         """
+        # [SemHead] 语义监控 epoch 级聚合输出（自动/手动优化路径均适用）
+        monitor = getattr(self, "_semantic_monitor", None)
+        if monitor is not None:
+            monitor.on_train_epoch_end(self)
         if self.automatic_optimization or self._lr_scheduler_interval != "epoch":
             return
         scheduler = self._current_lr_scheduler()
@@ -1259,12 +1434,21 @@ class RFDETRModelModule(LightningModule):
         # name-prefix mismatches that put the same tensor in multiple groups.
         model_for_params = getattr(self.model, "_orig_mod", self.model)
         param_dicts = get_param_dict(ns, model_for_params)
+        # [SemHead] 语义头参数会被 get_param_dict 落入 other_params（lr=args.lr 主组），
+        # 这里先按参数 id 从主组过滤，再在下方追加独立语义组（lr=semantic_lr），
+        # 避免同一参数被两个参数组重复更新。
+        semantic_residual = getattr(model_for_params, "semantic_residual", None)
+        if semantic_residual is not None:
+            sem_ids = {id(p) for p in semantic_residual.parameters()}
+            param_dicts = [pg for pg in param_dicts if id(pg["params"]) not in sem_ids]
         param_dicts = [param_group for param_group in param_dicts if param_group["params"].requires_grad]
         # [SSCL] 投影头参数不在 LWDETR 内部，get_param_dict 收集不到，手动追加为
         # 独立参数组。须在上一行按 requires_grad 过滤之后追加：该过滤假定每组
         # params 是单个张量，而本组 params 是列表，提前追加会抛 AttributeError。
         # getattr 兼容未启用 SSCL（无 sscl_loss 属性）的场景。
         param_dicts += get_projection_head_param_dict(getattr(self, "sscl_loss", None), tc.lr)
+        # [SemHead] 语义头 α/θ 独立参数组（标量参数需足够 LR 才能学出来）
+        param_dicts += get_semantic_head_param_dict(semantic_residual, tc.semantic_lr)
 
         optimizer_cfg = tc.optimizer
         optimizer: torch.optim.Optimizer

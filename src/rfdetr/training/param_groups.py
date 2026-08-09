@@ -106,3 +106,28 @@ def get_projection_head_param_dict(sscl_loss: nn.Module | None, lr: float) -> li
     if not params:
         return []
     return [{"params": params, "lr": lr}]
+
+
+def get_semantic_head_param_dict(semantic_residual: nn.Module | None, lr: float) -> list[dict[str, Any]]:
+    """收集语义分类头可学习参数（α/θ）为独立参数组。
+
+    SemanticResidual 挂在 LWDETR 内部（``model.semantic_residual``），
+    ``get_param_dict`` 会把其参数收进 ``other_params``（lr=args.lr 主组）；
+    调用方须先按参数 id 从 ``get_param_dict`` 结果中过滤，再追加本组，避免
+    同一参数被两个参数组重复更新。冻结的 novel 类 θ（requires_grad=False）与
+    冻结 α 自动被排除。
+
+    Args:
+        semantic_residual: 语义残差模块（可为 ``None``，未启用语义头时）。
+        lr: 语义参数组学习率（通常高于主组，标量参数需足够 LR 才能学出来）。
+
+    Returns:
+        语义参数组列表（``[{"params": [...], "lr": lr}]``）；无可训练参数时为
+        空列表。
+    """
+    if semantic_residual is None:
+        return []
+    params = [p for p in semantic_residual.parameters() if p.requires_grad]
+    if not params:
+        return []
+    return [{"params": params, "lr": lr}]

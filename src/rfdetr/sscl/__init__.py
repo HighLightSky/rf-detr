@@ -23,16 +23,32 @@ features 上的对比学习，缓解遥感数据集中舰船细粒度类别的�
 
 from __future__ import annotations
 
+from rfdetr.sscl.channel_stats import (
+    ChannelStats,
+    build_mask_from_rank,
+    compute_channel_tfidf,
+    load_channel_stats,
+    save_channel_stats,
+)
 from rfdetr.sscl.distill_loss import BaseClassDistillLoss
+from rfdetr.sscl.fsem import (
+    FSemProjection,
+    evaluate_alignment,
+    load_fsem_artifacts,
+    save_fsem_artifacts,
+)
 from rfdetr.sscl.projection import ProjectionHead
 from rfdetr.sscl.prototype_bank import PrototypeBank
+from rfdetr.sscl.semantic_head import SemanticResidual, attach_from_checkpoint
 from rfdetr.sscl.semantic_matrix import (
     build_semantic_similarity_matrix,
+    encode_class_text_embeddings,
     load_semantic_matrix,
     normalize_semantic_matrix,
     save_semantic_matrix,
     validate_matrix,
 )
+from rfdetr.sscl.semantic_monitor import SemanticMonitor
 from rfdetr.sscl.sscl_loss import SSCLLoss
 
 __all__ = [
@@ -40,9 +56,22 @@ __all__ = [
     "BaseClassDistillLoss",
     "PrototypeBank",
     "ProjectionHead",
+    "SemanticResidual",
+    "SemanticMonitor",
+    "FSemProjection",
+    "ChannelStats",
+    "attach_from_checkpoint",
     "build_semantic_similarity_matrix",
+    "encode_class_text_embeddings",
     "save_semantic_matrix",
     "load_semantic_matrix",
     "normalize_semantic_matrix",
     "validate_matrix",
+    "evaluate_alignment",
+    "save_fsem_artifacts",
+    "load_fsem_artifacts",
+    "compute_channel_tfidf",
+    "build_mask_from_rank",
+    "save_channel_stats",
+    "load_channel_stats",
 ]

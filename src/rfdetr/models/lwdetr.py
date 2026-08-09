@@ -153,6 +153,10 @@ class LWDETR(nn.Module):
         self.class_embed = nn.Linear(hidden_dim, num_classes)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.segmentation_head = segmentation_head
+        # [SemHead] 语义分类头残差模块；由 module_model._setup_semantic_head 在训练前
+        # 装配（默认 None = 原版行为，非语义实验与推理完全不变）。W 引用由前向传入，
+        # 不在此处持有，避免模块生命周期耦合。
+        self.semantic_residual: "SemanticResidual | None" = None
         query_dim = 4
         self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
         self.query_feat = nn.Embedding(num_queries * group_detr, hidden_dim)
@@ -528,6 +532,17 @@ class LWDETR(nn.Module):
                 outputs_coord = (self.bbox_embed(hs) + ref_unsigmoid).sigmoid()
 
             outputs_class = self.class_embed(hs)
+            # [SemHead] 语义残差增量叠加（全 decoder 层统一叠加，含 aux 层）。
+            # enc_out_class_embed 路径（two_stage query selection）完全不经过此处，
+            # proposal 分类器保持原版线性头 → query selection 不受语义化影响。
+            # 残差增量作用于叠加后的 logits，focal loss 与 Hungarian matching
+            # （matcher 读 outputs["pred_logits"]）均端到端参与。
+            semantic_stats = None  # 语义头监控统计（默认无）
+            if self.semantic_residual is not None:
+                semantic_delta, semantic_stats = self.semantic_residual(hs, self.class_embed.weight)
+                # 语义头只作用于前景类（C 列），DETR 的 background 在末位（C+1 列），
+                # 用 0 增量补齐保证形状一致
+                outputs_class = outputs_class + torch.nn.functional.pad(semantic_delta, (0, 1))
             outputs_keypoints = None
 
             if self.use_grouppose_keypoints and self.keypoint_embed is not None:
@@ -558,6 +573,9 @@ class LWDETR(nn.Module):
                 outputs_masks = seg_head_fwd(features[0].tensors, hs, cast(tuple[int, int], samples.tensors.shape[-2:]))
 
             out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1]}
+            # [SemHead] 语义监控统计挂载到输出（已 detach，供训练监控读取）
+            if semantic_stats is not None:
+                out["semantic_stats"] = semantic_stats
             # [SSCL] 暴露 decoder 最后一层的 hidden states，供 SSCL 对比学习
             # 提取 matched foreground query features。hs 已在上述 class_embed/bbox_embed
             # 计算中产生，仅多一次引用存储，不增加任何前向计算量。
