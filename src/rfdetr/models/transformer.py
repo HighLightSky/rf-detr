@@ -329,7 +329,7 @@ class Transformer(nn.Module):
         if getattr(torch.compiler, "is_exporting", _not_exporting)():
             spatial_shapes = torch.as_tensor(spatial_shapes_hw, device=srcs[0].device, dtype=torch.long)
         else:
-            spatial_shapes = torch.stack([torch._shape_as_tensor(src)[2:4] for src in srcs]).to(
+            spatial_shapes = torch.stack([torch.as_tensor(list(src.shape[2:])) for src in srcs]).to(
                 device=srcs[0].device, dtype=torch.long
             )
         level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))

@@ -326,13 +326,15 @@ def load_pretrain_weights(
     # structure.  PTL stores model weights in "state_dict" with keys prefixed by
     # "model." (matching the attribute path inside RFDETRModelModule).  Legacy and
     # BestModelCallback checkpoints already have a top-level "model" key.
+    # torch.compile 会把包装层以 "_orig_mod." 前缀暴露在 state_dict 键名里
+    # （OptimizedModule.state_dict 的行为），两类格式都需统一剥离该前缀。
+    compile_prefix = "_orig_mod."
     if "model" not in checkpoint and "state_dict" in checkpoint:
         logger.debug("Normalizing PTL .ckpt checkpoint format (state_dict -> model)")
         prefix = "model."
         # When the model was wrapped with torch.compile, PTL stores weights with keys
         # like "model._orig_mod.<param>".  Strip the extra "_orig_mod." segment so the
         # resulting keys match the expected bare parameter names.
-        compile_prefix = "_orig_mod."
         model_state = {}
         for k, v in checkpoint["state_dict"].items():
             if k.startswith(prefix):
@@ -353,6 +355,16 @@ def load_pretrain_weights(
         # (only when "args" is not already present).
         if "args" not in checkpoint and "hyper_parameters" in checkpoint:
             checkpoint["args"] = checkpoint["hyper_parameters"]
+    # 文件本身带顶层 "model" 键时（例如 EMA 回调落盘的 checkpoint_best_ema.pth），
+    # 键名同样可能带 "_orig_mod." 前缀。统一剥离后再做后续的裸键名查找
+    # （class_embed.bias 等）与 load_state_dict，否则会 KeyError 或全部权重被丢弃。
+    elif isinstance(checkpoint.get("model"), dict) and any(
+        key.startswith(compile_prefix) for key in checkpoint["model"]
+    ):
+        checkpoint["model"] = {
+            key[len(compile_prefix) :] if key.startswith(compile_prefix) else key: value
+            for key, value in checkpoint["model"].items()
+        }
 
     # Extract class_names from the checkpoint if available (ported from detr.py).
     if "args" in checkpoint:

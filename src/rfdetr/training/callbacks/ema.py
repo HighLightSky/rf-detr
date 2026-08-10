@@ -276,4 +276,8 @@ class RFDETREMACallback(Callback):
         if self._average_model is None or not hasattr(self._average_model.module, "model"):
             return None
         average_module = cast("RFDETRModelModule", self._average_model.module)
-        return {k: v.detach().clone() for k, v in average_module.model.state_dict().items()}
+        # torch.compile 会引入 _orig_mod 包装层，其 state_dict 键名带 "_orig_mod."
+        # 前缀；剥离后再导出，保证落盘的 EMA checkpoint 键名与未编译模型一致，
+        # 与 BestModelCallback._unwrap_model 的语义对齐。
+        ema_model = getattr(average_module.model, "_orig_mod", average_module.model)
+        return {k: v.detach().clone() for k, v in ema_model.state_dict().items()}

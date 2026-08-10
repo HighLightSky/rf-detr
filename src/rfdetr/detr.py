@@ -680,7 +680,14 @@ class RFDETR:
         # or saved with default values before fine-tuning changed the trained schema).
         # User-supplied ``kwargs`` take precedence and are applied in the ``update`` call below.
         _ckpt_weights: dict[str, Any] = ckpt.get("model") or {}
-        if not _ckpt_weights and "state_dict" in ckpt:
+        if _ckpt_weights:
+            # 已有顶层 "model" 键的 checkpoint（torch.compile 导出）同样可能带
+            # "_orig_mod." 前缀，统一剥离后再做键名查找与结构推断。
+            _ckpt_weights = {
+                key[len("_orig_mod.") :] if key.startswith("_orig_mod.") else key: value
+                for key, value in _ckpt_weights.items()
+            }
+        elif "state_dict" in ckpt:
             _pfx = "model."
             _ckpt_weights = {}
             for k, v in ckpt["state_dict"].items():

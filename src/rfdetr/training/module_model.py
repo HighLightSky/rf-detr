@@ -425,26 +425,70 @@ class RFDETRModelModule(LightningModule):
 
         accelerator = str(train_config.accelerator).lower()
         uses_cuda_accelerator = accelerator in {"auto", "gpu", "cuda"}
-        compile_enabled = (
-            model_config.compile and DEVICE == "cuda" and uses_cuda_accelerator and not train_config.multi_scale
-        )
-        if model_config.compile and train_config.multi_scale:
-            logger.info("Disabling torch.compile because multi_scale=True introduces dynamic input shapes.")
+        # 门控：compile=True + CUDA 即启用编译；dynamic 按"实际生效的输入尺寸数"
+        # 选择——单一 scale（默认配置 skip_random_resize 后固定 800×800）输入形状
+        # 静态，dynamic=False 的 guard 检查最省 CPU；多 scale（动态形状）用
+        # dynamic=True 的符号形状图覆盖所有 (H, W) 变体，避免逐 shape 重编译风暴。
+        effective_scales = self._effective_input_scales()
+        dynamic_shapes = len(effective_scales) > 1
+        compile_enabled = model_config.compile and DEVICE == "cuda" and uses_cuda_accelerator
         if compile_enabled:
-            # dynamic=True: one compiled graph handles all multi-scale input sizes instead
-            # of recompiling per (H, W) pair. suppress_errors=True: if inductor can't
+            logger.info(
+                "torch.compile 已启用（有效输入 scale: %s, dynamic=%s）",
+                effective_scales,
+                dynamic_shapes,
+            )
+            # dynamic 仅当多 scale（动态输入 shape）时需要：一个编译图
+            # 覆盖所有 (H, W) 变体，避免逐 shape 重编译。单一 scale 时输入
+            # shape 固定，dynamic=False 的 guard 检查大幅简化——实测 dynamic=True
+            # 的 dynamo 运行时开销持续吃 5+ 核 CPU（小 batch 下 GPU 闲置、step
+            # 时间被固定开销主导），dynamic=False 可显著缓解。
+            dynamic = dynamic_shapes
+            # suppress_errors=True: if inductor can't
             # compile a subgraph (e.g. bicubic backward with symbolic shapes), it falls
             # back to eager mode for that subgraph rather than crashing.
             # capture_scalar_outputs=True: include Tensor.item() calls
             # (gen_encoder_output_proposals / ms_deform_attn use spatial-shape .item()
-            # as Python slice indices). Safe with dynamic=True because item() results
-            # are backed symbols derived from input shapes — not unbacked symbols that
-            # would cause PendingUnbackedSymbolNotFound (which only occurs without dynamic).
+            # as Python slice indices). Safe because item() results are backed symbols
+            # derived from input shapes — not unbacked symbols that would cause
+            # PendingUnbackedSymbolNotFound (which only occurs without dynamic).
             torch._dynamo.config.suppress_errors = True
             torch._dynamo.config.capture_scalar_outputs = True
             # OptimizedModule forwards attribute access to the wrapped LWDETR via
             # __getattr__ at runtime, so self.model keeps working everywhere it's used below.
-            self.model = torch.compile(self.model, dynamic=True)  # type: ignore[assignment]
+            self.model = torch.compile(self.model, dynamic=dynamic)  # type: ignore[assignment]
+
+    def _effective_input_scales(self) -> list[int]:
+        """返回训练时实际生效的输入尺寸列表（与数据集变换的 scale 推导保持一致）。
+
+        数据增强管线（``make_coco_transforms`` / ``make_coco_transforms_square_div_64``）
+        的 scale 逻辑：
+        - ``multi_scale=False`` → 固定 ``[resolution]``；
+        - ``multi_scale=True`` → ``compute_multi_scale_scales()`` 展开候选集
+          （受 ``expanded_scales``、``patch_size``、``num_windows`` 影响）；
+        - ``do_random_resize_via_padding=False``（默认）→ ``skip_random_resize``，
+          只取最大单一 scale（本仓库默认配置下即固定 800×800）。
+
+        该函数供 torch.compile 门控使用：只有单一 scale 时输入形状静态，
+        ``dynamic=False`` 的编译图安全；多 scale 时输入形状动态，需禁用编译
+        或改用 dynamic 模式。
+
+        Returns:
+            训练时实际出现的输入边长列表（像素）。
+        """
+        if not self.train_config.multi_scale:
+            return [self.model_config.resolution]
+        from rfdetr.datasets.coco import compute_multi_scale_scales
+
+        scales = compute_multi_scale_scales(
+            self.model_config.resolution,
+            self.train_config.expanded_scales,
+            self.model_config.patch_size,
+            self.model_config.num_windows,
+        )
+        if not self.train_config.do_random_resize_via_padding:
+            scales = [scales[-1]]
+        return scales
 
     # ------------------------------------------------------------------
     # [SSCL] 语义相似度引导的对比学习

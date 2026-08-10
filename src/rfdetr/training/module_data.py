@@ -34,12 +34,16 @@ if TYPE_CHECKING:
 
 
 def _worker_init_fn(worker_id: int) -> None:
-    """Seed NumPy and the ``random`` module per DataLoader worker.
+    """Seed NumPy and the ``random`` module per DataLoader worker, and pin worker to a single thread.
 
     PyTorch seeds ``torch``'s RNG per worker automatically but leaves NumPy and the stdlib ``random`` module unseeded,
     so without this hook every worker would draw identical NumPy/``random`` sequences (a well-known augmentation
     duplication footgun). Deriving the seed from ``torch.initial_seed()`` keeps augmentation reproducible while still
     giving each worker a distinct stream.
+
+    Worker 线程限制为 1：decode/mosaic/拼接是纯 CPU 单线程工作，而 worker 继承主进程的
+    torch 线程池（每 worker 数线程 × 数十 worker 会与主进程、其他 worker 争抢物理核，
+    造成线程 thrashing，decode/mosaic 反而变慢）。单线程是 PyTorch DataLoader 官方推荐做法。
 
     Args:
         worker_id: Index of the DataLoader worker (unused; seed is derived from the per-worker torch seed).
@@ -47,6 +51,8 @@ def _worker_init_fn(worker_id: int) -> None:
     import random
 
     import numpy as np
+
+    torch.set_num_threads(1)
 
     seed = torch.initial_seed() % (2**32)
     np.random.seed(seed)

@@ -228,7 +228,7 @@ def main() -> None:
         resume=RESUME,
         eval_interval=EVAL_INTERVAL,
         use_ema=USE_EMA,
-        eval_ema_only=True,  # 验证只前向 EMA 模型（USE_EMA=True 时 best 指标本就用 EMA），省一半验证时间
+        eval_ema_only=False,  # 验证只前向 EMA 模型（USE_EMA=True 时 best 指标本就用 EMA），省一半验证时间
         compute_val_loss=False,  # 关闭验证 loss 计算，省显存
         aug_config=AUG_CONFIG if AUG_CONFIG is not None else {},
         augmentation_backend=AUGMENTATION_BACKEND,
