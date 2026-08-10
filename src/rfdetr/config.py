@@ -1293,6 +1293,39 @@ class TrainConfig(BaseConfig):
     semantic_monitor_log_interval: int = 100
     """语义头监控采样步间隔（每 N 步采样一次，epoch 末聚合输出到 train/sem/*）。"""
 
+    # ------------------------------------------------------------------
+    # [QNorm-Obj + EUMix] query 范数物体性门控与熵感知校准（默认全部关闭）
+    # 见 docs/改进方案-QNorm-Obj/RF-DETR引入QNorm-Obj与EUMix方案.md
+    # ------------------------------------------------------------------
+    qnorm_obj_enabled: bool = False
+    """QNorm-Obj + EUMix 总开关。开启后在 decoder 分类 logits 上施加
+    query 范数物体性门控与熵感知校准，不加任何辅助监督损失。"""
+    qnorm_obj_tau: float = 2.0
+    """物体性头温度 τ：``z_obj = f_obj(‖h‖₂) / τ``。缩放 MLP 输出到 sigmoid
+    敏感区间，防止 logits 过陡导致 σ 饱和、梯度消失。"""
+    qnorm_obj_feature_mix: bool = True
+    """是否启用 QNorm 特征混合（论文 Eq.7-9）：``h_cls = (1-α_mix)·h + α_mix·h_norm``
+    后重算分类 logits，解耦特征方向（语义）与幅度（物体性）。关闭时用原始特征。"""
+    qnorm_obj_gate: bool = True
+    """是否启用物体性门控：``z_known *= σ(z_obj)``（只乘前景类列，背景列不动）。
+    低物体性的背景框被压向背景。关闭时门恒为 1。"""
+    qnorm_obj_eumix: bool = True
+    """是否启用熵感知校准（论文 Eq.16-23，闭集适配：背景列扮演 unknown）：
+    用物体性 × 熵缺口 校准背景 logit 并对前景做软抑制。关闭时仅保留门控。"""
+    qnorm_obj_obj_hidden_dim: int = 64
+    """物体性头隐藏维度：``MLP(d → obj_hidden_dim → 1)``。"""
+    qnorm_obj_gamma_init: float = 1.0
+    """熵缺口指数 γ 的初始**有效值**（论文 Eq.17）：``γ = softplus(θ_γ)``，
+    参数 θ_γ 初始化为 softplus⁻¹(该值)。γ>1 只对"非常不确定"放行缺口，γ<1 过渡平滑。"""
+    qnorm_obj_alpha_init: float = 0.1
+    """EUMix 背景混合权重 α 的初始**有效值**（θ_α 初始化为 logit⁻¹(α)）。
+    闭集适配为 logit 空间混合：z_bg_new = (1-α)·(z_bg+b_obj) + α·logit(p_obj_bg)。
+    默认 0.1 → 起点 z_bg_new ≈ z_bg（恒等起步，不扰动预训练背景 logit）；
+    训练中 α 可学习上升，让物体性证据按损失信号参与背景校准。"""
+    qnorm_obj_lambda_init: float = 0.5
+    """前景软抑制强度 λ 初始值：``z_known -= λ·p_obj_bg``（clamp ≥ 0）。
+    控制"物体性高但已知类不确定"的 query 被压向前景的程度。"""
+
     @field_validator("progress_bar", mode="before")
     @classmethod
     def _coerce_legacy_progress_bar(cls, value: Any) -> Any:

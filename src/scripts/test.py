@@ -68,8 +68,8 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         "image_dir": "images/test",
         "label_format": "yolo",
         "label_dir": "labels/test",
-        "exp_output_dir": "output/0809-SHWX-rfdetr-large-baseline",
-        "checkpoint_file": "checkpoint_best_regular.pth",
+        "exp_output_dir": "output/0809-SHWX-rfdetr-medium-rare-oversample-SSCL-Proj-QNormEUMix",
+        "checkpoint_file": "checkpoint_best_ema.pth",
         "num_classes": 25,
         "vehicle_class_ids": {24},  # FSC 发射车，比赛规则按车辆目标 IoU=0.35
         "class_names": _label_keyed_names(SHWX_CLASS_NAMES),

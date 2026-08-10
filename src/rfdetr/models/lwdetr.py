@@ -157,6 +157,10 @@ class LWDETR(nn.Module):
         # 装配（默认 None = 原版行为，非语义实验与推理完全不变）。W 引用由前向传入，
         # 不在此处持有，避免模块生命周期耦合。
         self.semantic_residual: "SemanticResidual | None" = None
+        # [QNorm-Obj] query 范数物体性门控 + EUMix 熵感知校准模块；由
+        # module_model._setup_qnorm_obj 在训练前装配（默认 None = 原版行为）。
+        # 与语义头同级挂载，在 semantic_residual 叠加之后统一校准 logits。
+        self.qnorm_obj: "QNormObjectness | None" = None
         query_dim = 4
         self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
         self.query_feat = nn.Embedding(num_queries * group_detr, hidden_dim)
@@ -543,6 +547,15 @@ class LWDETR(nn.Module):
                 # 语义头只作用于前景类（C 列），DETR 的 background 在末位（C+1 列），
                 # 用 0 增量补齐保证形状一致
                 outputs_class = outputs_class + torch.nn.functional.pad(semantic_delta, (0, 1))
+            # [QNorm-Obj] query 范数物体性门控 + EUMix 熵感知校准（全 decoder 层统一
+            # 施加，含 aux 层）。只改 logits 不碰 hs，与 SSCL（读 out["hs"]）正交。
+            # enc_out_class_embed 路径（two_stage query selection）不经过此处，
+            # proposal 分类器保持原版线性头 → query selection 不受门控影响。
+            qnorm_stats = None  # QNorm 监控统计（默认无）
+            if self.qnorm_obj is not None:
+                outputs_class, qnorm_stats = self.qnorm_obj(
+                    hs, outputs_class, self.class_embed.weight, self.class_embed.bias
+                )
             outputs_keypoints = None
 
             if self.use_grouppose_keypoints and self.keypoint_embed is not None:
@@ -576,6 +589,9 @@ class LWDETR(nn.Module):
             # [SemHead] 语义监控统计挂载到输出（已 detach，供训练监控读取）
             if semantic_stats is not None:
                 out["semantic_stats"] = semantic_stats
+            # [QNorm-Obj] QNorm 监控统计挂载到输出（已 detach，供训练监控读取）
+            if qnorm_stats is not None:
+                out["qnorm_stats"] = qnorm_stats
             # [SSCL] 暴露 decoder 最后一层的 hidden states，供 SSCL 对比学习
             # 提取 matched foreground query features。hs 已在上述 class_embed/bbox_embed
             # 计算中产生，仅多一次引用存储，不增加任何前向计算量。

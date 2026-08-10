@@ -400,14 +400,16 @@ class RFDETRModelModule(LightningModule):
         # they are constructed with a config that matches the current model head.
         self.criterion, self.postprocess = build_criterion_from_config(self.model_config, self.train_config)
 
-        # [SSCL + SemHead] 语义头/对比学习初始化顺序（必须在 configure_optimizers()
-        # 之前调用，确保优化器只包含解冻后的可训练参数）：
-        # 1) 先装配语义头（创建 α/θ 参数与 S/rank buffer）——必须在冻结之前，
+        # [SSCL + SemHead + QNorm-Obj] 语义头/对比学习初始化顺序（必须在
+        # configure_optimizers() 之前调用，确保优化器只包含解冻后的可训练参数）：
+        # 1) 先装配语义头与 QNorm-Obj（创建各自参数）——必须在冻结之前，
         #    否则 freeze 会把 requires_grad 全部置 False；
         # 2) 保守冻结策略同时覆盖 SSCL 与"仅语义头"场景（E4c 关闭 SSCL 时仍生效）；
         # 3) 再初始化 SSCL 损失与基类蒸馏。
         if self.train_config.semantic_head_enabled:
             self._setup_semantic_head()
+        if self.train_config.qnorm_obj_enabled:
+            self._setup_qnorm_obj()
         if (self.train_config.sscl_enabled or self.train_config.semantic_head_enabled) and (
             self.train_config.sscl_freeze_strategy == "conservative"
         ):
@@ -551,7 +553,8 @@ class RFDETRModelModule(LightningModule):
 
         冻结：backbone、encoder 主体、bbox 头、early decoder layers、
         refpoint_embed、query_feat、enc_out_class_embed。
-        解冻：decoder 最后一层、decoder 最终 LayerNorm、分类头 class_embed。
+        解冻：decoder 最后一层、decoder 最终 LayerNorm、分类头 class_embed、
+        语义头（SemHead）与 QNorm-Obj 附加模块参数（若装配）。
 
         该策略保证 SSCL 只通过 decoder 最后一层重塑 query 特征空间，
         不扰动主干与目标定位能力。
@@ -583,7 +586,13 @@ class RFDETRModelModule(LightningModule):
             sr.theta.requires_grad = bool(cfg.semantic_mask_enabled)
             sr.set_frozen_theta_classes(frozen_theta)
             logger.info(f"[SemHead] 语义参数可训练性恢复完成：{sr.describe_freeze()}")
-        logger.info("[SSCL] 冻结策略已应用：仅 decoder 最后一层 + decoder norm + class_embed 可训练")
+        # [QNorm-Obj] QNorm 参数纳入可训练（近恒等初始化的门控/校准参数与语义头
+        # 同理，在"先全冻结再选择性解冻"后恢复；freeze=none 全量微调下天然可训练）
+        if getattr(model, "qnorm_obj", None) is not None:
+            for param in model.qnorm_obj.parameters():
+                param.requires_grad = True
+            logger.info(f"[QNormObj] QNorm 参数可训练性恢复完成：{model.qnorm_obj.describe_freeze()}")
+        logger.info("[SSCL] 冻结策略已应用：仅 decoder 最后一层 + decoder norm + class_embed + 附加模块参数可训练")
 
     def _sscl_loss_callback(
         self,
@@ -683,6 +692,25 @@ class RFDETRModelModule(LightningModule):
         if not cfg.sscl_enabled:
             self.criterion.set_sscl_loss_fn(self._semantic_monitor_callback)
         logger.info(f"[SemHead] 语义头已装配：{model.semantic_residual.describe_freeze()}")
+
+    def _setup_qnorm_obj(self) -> None:
+        """装配 QNorm-Obj + EUMix 模块（query 范数物体性门控 + 熵感知校准）。
+
+        在冻结策略之前调用（__init__ 顺序保证），确保门控参数创建后
+        按冻结策略统一处理可训练性。模块挂到 ``model.qnorm_obj``，
+        在 lwdetr 前向中于 class_embed/语义头之后校准全层 logits。
+        不加任何辅助监督损失，参数由标准检测损失隐式训练。
+        """
+        from rfdetr.sscl.qnorm_obj import QNormObjectness
+
+        cfg = self.train_config
+        model = self.model
+        # DETR 约定：class_embed.out_features = 前景类数 + 1（background 占末位），
+        # QNorm 只对前景类列施加门控，背景列由 EUMix 单独校准。
+        num_classes = int(model.class_embed.out_features) - 1
+        hidden_dim = int(self.model_config.hidden_dim)
+        model.qnorm_obj = QNormObjectness.build(cfg, num_classes, hidden_dim)
+        logger.info(f"[QNormObj] 已装配：{model.qnorm_obj.describe_freeze()}")
 
     def _semantic_monitor_callback(
         self,
