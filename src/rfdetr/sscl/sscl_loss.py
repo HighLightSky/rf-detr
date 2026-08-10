@@ -140,7 +140,12 @@ class SSCLLoss(nn.Module):
             return features
         return self.projection_head(features)
 
-    def forward(self, features: Tensor, labels: Tensor) -> Tensor:
+    def forward(
+        self,
+        features: Tensor,
+        labels: Tensor,
+        hard_neg_features: Tensor | None = None,
+    ) -> Tensor:
         """计算 SSCL 损失。
 
         Args:
@@ -148,6 +153,9 @@ class SSCLLoss(nn.Module):
                 即 decoder 最后一层输出中与 GT 匹配的 query 特征。启用投影头时
                 内部会先投影到对比空间再计算损失。
             labels: 每个 query 匹配到的 GT 类别标签 ``[N_fg]``。
+            hard_neg_features: 已 detach 的难例负样本特征 ``[K, hidden_dim]``
+                （仅原型模式生效，实例模式忽略）。内部投影到同一对比空间后
+                作为额外分母列追加（权重 1.0、无类别身份、无语义加权）。
 
         Returns:
             标量 SSCL 损失。当没有有效 anchor（如 batch 内正样本不足）时
@@ -163,7 +171,7 @@ class SSCLLoss(nn.Module):
         # 原型模式下"每类仅 1 个样本"恰恰是要规避 batch 影响的核心场景，
         # 不能被提前拦截为零损失。原型模式在 _prototype_forward 内部自行投影。
         if self.prototype_mode:
-            return self._prototype_forward(features, labels)
+            return self._prototype_forward(features, labels, hard_neg_features=hard_neg_features)
         # 实例模式：先投影到对比空间（未启用投影头时 _project 恒等）
         features = self._project(features)
         if num_fg < 2:
@@ -243,18 +251,28 @@ class SSCLLoss(nn.Module):
         loss = loss_per_anchor[anchor_mask].mean()
         return loss
 
-    def _prototype_forward(self, features: Tensor, labels: Tensor) -> Tensor:
+    def _prototype_forward(
+        self,
+        features: Tensor,
+        labels: Tensor,
+        hard_neg_features: Tensor | None = None,
+    ) -> Tensor:
         """原型锚定模式下的 SSCL 损失。
 
         正样本为 anchor 与本类原型的余弦相似度（本类原型有效则恒存在），
         负样本为 anchor 与全部有效类别原型的余弦相似度（按语义权重加权），
         从而每个 anchor 都有稳定的正负锚点，彻底摆脱 batch 内同类样本的构成。
         启用投影头时特征先投影到对比空间，原型库也建立在投影空间；
-        启用实例正样本时正样本 = 本类原型 ∪ 同类别实例（对齐论文 Eq.9）。
+        启用实例正样本时正样本 = 本类原型 ∪ 同类别实例（对齐论文 Eq.9）；
+        传入难例负样本时额外追加为分母列（权重 1.0），补齐"前景-背景边界"
+        负样本维度。分子不变，故 ``loss >= 0`` 且 ``loss(含难例) >= loss(不含)``
+        恒成立（分母单调增）。
 
         Args:
             features: matched foreground query features ``[N_fg, hidden_dim]``。
             labels: 每个 query 匹配到的 GT 类别标签 ``[N_fg]``。
+            hard_neg_features: 已 detach 的难例负样本特征 ``[K, hidden_dim]``，
+                为 ``None`` 或 K=0 时不追加（与基线行为完全一致）。
 
         Returns:
             标量 SSCL 损失。无有效原型或无有效 anchor 时返回零损失张量。
@@ -324,6 +342,22 @@ class SSCLLoss(nn.Module):
         # 本类原型相似度（正样本之一）
         pos_logits = sim.gather(-1, labels.unsqueeze(-1)).squeeze(-1)  # [N]
 
+        # 难例负样本：追加为额外分母列（权重 1.0，无语义权重、无类别身份）。
+        # 已 detach（难例方向不产生梯度，只推离 anchor）；K=0 时 no-op。
+        # 在实例正样本分支之前追加，保证实例正样本也出现在难例路径的分母中；
+        # 分母列序变为 [C 原型, K 难例, N 实例正样本]。
+        if hard_neg_features is not None and hard_neg_features.shape[0] > 0:
+            u_hn = F.normalize(self._project(hard_neg_features.detach()), dim=-1)  # [K, D]
+            hn_sim = u @ u_hn.T / self.tau  # [N, K]
+            # 数值安全：非有限（NaN/Inf）列置 -inf，等价于不参与分母 logsumexp
+            finite = torch.isfinite(hn_sim).all(dim=0)  # [K]
+            hn_sim = torch.where(
+                finite.unsqueeze(0),
+                hn_sim,
+                torch.tensor(neg_inf, device=hn_sim.device),
+            )
+            denom_logits = torch.cat([denom_logits, hn_sim], dim=-1)  # [N, C+K]
+
         if self.prototype_instance_pos:
             # 同类别实例正样本：正样本 = 本类原型 ∪ 同类别实例（对齐论文 Eq.9）。
             # 真实同类实例从第一步提供"ground-truth"引力，锚定随机初始化投影头
@@ -348,11 +382,62 @@ class SSCLLoss(nn.Module):
         loss = loss_per_anchor[anchor_mask].mean()
         return loss
 
+    def hardness_stats(
+        self,
+        matched_features: Tensor,
+        hard_neg_features: Tensor,
+        random_features: Tensor | None = None,
+    ) -> dict[str, float]:
+        """难例硬度诊断：投影空间内三组特征与类别原型的平均余弦相似度。
+
+        验证"难例是否真的硬"：难例比随机未匹配更贴近类别原型
+        （``hn_vs_random_gap > 0``）、且比 matched 特征更贴（
+        ``hn_vs_matched_gap > 0``）时，"难例代表像目标但不是目标的区域"
+        的假设成立。全程 ``no_grad``，返回 CPU 标量字典，不产生损失。
+
+        Args:
+            matched_features: matched foreground query features ``[N_fg, D]``。
+            hard_neg_features: 难例负样本特征 ``[K, D]``。
+            random_features: 随机未匹配对照特征 ``[K', D]``（可选）。
+
+        Returns:
+            余弦统计字典（原始余弦，未除以温度，便于解读）：
+            ``hn_proto_cos``/``matched_proto_cos`` 恒有；
+            传入 ``random_features`` 时另有 ``random_proto_cos`` 与
+            ``hn_vs_random_gap``/``hn_vs_matched_gap``。
+            非原型模式、无有效原型或难例为空时返回空字典。
+        """
+        if not self.prototype_mode:
+            return {}
+        with torch.no_grad():
+            proto_norm, valid = self.prototype_bank.get_normalized_prototypes()
+            if not valid.any():
+                return {}
+            if hard_neg_features.shape[0] == 0:
+                return {}
+
+            def _mean_cos(feat: Tensor) -> float:
+                u = F.normalize(self._project(feat), dim=-1)
+                return float((u @ proto_norm.T).mean().item())
+
+            stats = {
+                "hn_proto_cos": _mean_cos(hard_neg_features),
+                "matched_proto_cos": _mean_cos(matched_features),
+            }
+            if random_features is not None and random_features.shape[0] > 0:
+                stats["random_proto_cos"] = _mean_cos(random_features)
+                stats["hn_vs_random_gap"] = stats["hn_proto_cos"] - stats["random_proto_cos"]
+                stats["hn_vs_matched_gap"] = stats["hn_proto_cos"] - stats["matched_proto_cos"]
+            return stats
+
     def update_prototypes(self, features: Tensor, labels: Tensor) -> None:
         """更新类别原型库（仅原型模式生效，实例模式为 no-op）。
 
         启用投影头时先把特征投影到对比空间再更新，保证原型库与对比损失
         处于同一几何空间；未启用时恒等。
+
+        注意：**只喂 matched features，绝不可传入难例特征**——难例刻画的是
+        "背景/干扰分布"而非类别稳定中心，EMA 进原型库会污染类中心空间。
 
         Args:
             features: matched foreground query features ``[N_fg, hidden_dim]``

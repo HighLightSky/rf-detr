@@ -1239,6 +1239,14 @@ class TrainConfig(BaseConfig):
     """SSCL 投影头输出维度（对比空间维度），通常低于 decoder hidden dim。 仅在 ``sscl_projection_enabled=True`` 时生效。"""
     sscl_prototype_instance_pos: bool = False
     """原型模式是否加入同类别实例正样本（对齐论文 Eq.9）。开启时正样本 = 本类原型 ∪ 同类别实例，用真实同类实例锚定随机初始化投影头的冷启动； 负样本仍为全部有效原型（语义加权）。推荐投影实验开启。"""
+    sscl_hard_neg_enabled: bool = False
+    """原型模式分母是否追加难例负样本列（unmatched query 的 IoU∈[0.1,0.5] top-k，权重 1.0、detach、不进原型库）。"""
+    sscl_hard_neg_topk: int = 3
+    """每图最多选取的难例负样本数量 k（默认 3，对齐 LMP 论文 N=3 经验值）。"""
+    sscl_hard_neg_score_thresh: float = -2.0
+    """难例最大前景 logit 下限（原始 logit，非概率）。默认 -2.0：0.0 过严会饿死机制。"""
+    sscl_hard_neg_log_interval: int = 100
+    """难例诊断监控采样步间隔（每 N 步采样一次，epoch 末聚合输出到 train/sscl/*）。"""
     # ------------------------------------------------------------------
     # 语义分类头（SemanticResidual，默认全关）
     # 见 docs/改进方案-SSCL/RF-DETR语义分类头改进方案.md
@@ -1506,6 +1514,18 @@ class TrainConfig(BaseConfig):
                     f"lr_scheduler_kwargs for a managed preset ({self.lr_scheduler!r}) accepts only "
                     f"{{{allowed}}}; unknown key(s): {unknown_keys}."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_sscl_hard_neg(self) -> "TrainConfig":
+        """难例负样本依赖原型模式；top-k 至少为 1。"""
+        if self.sscl_hard_neg_enabled and not self.sscl_prototype_enabled:
+            raise ValueError(
+                "启用 sscl_hard_neg_enabled 必须先启用 sscl_prototype_enabled"
+                "（难例只作为原型模式分母的额外负样本列，实例模式不支持）。"
+            )
+        if self.sscl_hard_neg_topk < 1:
+            raise ValueError(f"sscl_hard_neg_topk 必须 >= 1，收到 {self.sscl_hard_neg_topk}。")
         return self
 
     @model_validator(mode="before")

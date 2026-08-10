@@ -37,6 +37,8 @@ from rfdetr.sscl.fsem import (
     load_fsem_artifacts,
     save_fsem_artifacts,
 )
+from rfdetr.sscl.hard_neg_monitor import HardNegMonitor
+from rfdetr.sscl.hard_neg_selection import select_hard_negatives_for_image
 from rfdetr.sscl.projection import ProjectionHead
 from rfdetr.sscl.prototype_bank import PrototypeBank
 from rfdetr.sscl.semantic_head import SemanticResidual, attach_from_checkpoint
@@ -56,6 +58,8 @@ __all__ = [
     "BaseClassDistillLoss",
     "PrototypeBank",
     "ProjectionHead",
+    "HardNegMonitor",
+    "select_hard_negatives_for_image",
     "SemanticResidual",
     "SemanticMonitor",
     "FSemProjection",

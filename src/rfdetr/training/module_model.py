@@ -546,6 +546,12 @@ class RFDETRModelModule(LightningModule):
             prototype_instance_pos=cfg.sscl_prototype_instance_pos,
         )
 
+        # 难例负样本监控累加器（仅启用时创建；epoch 末输出 train/sscl/* 指标）
+        if cfg.sscl_hard_neg_enabled:
+            from rfdetr.sscl.hard_neg_monitor import HardNegMonitor
+
+            self._hard_neg_monitor = HardNegMonitor()
+
         # 冻结策略校验（实际冻结在 __init__ 中统一应用，同时覆盖 SSCL 与语义头场景）。
         if cfg.sscl_freeze_strategy == "none":
             logger.info("[SSCL] 冻结策略为 none：保持全量微调，不冻结任何参数")
@@ -587,7 +593,9 @@ class RFDETRModelModule(LightningModule):
             f"distill={cfg.sscl_distill_enabled}, "
             f"prototype={cfg.sscl_prototype_enabled}, "
             f"projection={cfg.sscl_projection_enabled} (dim={cfg.sscl_projection_dim}), "
-            f"instance_pos={cfg.sscl_prototype_instance_pos}"
+            f"instance_pos={cfg.sscl_prototype_instance_pos}, "
+            f"hard_neg={cfg.sscl_hard_neg_enabled} "
+            f"(topk={cfg.sscl_hard_neg_topk}, thresh={cfg.sscl_hard_neg_score_thresh})"
         )
 
     def _apply_sscl_freeze(self) -> None:
@@ -655,7 +663,21 @@ class RFDETRModelModule(LightningModule):
         if "hs" not in outputs:
             return {}
         features, labels = self._extract_matched_query_features(outputs["hs"], indices, targets)
-        loss = self.sscl_loss(features, labels)
+        hard_neg_features = None
+        # [SSCL-HN] 难例负样本：仅训练阶段选择（验证阶段不选、不喂监控）；
+        # 只进 SSCL 分母，绝不更新原型库（难例是背景/干扰分布，非类别中心）。
+        # 以 _hard_neg_monitor 是否存在作为门控（_setup_sscl 中按配置创建），
+        # 与 _semantic_monitor 的判空模式一致。
+        if self.training and getattr(self, "_hard_neg_monitor", None) is not None:
+            hard_neg_features, hn_stats = self._select_hard_negatives(outputs, targets, indices)
+            # 诊断监控：节流采样，只喂 CPU 标量（监控不产生损失、不污染 loss_dict）
+            monitor = self._hard_neg_monitor
+            interval = int(self.train_config.sscl_hard_neg_log_interval)
+            if self.global_step % interval == 0 and hard_neg_features is not None and hard_neg_features.shape[0] > 0:
+                stats = self.sscl_loss.hardness_stats(features.detach(), hard_neg_features)
+                if stats:  # 有效原型存在时才更新
+                    monitor.update({**hn_stats, **stats})
+        loss = self.sscl_loss(features, labels, hard_neg_features=hard_neg_features)
         # [SSCL] 原型模式：训练阶段用 detach 特征更新类别原型库（无梯度）。
         # 不做 start_epoch 门控——sscl_start_epoch 前 loss 权重为 0，原型更新
         # 作为预热让锚点在 SSCL 生效前就绪；验证阶段 self.training 为 False 天然门控。
@@ -685,6 +707,65 @@ class RFDETRModelModule(LightningModule):
         features = hs[idx]
         labels = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
         return features, labels
+
+    def _select_hard_negatives(
+        self,
+        outputs: dict[str, Any],
+        targets: list[dict[str, Tensor]],
+        indices: list[tuple[Tensor, Tensor]],
+    ) -> tuple[Tensor | None, dict[str, float]]:
+        """按 batch 选择难例负样本（每图 top-k），返回 ``(hn_features, stats)``。
+
+        逐图调用 ``select_hard_negatives_for_image``：排除 Hungarian matching
+        匹配到的 query，IoU 带 [0.1, 0.5] 过滤，按最大前景 logit 取 top-k；
+        特征已 detach。同时聚合 batch 级统计供 HardNegMonitor 使用。
+
+        Args:
+            outputs: 模型输出字典（须含 ``"pred_logits"``、``"pred_boxes"``、
+                ``"hs"``，均为最后一层，query 轴与 ``indices`` 一致）。
+            targets: 目标字典列表（每图含 ``"boxes"``，cxcywh 归一化）。
+            indices: Hungarian matching 结果（每图 ``(src_idx, tgt_idx)``）。
+
+        Returns:
+            ``(hn_features, stats)`` 元组：
+            - hn_features: ``[K_total, D]`` 已 detach 的难例特征
+              （K_total=0 时返回 ``None``）。
+            - stats: 喂给 HardNegMonitor 的 CPU 标量（``hn_count`` 每图平均
+              难例数、``hn_fill_rate`` IoU 带填充率、``n_unmatched_avg``
+              每图平均未匹配数）。
+        """
+        from rfdetr.sscl.hard_neg_selection import select_hard_negatives_for_image
+
+        cfg = self.train_config
+        hn_parts: list[Tensor] = []
+        n_selected = n_band = n_unmatched = 0
+        for b in range(len(indices)):
+            hn_f, _, stats = select_hard_negatives_for_image(
+                pred_logits=outputs["pred_logits"][b],
+                pred_boxes=outputs["pred_boxes"][b],
+                hs=outputs["hs"][b],
+                gt_boxes=targets[b]["boxes"],
+                matched_src=indices[b][0],
+                top_k=cfg.sscl_hard_neg_topk,
+                score_thresh=cfg.sscl_hard_neg_score_thresh,
+            )
+            if hn_f.shape[0] > 0:
+                hn_parts.append(hn_f)
+            n_selected += int(stats["n_selected"])
+            n_band += int(stats["n_band"])
+            n_unmatched += int(stats["n_unmatched"])
+        if not hn_parts:
+            return None, {
+                "hn_count": 0.0,
+                "hn_fill_rate": 0.0,
+                "n_unmatched_avg": float(n_unmatched) / max(1, len(indices)),
+            }
+        batch_stats = {
+            "hn_count": float(n_selected) / len(indices),
+            "hn_fill_rate": float(n_band) / max(1, n_unmatched),
+            "n_unmatched_avg": float(n_unmatched) / max(1, len(indices)),
+        }
+        return torch.cat(hn_parts, dim=0), batch_stats
 
     def _setup_semantic_head(self) -> None:
         """装配语义分类头（SemanticResidual）与训练监控。
@@ -1261,6 +1342,10 @@ class RFDETRModelModule(LightningModule):
         monitor = getattr(self, "_semantic_monitor", None)
         if monitor is not None:
             monitor.on_train_epoch_end(self)
+        # [SSCL-HN] 难例监控 epoch 级聚合输出到 train/sscl/*
+        hn_monitor = getattr(self, "_hard_neg_monitor", None)
+        if hn_monitor is not None:
+            hn_monitor.on_train_epoch_end(self)
         if self.automatic_optimization or self._lr_scheduler_interval != "epoch":
             return
         scheduler = self._current_lr_scheduler()
