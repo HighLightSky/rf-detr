@@ -5,8 +5,7 @@
 # ------------------------------------------------------------------------
 """RF-DETR 训练脚本 —— 使用 Python API，所有参数集中配置。
 
-用法：
-    python src/scripts/train.py
+用法：     python src/scripts/train.py
 
 修改本文件下方的「训练参数」常量即可切换模型、数据集等配置。
 """
@@ -23,26 +22,26 @@ from rfdetr.variants import RFDETRLargeDeprecated, RFDETRMedium, RFDETRNano, RFD
 # ============================================================================
 
 # --- 模型 ---
-MODEL = "large"           # 可选: nano, small, medium, large
+MODEL = "large"  # 可选: nano, small, medium, large
 
 # --- 数据集 ---
 DATASET_DIR = "/home/liu/wzt/datasets/SHWX-dataset-dict"
-DATASET_FILE = "yolo"            # roboflow：Roboflow COCO 格式 (train/_annotations.coco.json)，还有coco yolo
+DATASET_FILE = "yolo"  # roboflow：Roboflow COCO 格式 (train/_annotations.coco.json)，还有coco yolo
 
 # --- 训练超参数 ---
-NUM_CLASSES = 25          # 类别数
-EPOCHS = 100              # 训练轮数
-BATCH_SIZE = 8            # 每 GPU 的 batch size
-NUM_WORKERS = 12           # DataLoader 工作进程数
-LR = 1e-4                 # 基础学习率
-LR_ENCODER = 1.5e-4       # 编码器（backbone）学习率
-WEIGHT_DECAY = 1e-4       # 权重衰减
-GRAD_ACCUM_STEPS = 8      # 梯度累积步数（有效 batch = BATCH_SIZE * GRAD_ACCUM_STEPS）
-CLIP_MAX_NORM = 0.1       # 梯度裁剪
+NUM_CLASSES = 25  # 类别数
+EPOCHS = 100  # 训练轮数
+BATCH_SIZE = 8  # 每 GPU 的 batch size
+NUM_WORKERS = 12  # DataLoader 工作进程数
+LR = 1e-4  # 基础学习率
+LR_ENCODER = 1.5e-4  # 编码器（backbone）学习率
+WEIGHT_DECAY = 1e-4  # 权重衰减
+GRAD_ACCUM_STEPS = 8  # 梯度累积步数（有效 batch = BATCH_SIZE * GRAD_ACCUM_STEPS）
+CLIP_MAX_NORM = 0.1  # 梯度裁剪
 
 # --- 学习率调度 ---
-LR_DROP = 60             # 学习率下降的 epoch 数
-WARMUP_EPOCHS = 0.0       # 预热 epoch 数
+LR_DROP = 60  # 学习率下降的 epoch 数
+WARMUP_EPOCHS = 0.0  # 预热 epoch 数
 
 # --- 数据增广 ---
 # 可选预设:
@@ -52,7 +51,7 @@ WARMUP_EPOCHS = 0.0       # 预热 epoch 数
 #   AUG_AERIAL       → 航拍/遥感影像（水平/垂直翻转 + 90° 旋转）
 #   AUG_INDUSTRIAL   → 工业/检测影像（光照噪声 + 模糊）
 #   {}             → 关闭额外增广
-AUG_CONFIG = AUG_AERIAL   # 遥感、航拍预设
+AUG_CONFIG = AUG_AERIAL  # 遥感、航拍预设
 
 # --- Mosaic 增强 ---
 # Mosaic 将 4 张图片拼接为 1 张训练样本，有效提升小目标检测和遥感数据集的性能。
@@ -64,19 +63,19 @@ MOSAIC_P = 0.8
 # 将训练集长度扩展 RARE_CLASS_OVERSAMPLE_FACTOR 倍，扩展段循环映射到包含
 # RARE_CLASS_OVERSAMPLE_CLASS_IDS 中任意类别的图片，提升稀有类训练参与度
 # （SHWX: HM 航母仅 6 框、LQS 两栖舰仅 15 框，训练中几乎不会被采样到）。
-RARE_CLASS_OVERSAMPLE = False          # 重采样开关
-RARE_CLASS_OVERSAMPLE_FACTOR = 2       # 倍率（总长度 = 原长 × factor，可做 2/4/8 消融）
-RARE_CLASS_OVERSAMPLE_CLASS_IDS = [0, 1]   # 0=HM 航母, 1=LQS 两栖舰
+RARE_CLASS_OVERSAMPLE = False  # 重采样开关
+RARE_CLASS_OVERSAMPLE_FACTOR = 2  # 倍率（总长度 = 原长 × factor，可做 2/4/8 消融）
+RARE_CLASS_OVERSAMPLE_CLASS_IDS = [0, 1]  # 0=HM 航母, 1=LQS 两栖舰
 
 # --- 硬件 ---
-DEVICE = "cuda"           # 设备: cuda, cuda:0, cpu
-DEVICES = 1               # GPU 数量
-NUM_NODES = 1             # 节点数
+DEVICE = "cuda"  # 设备: cuda, cuda:0, cpu
+DEVICES = 1  # GPU 数量
+NUM_NODES = 1  # 节点数
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0809-SHWX-rfdetr-large-baseline"   # 输出目录
-TENSORBOARD = True                  # 是否启用 TensorBoard
-WANDB = False                       # 是否启用 Wandb
+OUTPUT_DIR = "output/0809-SHWX-rfdetr-large-baseline"  # 输出目录
+TENSORBOARD = True  # 是否启用 TensorBoard
+WANDB = False  # 是否启用 Wandb
 
 # --- 骨干微调 ---
 # 原版默认是全量微调（freeze_encoder=False）。
@@ -85,10 +84,10 @@ WANDB = False                       # 是否启用 Wandb
 FREEZE_ENCODER = False
 
 # --- EMA (指数移动平均) ---
-USE_EMA = True            # EMA 提升收敛稳定性与最终精度，原版默认开启
+USE_EMA = True  # EMA 提升收敛稳定性与最终精度，原版默认开启
 
 # --- 验证 ---
-EVAL_INTERVAL = 5         # 每隔 N 个 epoch 验证一次（减少 CPU 阻塞，加快训练）
+EVAL_INTERVAL = 5  # 每隔 N 个 epoch 验证一次（减少 CPU 阻塞，加快训练）
 
 # --- 恢复训练 ---
 # RESUME = "output/0726-DIOR-rfdetr_medium/last.ckpt"
@@ -156,8 +155,8 @@ def main() -> None:
         num_nodes=NUM_NODES,
         resume=RESUME,
         eval_interval=EVAL_INTERVAL,
-        use_ema=USE_EMA,           # 关闭 EMA 以节省显存
-        compute_val_loss=False,    # 关掉验证 loss 计算，省显存，mAP 指标不受影响
+        use_ema=USE_EMA,  # 关闭 EMA 以节省显存
+        compute_val_loss=False,  # 关掉验证 loss 计算，省显存，mAP 指标不受影响
         aug_config=AUG_CONFIG if AUG_CONFIG is not None else {},
         mosaic_p=MOSAIC_P,
         rare_class_oversample=RARE_CLASS_OVERSAMPLE,

@@ -45,9 +45,9 @@ if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
 # ── BGR 颜色常量 ─────────────────────────────────────────────────────
-COLOR_GT = (255, 0, 0)       # 蓝色 — 真实框
-COLOR_TP = (0, 255, 0)       # 绿色 — 正确预测
-COLOR_FP = (0, 0, 255)       # 红色 — 虚警
+COLOR_GT = (255, 0, 0)  # 蓝色 — 真实框
+COLOR_TP = (0, 255, 0)  # 绿色 — 正确预测
+COLOR_FP = (0, 0, 255)  # 红色 — 虚警
 COLOR_FN_GT = (0, 165, 255)  # 橙色 — 漏检的真实框
 
 # ── PIL 中文字体候选路径 ─────────────────────────────────────────────
@@ -118,12 +118,8 @@ def match_per_image_per_class(
         - tp_preds: image_id → TP 预测框列表
     """
     # 按 (image_id, class_id) 分组
-    gt_by_image_class: dict[str, dict[int, list[BoxRecord]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
-    pred_by_image_class: dict[str, dict[int, list[BoxRecord]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
+    gt_by_image_class: dict[str, dict[int, list[BoxRecord]]] = defaultdict(lambda: defaultdict(list))
+    pred_by_image_class: dict[str, dict[int, list[BoxRecord]]] = defaultdict(lambda: defaultdict(list))
     for gt in gt_records:
         gt_by_image_class[gt.image_id][gt.class_id].append(gt)
     for pred in pred_records:
@@ -148,9 +144,7 @@ def match_per_image_per_class(
             iou_threshold = 0.35 if cls_id in vehicle_class_ids else 0.50
 
             # 按置信度降序排列预测框
-            sorted_preds = sorted(
-                preds, key=lambda r: r.score if r.score is not None else 0.0, reverse=True
-            )
+            sorted_preds = sorted(preds, key=lambda r: r.score if r.score is not None else 0.0, reverse=True)
 
             matched_gt: set[int] = set()
             fp_indices: set[int] = set()
@@ -203,8 +197,7 @@ def _draw_box_label(
     cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
     (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
     cv2.rectangle(img, (x1, y1 - th - 4), (x1 + tw + 2, y1), color, -1)
-    cv2.putText(img, label, (x1 + 1, y1 - 3),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(img, label, (x1 + 1, y1 - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
 
 def load_image(image_id: str, test_image_paths: list[Path]) -> "cv2.Mat | None":
@@ -339,13 +332,10 @@ def save_fp_fn_visualizations(
                 _draw_box_label(predicted, x1, y1, x2, y2, class_names[tp.class_id], COLOR_TP)
             for fp in fp_boxes.get(image_id, []):
                 x1, y1, x2, y2 = map(int, fp.xyxy)
-                _draw_box_label(predicted, x1, y1, x2, y2,
-                                f"{class_names[fp.class_id]}(FP)", COLOR_FP)
+                _draw_box_label(predicted, x1, y1, x2, y2, f"{class_names[fp.class_id]}(FP)", COLOR_FP)
 
             # 左右拼接对比图：左 GT 标注、右预测框（TP 绿 / FP 红），保存为单张
-            combined = _compose_side_by_side(
-                labeled, predicted, "GT（真实框）", "Pred（模型预测）"
-            )
+            combined = _compose_side_by_side(labeled, predicted, "GT（真实框）", "Pred（模型预测）")
             cv2.imwrite(str(fp_dir / cls_name / f"{image_id}.jpg"), combined)
             total_fp_images += 1
 
@@ -375,13 +365,10 @@ def save_fp_fn_visualizations(
                 _draw_box_label(predicted, x1, y1, x2, y2, class_names[tp.class_id], COLOR_TP)
             for fp in fp_boxes.get(image_id, []):
                 x1, y1, x2, y2 = map(int, fp.xyxy)
-                _draw_box_label(predicted, x1, y1, x2, y2,
-                                f"{class_names[fp.class_id]}(FP)", COLOR_FP)
+                _draw_box_label(predicted, x1, y1, x2, y2, f"{class_names[fp.class_id]}(FP)", COLOR_FP)
 
             # 左右拼接对比图：左 GT 标注（FN 橙色）、右预测框（TP 绿 / FP 红），保存为单张
-            combined = _compose_side_by_side(
-                labeled, predicted, "GT（真实框）", "Pred（模型预测）"
-            )
+            combined = _compose_side_by_side(labeled, predicted, "GT（真实框）", "Pred（模型预测）")
             cv2.imwrite(str(fn_dir / cls_name / f"{image_id}.jpg"), combined)
             total_fn_images += 1
 
@@ -449,9 +436,7 @@ def build_confusion_matrix(
             continue
 
         # 按置信度降序排列预测框
-        sorted_preds = sorted(
-            preds, key=lambda r: r.score if r.score is not None else 0.0, reverse=True
-        )
+        sorted_preds = sorted(preds, key=lambda r: r.score if r.score is not None else 0.0, reverse=True)
 
         matched_gt_indices: set[int] = set()
 

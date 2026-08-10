@@ -113,9 +113,7 @@ class PrototypeBank(nn.Module):
                 self.prototypes[c_idx].copy_(batch_mean)
             else:
                 # 之后：EMA 平滑
-                self.prototypes[c_idx].mul_(self.momentum).add_(
-                    batch_mean, alpha=1.0 - self.momentum
-                )
+                self.prototypes[c_idx].mul_(self.momentum).add_(batch_mean, alpha=1.0 - self.momentum)
             self.num_updates[c_idx] += 1
 
     @torch.no_grad()
@@ -132,11 +130,7 @@ class PrototypeBank(nn.Module):
         if protos.shape[1] == 0:
             return protos, self.num_updates > 0
         row_norm = protos.norm(dim=-1)
-        valid = (
-            (self.num_updates > 0)
-            & torch.isfinite(protos).all(dim=-1)
-            & (row_norm > 1e-6)
-        )
+        valid = (self.num_updates > 0) & torch.isfinite(protos).all(dim=-1) & (row_norm > 1e-6)
         # 逐行除以行模长：row_norm 需 unsqueeze(-1) 才能沿最后一维广播
         proto_norm = protos / row_norm.unsqueeze(-1).clamp_min(1e-6)
         proto_norm = proto_norm.where(valid.unsqueeze(-1), torch.zeros_like(proto_norm))

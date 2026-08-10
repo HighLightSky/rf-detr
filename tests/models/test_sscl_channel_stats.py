@@ -54,7 +54,7 @@ def test_channel_tfidf_rank_is_permutation_and_deterministic() -> None:
 
 
 def test_build_mask_monotonic_in_theta() -> None:
-    """θ 越大，掩码值越大（保留更多通道）。"""
+    """Θ 越大，掩码值越大（保留更多通道）。"""
     rank = torch.arange(1, 17, dtype=torch.float32).unsqueeze(0).repeat(2, 1)
     m_low = build_mask_from_rank(rank, torch.tensor([4.0, 8.0]), mask_tau=1.0)
     m_high = build_mask_from_rank(rank, torch.tensor([8.0, 12.0]), mask_tau=1.0)

@@ -51,9 +51,8 @@ def _build_module(
 ) -> RFDETRModelModule:
     """用 __new__ 绕过重型 __init__，构造最小可测模块。
 
-    ``RFDETRModelModule.__new__`` 不会调用 ``nn.Module.__init__``，
-    因此给 ``sscl_loss``（nn.Module 子模块）赋值需用 ``object.__setattr__``
-    绕过 ``nn.Module.__setattr__`` 的"未初始化检查"；本测试不依赖子模块注册。
+    ``RFDETRModelModule.__new__`` 不会调用 ``nn.Module.__init__``， 因此给 ``sscl_loss``（nn.Module 子模块）赋值需用
+    ``object.__setattr__`` 绕过 ``nn.Module.__setattr__`` 的"未初始化检查"；本测试不依赖子模块注册。
     """
     module = RFDETRModelModule.__new__(RFDETRModelModule)
     module.criterion = _FakeCriterion()

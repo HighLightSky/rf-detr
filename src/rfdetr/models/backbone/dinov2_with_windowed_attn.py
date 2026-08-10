@@ -763,7 +763,7 @@ class WindowedDinov2WithRegistersLayer(nn.Module):
         run_full_attention: bool = False,
     ) -> tuple[Tensor, Tensor | None] | tuple[Tensor]:
         assert not output_attentions, "output_attentions is not supported for windowed attention"
-        shortcut = hidden_states   # 保存输入，给残差用
+        shortcut = hidden_states  # 保存输入，给残差用
         # 如果当前层是全局层
         if run_full_attention:
             # reshape x to remove windows 合并窗口

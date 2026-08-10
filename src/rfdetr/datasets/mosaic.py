@@ -5,8 +5,7 @@
 # ------------------------------------------------------------------------
 """Mosaic 数据增强 Dataset 包装器。
 
-将 4 张随机图片拼接为 1 张训练样本，参考 YOLOv5/v8 的实现，
-特别适用于小目标检测和遥感数据集。
+将 4 张随机图片拼接为 1 张训练样本，参考 YOLOv5/v8 的实现， 特别适用于小目标检测和遥感数据集。
 """
 
 from __future__ import annotations
@@ -186,14 +185,8 @@ class MosaicDataset(torch.utils.data.Dataset[Any]):
     def _load_raw_coco(self, idx: int) -> tuple[Image.Image, list[dict[str, Any]]]:
         """从 COCO 数据集直接加载原始图片和标注。"""
         ds = self._dataset
-        coco = ds.coco
-        root = ds.root
-        img_id = ds.ids[idx]
-        img_info = coco.loadImgs(img_id)[0]
-        img_path = f"{root}/{img_info['file_name']}"
-        img = Image.open(img_path).convert("RGB")
-        ann_ids = coco.getAnnIds(img_id)
-        raw_anns = coco.loadAnns(ann_ids)
+        img, target = ds._load_raw(idx)
+        raw_anns = target["annotations"]
         return img, [_deep_copy_coco_ann(a) for a in raw_anns]
 
     def _load_raw_yolo(self, idx: int) -> tuple[Image.Image, list[dict[str, Any]]]:
@@ -202,7 +195,7 @@ class MosaicDataset(torch.utils.data.Dataset[Any]):
         supervision Detections.xyxy 为绝对像素坐标。
         """
         ds = self._dataset
-        _, rgb_image, detections = ds.sv_dataset[idx]
+        _, rgb_image, detections = ds.load_raw(idx)
         img = Image.fromarray(rgb_image)
 
         anns: list[dict[str, Any]] = []
@@ -212,21 +205,21 @@ class MosaicDataset(torch.utils.data.Dataset[Any]):
             if class_ids is None:
                 class_ids = np.zeros(len(xyxy), dtype=int)
             for i in range(len(xyxy)):
-                anns.append({
-                    "bbox": _xyxy_to_coco_bbox(xyxy[i]),
-                    "category_id": int(class_ids[i]),
-                    "area": float((xyxy[i][2] - xyxy[i][0]) * (xyxy[i][3] - xyxy[i][1])),
-                    "iscrowd": 0,
-                })
+                anns.append(
+                    {
+                        "bbox": _xyxy_to_coco_bbox(xyxy[i]),
+                        "category_id": int(class_ids[i]),
+                        "area": float((xyxy[i][2] - xyxy[i][0]) * (xyxy[i][3] - xyxy[i][1])),
+                        "iscrowd": 0,
+                    }
+                )
         return img, anns
 
     # ------------------------------------------------------------------
     # Target 构建
     # ------------------------------------------------------------------
 
-    def _build_target(
-        self, idx: int, anns: list[dict[str, Any]], img_size: tuple[int, int]
-    ) -> dict[str, Any]:
+    def _build_target(self, idx: int, anns: list[dict[str, Any]], img_size: tuple[int, int]) -> dict[str, Any]:
         """根据数据集类型构建原始 target 字典。
 
         Args:
@@ -302,10 +295,10 @@ class MosaicDataset(torch.utils.data.Dataset[Any]):
 
         # 4 个象限的放置区域
         placements: list[tuple[int, int, int, int]] = [
-            (0, 0, cx, cy),                      # 左上
-            (cx, 0, canvas_w, cy),                # 右上
-            (0, cy, cx, canvas_h),                # 左下
-            (cx, cy, canvas_w, canvas_h),         # 右下
+            (0, 0, cx, cy),  # 左上
+            (cx, 0, canvas_w, cy),  # 右上
+            (0, cy, cx, canvas_h),  # 左下
+            (cx, cy, canvas_w, canvas_h),  # 右下
         ]
 
         merged_anns: list[dict[str, Any]] = []
@@ -338,17 +331,19 @@ class MosaicDataset(torch.utils.data.Dataset[Any]):
             scale_y = new_h / orig_h
             for ann in anns:
                 bbox = ann["bbox"]  # COCO: [x, y, w, h]
-                merged_anns.append({
-                    "bbox": [
-                        bbox[0] * scale_x + paste_x,
-                        bbox[1] * scale_y + paste_y,
-                        bbox[2] * scale_x,
-                        bbox[3] * scale_y,
-                    ],
-                    "category_id": ann.get("category_id", 0),
-                    "area": bbox[2] * scale_x * bbox[3] * scale_y,
-                    "iscrowd": ann.get("iscrowd", 0),
-                })
+                merged_anns.append(
+                    {
+                        "bbox": [
+                            bbox[0] * scale_x + paste_x,
+                            bbox[1] * scale_y + paste_y,
+                            bbox[2] * scale_x,
+                            bbox[3] * scale_y,
+                        ],
+                        "category_id": ann.get("category_id", 0),
+                        "area": bbox[2] * scale_x * bbox[3] * scale_y,
+                        "iscrowd": ann.get("iscrowd", 0),
+                    }
+                )
 
         # 缩放到最终输出尺寸
         mosaic = mosaic.resize((out_w, out_h), Image.BILINEAR)

@@ -45,9 +45,7 @@ from rfdetr.sscl.prompts import SHWX_CLASS_NAMES  # noqa: E402
 # ══════════════════════════════════════════════════════════════════════
 #  默认配置 —— 命令行参数可覆盖
 # ══════════════════════════════════════════════════════════════════════
-CHECKPOINT_PATH = (
-    PROJECT_ROOT / "output/0804-SHWX-rfdetr_medium_SSCL+prototype" / "checkpoint_best_total.pth"
-)
+CHECKPOINT_PATH = PROJECT_ROOT / "output/0804-SHWX-rfdetr_medium_SSCL+prototype" / "checkpoint_best_total.pth"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output/0804-SHWX-rfdetr_medium_SSCL+prototype" / "predict"
 DEFAULT_CONF_THRESHOLD = 0.25
 
@@ -109,14 +107,14 @@ def _box_color(class_id: int) -> tuple[int, int, int]:
         BGR 三元组颜色。
     """
     palette = [
-        (0, 140, 255),   # 橙
-        (0, 255, 0),     # 绿
-        (255, 0, 0),     # 蓝
-        (0, 255, 255),   # 黄
-        (255, 0, 255),   # 品红
-        (255, 255, 0),   # 青
-        (0, 128, 255),   # 浅橙
-        (128, 0, 255),   # 紫
+        (0, 140, 255),  # 橙
+        (0, 255, 0),  # 绿
+        (255, 0, 0),  # 蓝
+        (0, 255, 255),  # 黄
+        (255, 0, 255),  # 品红
+        (255, 255, 0),  # 青
+        (0, 128, 255),  # 浅橙
+        (128, 0, 255),  # 紫
     ]
     return palette[class_id % len(palette)]
 

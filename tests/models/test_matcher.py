@@ -317,6 +317,52 @@ class TestHungarianMatcherSanitization:
         assert sanitized[0, 1] == dtype_max
 
 
+class TestHungarianMatcherParallelAssignment:
+    """Tests for parallel Hungarian assignment scheduling."""
+
+    def test_parallel_grouped_assignments_match_serial(self) -> None:
+        """Parallel assignment scheduling must preserve the serial matcher result exactly."""
+        torch.manual_seed(23)
+        bs = 4
+        group_detr = 3
+        queries_per_group = 5
+        sizes = [2, 0, 3, 1]
+        cost_matrix = torch.randn(bs, queries_per_group * group_detr, sum(sizes), dtype=torch.float32)
+
+        serial = HungarianMatcher._solve_grouped_assignments(
+            cost_matrix=cost_matrix,
+            sizes=sizes,
+            group_detr=group_detr,
+            max_workers=1,
+        )
+        parallel = HungarianMatcher._solve_grouped_assignments(
+            cost_matrix=cost_matrix,
+            sizes=sizes,
+            group_detr=group_detr,
+            max_workers=4,
+        )
+
+        for (serial_queries, serial_targets), (parallel_queries, parallel_targets) in zip(serial, parallel):
+            assert serial_queries.tolist() == parallel_queries.tolist()
+            assert serial_targets.tolist() == parallel_targets.tolist()
+
+    def test_matcher_workers_env_can_disable_parallelism(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment override should allow forcing serial assignment execution."""
+        monkeypatch.setenv(matcher_module._MATCHER_WORKERS_ENV, "1")
+
+        workers = matcher_module._resolve_assignment_workers(task_count=8)
+
+        assert workers == 1
+
+    def test_small_cost_matrices_default_to_serial_execution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Small assignment matrices should avoid thread scheduling overhead by default."""
+        monkeypatch.delenv(matcher_module._MATCHER_WORKERS_ENV, raising=False)
+
+        workers = matcher_module._resolve_assignment_workers(task_count=8, max_targets_per_image=8)
+
+        assert workers == 1
+
+
 class TestHungarianMatcherFocalAlpha:
     """The configured ``focal_alpha`` must drive the classification matching cost."""
 

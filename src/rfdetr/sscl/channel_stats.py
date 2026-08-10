@@ -74,11 +74,13 @@ def _batch_2means_activation_mask(a: Tensor) -> Tensor:
     sorted_a = torch.gather(a, 1, order)  # [N, d]
     # 前缀和（含 0 头）：pre[:, i] = 每行前 i 个元素之和 [N, d+1]
     pre = torch.cat([torch.zeros(n, 1, dtype=a.dtype, device=a.device), torch.cumsum(sorted_a, dim=-1)], dim=-1)
-    pre_sq = torch.cat([torch.zeros(n, 1, dtype=a.dtype, device=a.device), torch.cumsum(sorted_a.square(), dim=-1)], dim=-1)
+    pre_sq = torch.cat(
+        [torch.zeros(n, 1, dtype=a.dtype, device=a.device), torch.cumsum(sorted_a.square(), dim=-1)], dim=-1
+    )
 
     # 对每个切点 k（左簇 [0,k)，右簇 [k,d)）批量计算 SSE
     left_cnt = torch.arange(1, d, dtype=a.dtype, device=a.device)  # [d-1]
-    right_cnt = (d - left_cnt)
+    right_cnt = d - left_cnt
     left_sum = pre[:, 1:d]  # [N, d-1]
     left_sq = pre_sq[:, 1:d]
     right_sum = pre[:, d : d + 1] - left_sum

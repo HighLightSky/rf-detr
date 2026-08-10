@@ -1,6 +1,10 @@
-"""
-比赛指标评测工具函数。
-"""
+# ------------------------------------------------------------------------
+# RF-DETR
+# Copyright (c) 2025 Roboflow. All Rights Reserved.
+# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
+# ------------------------------------------------------------------------
+
+"""比赛指标评测工具函数。"""
 
 from __future__ import annotations
 
@@ -128,11 +132,9 @@ def evaluate_competition_metrics(
     pred_records: list[BoxRecord],
     config: EvalConfig,
 ) -> dict[str, EvalResult | dict[str, EvalResult]]:
-    """
-    按比赛方案计算整体和分组 TP/FP/FN、召回率、虚警率。
+    """按比赛方案计算整体和分组 TP/FP/FN、召回率、虚警率。
 
-    返回:
-        {"all": EvalResult, "groups": {目标组名: EvalResult}}
+    返回:     {"all": EvalResult, "groups": {目标组名: EvalResult}}
     """
     # 将真实标注和预测记录分别按图像 ID 和组名进行分组
     gt_by_image_group = _group_records_by_image_and_group(gt_records, config)
@@ -172,10 +174,7 @@ def evaluate_competition_metrics(
             all_counts["fp"] += fp
             all_counts["fn"] += fn
 
-    group_results = {
-        group_name: EvalResult(**counts)
-        for group_name, counts in sorted(group_counts.items())
-    }
+    group_results = {group_name: EvalResult(**counts) for group_name, counts in sorted(group_counts.items())}
     return {
         "all": EvalResult(**all_counts),
         "groups": group_results,

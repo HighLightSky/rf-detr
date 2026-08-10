@@ -34,13 +34,12 @@ for _p in (str(SRC_DIR), str(SCRIPTS_DIR), str(PROJECT_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import test as _test  # noqa: E402  (复用 test.py 的推理/报告函数与 SHWX 配置)
 import torch  # noqa: E402
 
 from rfdetr import RFDETRMedium  # noqa: E402
 from rfdetr.sscl.semantic_head import attach_from_checkpoint  # noqa: E402
 from val.competition_metrics import EvalConfig, evaluate_competition_metrics, load_yolo_labels  # noqa: E402
-
-import test as _test  # noqa: E402  (复用 test.py 的推理/报告函数与 SHWX 配置)
 
 # ── 8 个实验的输出目录后缀（与 ablation_configs.ABLATIONS 一致）──
 RUN_SUFFIXES = {

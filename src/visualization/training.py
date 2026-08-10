@@ -5,8 +5,7 @@
 # ------------------------------------------------------------------------
 """训练指标可视化函数。
 
-重新导出 ``rfdetr.visualize.training`` 中已有的公共 API，
-并补充库中未覆盖的逐类 AP 热力图和学习率曲线。
+重新导出 ``rfdetr.visualize.training`` 中已有的公共 API， 并补充库中未覆盖的逐类 AP 热力图和学习率曲线。
 """
 
 from __future__ import annotations

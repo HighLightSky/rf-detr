@@ -40,9 +40,7 @@ from rfdetr.variants import RFDETRMedium
 # ============================================================================
 
 # Stage-1 全量微调 checkpoint（已适配 SHWX 的骨干权重）
-BASE_CHECKPOINT = str(
-    Path("output/0805-SHWX-data-expand-rfdetr-baseline/checkpoint_best_total.pth").resolve()
-)
+BASE_CHECKPOINT = str(Path("output/0805-SHWX-data-expand-rfdetr-baseline/checkpoint_best_total.pth").resolve())
 
 # SHWX 数据集（YOLO 布局）
 DATASET_DIR = "/home/liu/datasets/SHWX-dataset-dict"

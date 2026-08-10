@@ -5,10 +5,8 @@
 # ------------------------------------------------------------------------
 """使用比赛评分方案在测试集上评估 RF-DETR 模型，并测量 GPU 满载时的推理吞吐。
 
-推理阶段使用“多进程预取解码 + GPU 批量前向”的流水线：DataLoader 的多个 worker
-进程在后台并行完成图像解码与换色，float 化 / 缩放 / 归一化在 GPU 端批量执行，
-从而隐藏 CPU 预处理延迟，让 GPU 持续满载。预测结果与逐张 ``model.predict``
-完全一致。
+推理阶段使用“多进程预取解码 + GPU 批量前向”的流水线：DataLoader 的多个 worker 进程在后台并行完成图像解码与换色，float 化 / 缩放 / 归一化在 GPU 端批量执行， 从而隐藏 CPU 预处理延迟，让
+GPU 持续满载。预测结果与逐张 ``model.predict`` 完全一致。
 """
 
 import gc
@@ -30,7 +28,7 @@ from torch.utils.data import DataLoader, Dataset
 # ══════════════════════════════════════════════════════════════════════
 #  数据集选择 —— 切换数据集只需改这里
 # ══════════════════════════════════════════════════════════════════════
-DATASET = "shwx"    # 可选: "shwx"（YOLO 格式）| "dior"（Roboflow COCO 格式）
+DATASET = "shwx"  # 可选: "shwx"（YOLO 格式）| "dior"（Roboflow COCO 格式）
 SAVE_FD_FN = True  # 是否保存FN/FD可视化
 
 # ── 项目路径 ───────────────────────────────────────────────────────
@@ -335,8 +333,7 @@ def compute_group_macro_averages(
     ):
         # 测试集中不存在（无真实框也无预测）的小类取全零结果，保持按全部小类平均
         class_results = [
-            per_class_results.get(class_names[class_id], EvalResult(tp=0, fp=0, fn=0))
-            for class_id in class_ids
+            per_class_results.get(class_names[class_id], EvalResult(tp=0, fp=0, fn=0)) for class_id in class_ids
         ]
         num_classes = len(class_results)
         group_macro[group_name] = {
@@ -363,10 +360,7 @@ def compute_total_metrics(group_macro: Mapping[str, Mapping[str, float]]) -> dic
     num_groups = len(group_macro)
     if num_groups == 0:
         return {key: 0.0 for key in metric_keys}
-    return {
-        key: sum(group[key] for group in group_macro.values()) / num_groups
-        for key in metric_keys
-    }
+    return {key: sum(group[key] for group in group_macro.values()) / num_groups for key in metric_keys}
 
 
 def build_test_report(
@@ -430,9 +424,7 @@ def build_test_report(
     # ── 推理测速结果 ────────────────────────────────────────────────
     report_lines.append("推理测速结果")
     report_lines.append(f"GPU 批量大小: {BATCH_SIZE}  |  CPU 预取 worker 数: {NUM_WORKERS}")
-    report_lines.append(
-        f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {timed_images / throughput:.1f}s）"
-    )
+    report_lines.append(f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {timed_images / throughput:.1f}s）")
     if gpu_util is not None:
         report_lines.append(f"推理期间 GPU 平均利用率: {gpu_util:.1f}%")
     report_lines.append(sep)
@@ -570,8 +562,7 @@ class _GpuUtilMonitor:
     def _sample_once() -> int:
         """读取一次 GPU 利用率（%）。
 
-        优先使用 ``torch.cuda.utilization``（需要 nvidia-ml-py），不可用时回退到
-        ``nvidia-smi`` 命令行。
+        优先使用 ``torch.cuda.utilization``（需要 nvidia-ml-py），不可用时回退到 ``nvidia-smi`` 命令行。
         """
         try:
             return int(torch.cuda.utilization())

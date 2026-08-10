@@ -5,8 +5,8 @@
 
 # Basic Information
 name: PDF Converter
-description: "Convert PDF files to and from Word, Excel, Image, and other formats"
-version: "1.0"
+description: Convert PDF files to and from Word, Excel, Image, and other formats
+version: '1.0'
 author: claude-office-skills
 license: MIT
 
@@ -54,6 +54,7 @@ Convert PDF files to various formats and vice versa while preserving formatting.
 ## Overview
 
 This skill helps you:
+
 - Convert PDFs to editable formats (Word, Excel)
 - Convert documents to PDF
 - Extract images from PDFs
@@ -63,29 +64,32 @@ This skill helps you:
 ## Supported Conversions
 
 ### PDF to Other Formats
-| Target Format | Best For | Quality |
-|---------------|----------|---------|
-| **Word (.docx)** | Text-heavy documents | ⭐⭐⭐⭐ |
-| **Excel (.xlsx)** | Tables and data | ⭐⭐⭐⭐ |
-| **PowerPoint (.pptx)** | Presentations | ⭐⭐⭐ |
-| **Images (.png/.jpg)** | Visual snapshots | ⭐⭐⭐⭐⭐ |
-| **Text (.txt)** | Plain text extraction | ⭐⭐⭐⭐ |
-| **HTML** | Web content | ⭐⭐⭐ |
-| **Markdown (.md)** | Structured text | ⭐⭐⭐ |
+
+| Target Format          | Best For              | Quality    |
+| ---------------------- | --------------------- | ---------- |
+| **Word (.docx)**       | Text-heavy documents  | ⭐⭐⭐⭐   |
+| **Excel (.xlsx)**      | Tables and data       | ⭐⭐⭐⭐   |
+| **PowerPoint (.pptx)** | Presentations         | ⭐⭐⭐     |
+| **Images (.png/.jpg)** | Visual snapshots      | ⭐⭐⭐⭐⭐ |
+| **Text (.txt)**        | Plain text extraction | ⭐⭐⭐⭐   |
+| **HTML**               | Web content           | ⭐⭐⭐     |
+| **Markdown (.md)**     | Structured text       | ⭐⭐⭐     |
 
 ### Other Formats to PDF
-| Source Format | Quality Notes |
-|---------------|---------------|
-| **Word (.docx)** | Excellent preservation |
-| **Excel (.xlsx)** | Good, check page breaks |
+
+| Source Format          | Quality Notes                  |
+| ---------------------- | ------------------------------ |
+| **Word (.docx)**       | Excellent preservation         |
+| **Excel (.xlsx)**      | Good, check page breaks        |
 | **PowerPoint (.pptx)** | Excellent with animations flat |
-| **Images** | Depends on resolution |
-| **HTML** | Variable, CSS may differ |
-| **Text (.txt)** | Perfect, but basic |
+| **Images**             | Depends on resolution          |
+| **HTML**               | Variable, CSS may differ       |
+| **Text (.txt)**        | Perfect, but basic             |
 
 ## How to Use
 
 ### Basic Conversion
+
 ```
 "Convert this PDF to Word"
 "Save this document as PDF"
@@ -93,6 +97,7 @@ This skill helps you:
 ```
 
 ### With Options
+
 ```
 "Convert PDF to Word, preserve exact formatting"
 "Export PDF pages 1-5 as PNG images at 300 DPI"
@@ -100,6 +105,7 @@ This skill helps you:
 ```
 
 ### Batch Conversion
+
 ```
 "Convert all PDFs in this folder to Word documents"
 "Create PDFs from these 10 Word files"
@@ -108,6 +114,7 @@ This skill helps you:
 ## Conversion Guidelines
 
 ### PDF to Word
+
 ```markdown
 ## PDF to Word Conversion
 
@@ -140,6 +147,7 @@ This skill helps you:
 ```
 
 ### PDF to Excel
+
 ```markdown
 ## PDF to Excel Conversion
 
@@ -172,6 +180,7 @@ After conversion, check:
 ```
 
 ### PDF to Images
+
 ```markdown
 ## PDF to Image Conversion
 
@@ -198,6 +207,7 @@ After conversion, check:
 ```
 
 ### Document to PDF
+
 ```markdown
 ## Converting to PDF
 
@@ -232,6 +242,7 @@ After conversion, check:
 ## Batch Processing
 
 ### Batch Conversion Template
+
 ```markdown
 ## Batch Conversion Job
 
@@ -260,16 +271,19 @@ After conversion, check:
 ## Troubleshooting
 
 ### Common Issues
-| Problem | Cause | Solution |
-|---------|-------|----------|
-| Text not selectable | Scanned PDF | Apply OCR first |
-| Missing characters | Font issues | Embed fonts or convert |
-| Poor image quality | Low DPI | Use higher resolution |
-| Large file size | Uncompressed | Apply compression |
-| Lost formatting | Complex layout | Use "exact" mode |
+
+| Problem             | Cause          | Solution               |
+| ------------------- | -------------- | ---------------------- |
+| Text not selectable | Scanned PDF    | Apply OCR first        |
+| Missing characters  | Font issues    | Embed fonts or convert |
+| Poor image quality  | Low DPI        | Use higher resolution  |
+| Large file size     | Uncompressed   | Apply compression      |
+| Lost formatting     | Complex layout | Use "exact" mode       |
 
 ### Quality Checklist
+
 After conversion, verify:
+
 - [ ] All text present and readable
 - [ ] Formatting approximately preserved
 - [ ] Images included and clear
@@ -280,18 +294,21 @@ After conversion, verify:
 ## Tool Recommendations
 
 ### Online Tools
+
 - Adobe Acrobat (best quality)
 - SmallPDF (easy to use)
 - ILovePDF (batch friendly)
 - PDF24 (free, good quality)
 
 ### Desktop Software
+
 - Adobe Acrobat Pro
 - Microsoft Office (built-in)
 - LibreOffice (free)
 - Foxit PDF Editor
 
 ### Command Line
+
 - Pandoc (text formats)
 - ImageMagick (images)
 - pdftk (PDF manipulation)

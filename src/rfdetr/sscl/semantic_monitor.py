@@ -125,7 +125,7 @@ class SemanticMonitor:
         return float(per_class[ids].mean().item()) if ids else 0.0
 
     def on_train_epoch_end(self, pl_module: Any) -> None:
-        """epoch 结束时输出全部监控指标到 ``train/sem/*`` 并清空累加器。
+        """Epoch 结束时输出全部监控指标到 ``train/sem/*`` 并清空累加器。
 
         Args:
             pl_module: LightningModule（用于 ``log_dict``）。

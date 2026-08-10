@@ -5,8 +5,7 @@
 # ------------------------------------------------------------------------
 """少数类重采样数据集包装器。
 
-将训练集长度扩展 ``oversample_factor`` 倍，扩展段循环映射到包含指定少数类
-（如 SHWX 数据集的 HM 航母、LQS 两栖舰）的图片，从而提升极端稀有类在训练
+将训练集长度扩展 ``oversample_factor`` 倍，扩展段循环映射到包含指定少数类 （如 SHWX 数据集的 HM 航母、LQS 两栖舰）的图片，从而提升极端稀有类在训练
 中的参与度。开关默认关闭时，本包装器不会被构造，训练行为与基线完全一致。
 """
 
@@ -75,9 +74,7 @@ class RareClassOversampleDataset(torch.utils.data.Dataset[Any]):
                 self._length,
             )
 
-    def _collect_rare_indices(
-        self, info: torch.utils.data.Dataset[Any], rare_ids: set[int]
-    ) -> list[int]:
+    def _collect_rare_indices(self, info: torch.utils.data.Dataset[Any], rare_ids: set[int]) -> list[int]:
         """收集底层数据集中包含任一少数类类别的图片索引（只读元数据，不解码像素）。
 
         Args:

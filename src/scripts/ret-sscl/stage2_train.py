@@ -5,18 +5,14 @@
 # ------------------------------------------------------------------------
 """Stage-2 语义分类头消融训练入口。
 
-在 0805 Stage-1 checkpoint 上冻结"适配后"骨干，解冻 decoder 末层 + 分类头 +
-语义组件（θ/α）+ SSCL，施加语义残差增量 + SSCL + 基类蒸馏。
+在 0805 Stage-1 checkpoint 上冻结"适配后"骨干，解冻 decoder 末层 + 分类头 + 语义组件（θ/α）+ SSCL，施加语义残差增量 + SSCL + 基类蒸馏。
 
-用法：
-    python src/scripts/ret-sscl/stage2_train.py [experiment]
+用法：     python src/scripts/ret-sscl/stage2_train.py [experiment]
 
-``experiment`` 为 ABLATIONS 中的实验名（默认 e1a），也可用环境变量
-``SEM_HEAD_EXPERIMENT`` 指定。每个实验输出到独立目录
-``output/0810-SHWX-SemHead-<suffix>``，保证实验结果可归因。
+``experiment`` 为 ABLATIONS 中的实验名（默认 e1a），也可用环境变量 ``SEM_HEAD_EXPERIMENT`` 指定。每个实验输出到独立目录 ``output/0810-SHWX-
+SemHead-<suffix>``，保证实验结果可归因。
 
-前置条件：已运行 stage0_collect_features.py 与 stage0_train_fsem.py，
-产出 data/fsem_shwx.pt 与 data/channel_stats_shwx.pt。
+前置条件：已运行 stage0_collect_features.py 与 stage0_train_fsem.py， 产出 data/fsem_shwx.pt 与 data/channel_stats_shwx.pt。
 """
 
 from __future__ import annotations
@@ -25,9 +21,9 @@ import os
 import sys
 from pathlib import Path
 
-from rfdetr.variants import RFDETRMedium
-
 import ablation_configs as cfg
+
+from rfdetr.variants import RFDETRMedium
 
 # ============================================================================
 # 配置 —— 在这里修改

@@ -103,6 +103,9 @@ _TC_NON_NAMESPACE_FIELDS = {
     "optimizer",
     "optimizer_kwargs",
     "optimizer_param_group_overrides",
+    "dataset_cache_mode",
+    "dataset_cache_dir",
+    "dataset_cache_rebuild",
     # Dataset class labels.
     "class_names",
 }

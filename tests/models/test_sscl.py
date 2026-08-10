@@ -82,7 +82,7 @@ class TestSSCLLoss:
         assert loss_weighted >= loss_plain
 
     def test_no_valid_anchor_returns_zero(self) -> None:
-        """batch 内无同类正样本（无有效 anchor）时损失应为 0，而非 NaN。"""
+        """Batch 内无同类正样本（无有效 anchor）时损失应为 0，而非 NaN。"""
         loss_fn = SSCLLoss(semantic_matrix=_SEMANTIC_MATRIX, anchor_classes=[0])
         features = torch.randn(2, 16, requires_grad=True)
         labels = torch.tensor([0, 2])  # 两个类别各仅一个样本，无同类正样本
@@ -116,7 +116,7 @@ class TestSSCLLoss:
         assert focused <= unfocused + 1e-6
 
     def test_mismatched_lengths_raise(self) -> None:
-        """features 与 labels 长度不一致时抛出 ValueError。"""
+        """Features 与 labels 长度不一致时抛出 ValueError。"""
         loss_fn = SSCLLoss(semantic_matrix=_SEMANTIC_MATRIX)
         features = torch.randn(3, 16)
         labels = torch.tensor([0, 1])
@@ -163,7 +163,7 @@ class TestSemanticMatrix:
     """语义矩阵的归一化、保存与加载。"""
 
     def test_minmax_normalize(self) -> None:
-        """minmax 归一化后非对角线元素应在 [0, 1]，对角线保持 1。"""
+        """Minmax 归一化后非对角线元素应在 [0, 1]，对角线保持 1。"""
         normalized = normalize_semantic_matrix(_SEMANTIC_MATRIX, mode="minmax")
         off_diag = normalized[~torch.eye(5, dtype=torch.bool)]
         assert off_diag.min() >= 0.0
@@ -171,7 +171,7 @@ class TestSemanticMatrix:
         assert torch.allclose(normalized.diag(), torch.ones(5))
 
     def test_softmax_normalize(self) -> None:
-        """softmax 归一化应保持对称性且每行非负。"""
+        """Softmax 归一化应保持对称性且每行非负。"""
         normalized = normalize_semantic_matrix(_SEMANTIC_MATRIX, mode="softmax", temperature=0.1)
         assert (normalized >= 0).all()
         assert torch.allclose(normalized, normalized.T, atol=1e-5)

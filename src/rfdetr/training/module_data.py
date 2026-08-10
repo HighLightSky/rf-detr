@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -28,6 +30,7 @@ from rfdetr.utilities.tensors import make_collate_fn
 logger = get_logger()
 
 _MIN_TRAIN_BATCHES = 5
+_DATASET_RAW_CACHE_VERSION = 1
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -68,6 +71,65 @@ def _has_cuda_device() -> bool:
     from rfdetr.config import DEVICE
 
     return str(DEVICE).startswith("cuda")
+
+
+def _iter_dataset_fingerprint_paths(dataset_dir: str | None) -> list[Path]:
+    """Return dataset metadata files that should affect the raw-cache directory.
+
+    Args:
+        dataset_dir: Dataset root directory.
+
+    Returns:
+        Stable list of existing metadata paths used for cache fingerprinting.
+    """
+    if dataset_dir is None:
+        return []
+    root = Path(dataset_dir)
+    candidates = [root / "data.yaml", root / "data.yml"]
+    candidates.extend(sorted(root.glob("*/_annotations.coco.json")))
+    annotations_dir = root / "annotations"
+    if annotations_dir.exists():
+        candidates.extend(sorted(annotations_dir.glob("*.json")))
+    return [path for path in candidates if path.exists()]
+
+
+def _dataset_raw_cache_hash(
+    model_config: ModelConfig,
+    train_config: TrainConfig,
+    split: str,
+    resolution: int,
+) -> str:
+    """Build a short cache fingerprint for raw decoded dataset samples.
+
+    Args:
+        model_config: Model configuration that controls raw target schema.
+        train_config: Training configuration that controls dataset root/type.
+        split: Dataset split name.
+        resolution: Model resolution for directory names and future compatibility.
+
+    Returns:
+        Short SHA256 digest.
+    """
+    hasher = hashlib.sha256()
+    parts = [
+        f"version={_DATASET_RAW_CACHE_VERSION}",
+        f"dataset_dir={os.path.realpath(os.fspath(train_config.dataset_dir)) if train_config.dataset_dir else ''}",
+        f"dataset_file={train_config.dataset_file}",
+        f"split={split}",
+        f"resolution={resolution}",
+        f"segmentation={model_config.segmentation_head}",
+        f"keypoints={model_config.use_grouppose_keypoints}",
+    ]
+    for part in parts:
+        hasher.update(part.encode())
+    dataset_dir = os.fspath(train_config.dataset_dir) if train_config.dataset_dir else None
+    for path in _iter_dataset_fingerprint_paths(dataset_dir):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        hasher.update(f"{path}:{stat.st_size}:{stat.st_mtime_ns}".encode())
+    return hasher.hexdigest()[:16]
 
 
 class GradAccumAlignedDataset(torch.utils.data.Dataset[Any]):
@@ -203,6 +265,38 @@ class RFDETRDataModule(LightningDataModule):
         else:
             self._prefetch_factor = None
 
+    def _enable_raw_cache_if_requested(
+        self,
+        dataset: torch.utils.data.Dataset[Any],
+        split: str,
+        resolution: int,
+    ) -> None:
+        """Enable raw decoded-image caching on datasets that support it.
+
+        Args:
+            dataset: Dataset returned by ``build_dataset``.
+            split: Dataset split name.
+            resolution: Model resolution used for cache directory naming.
+        """
+        if self.train_config.dataset_cache_mode == "off":
+            return
+        if self.train_config.dataset_cache_mode != "raw":
+            raise ValueError(f"Unsupported dataset_cache_mode={self.train_config.dataset_cache_mode!r}")
+
+        enable_raw_cache = getattr(dataset, "enable_raw_cache", None)
+        if not callable(enable_raw_cache):
+            logger.warning(
+                "dataset_cache_mode='raw' requested, but %s does not support raw caching.",
+                type(dataset).__name__,
+            )
+            return
+
+        root = Path(self.train_config.dataset_cache_dir or Path(self.train_config.output_dir) / "dataset_cache")
+        fingerprint = _dataset_raw_cache_hash(self.model_config, self.train_config, split, resolution)
+        cache_dir = root / f"{self.train_config.dataset_file}-{split}-{resolution}-{fingerprint}"
+        enable_raw_cache(cache_dir, rebuild=self.train_config.dataset_cache_rebuild)
+        logger.info("Raw dataset cache enabled for %s split: %s", split, cache_dir)
+
     # ------------------------------------------------------------------
     # PTL lifecycle hooks
     # ------------------------------------------------------------------
@@ -264,6 +358,7 @@ class RFDETRDataModule(LightningDataModule):
                 )
             if self._dataset_train is None:
                 raw_train_dataset = build_dataset("train", ns, resolution)
+                self._enable_raw_cache_if_requested(raw_train_dataset, "train", resolution)
                 self._dataset_train = raw_train_dataset
                 # 如果配置了 mosaic 增强，包装训练数据集
                 mosaic_p = getattr(self.train_config, "mosaic_p", 0.0)
@@ -278,12 +373,8 @@ class RFDETRDataModule(LightningDataModule):
                 if getattr(self.train_config, "rare_class_oversample", False):
                     self._dataset_train = RareClassOversampleDataset(
                         self._dataset_train,
-                        rare_class_ids=list(
-                            getattr(self.train_config, "rare_class_oversample_class_ids", []) or []
-                        ),
-                        oversample_factor=int(
-                            getattr(self.train_config, "rare_class_oversample_factor", 2)
-                        ),
+                        rare_class_ids=list(getattr(self.train_config, "rare_class_oversample_class_ids", []) or []),
+                        oversample_factor=int(getattr(self.train_config, "rare_class_oversample_factor", 2)),
                         info_dataset=raw_train_dataset,
                     )
                     logger.info(
@@ -293,6 +384,7 @@ class RFDETRDataModule(LightningDataModule):
                     )
             if self._dataset_val is None:
                 self._dataset_val = build_dataset("val", ns, resolution)
+                self._enable_raw_cache_if_requested(self._dataset_val, "val", resolution)
             # Build Kornia pipeline (once); use _kornia_setup_done so fallback paths
             # (pipeline stays None) do not re-run on repeated setup("fit") calls.
             if not self._kornia_setup_done:
@@ -302,13 +394,16 @@ class RFDETRDataModule(LightningDataModule):
         elif stage == "validate":
             if self._dataset_val is None:
                 self._dataset_val = build_dataset("val", ns, resolution)
+                self._enable_raw_cache_if_requested(self._dataset_val, "val", resolution)
         elif stage == "test":
             if self._dataset_test is None:
                 split = "test" if self.train_config.dataset_file == "roboflow" else "val"
                 self._dataset_test = build_dataset(split, ns, resolution)
+                self._enable_raw_cache_if_requested(self._dataset_test, split, resolution)
         elif stage == "predict":
             if self._dataset_val is None:
                 self._dataset_val = build_dataset("val", ns, resolution)
+                self._enable_raw_cache_if_requested(self._dataset_val, "val", resolution)
 
     def _resolve_batch_size(self) -> int:
         """Return the concrete training batch size.

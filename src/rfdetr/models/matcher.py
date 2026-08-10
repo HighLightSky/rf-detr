@@ -19,7 +19,9 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
 import numpy as np
@@ -37,8 +39,54 @@ from rfdetr.utilities.logger import get_logger
 logger = get_logger()
 _SANITIZED_COST_MARGIN = 1.0
 _FOCAL_LOSS_GAMMA = 2.0
+_MATCHER_WORKERS_ENV = "RFDETR_MATCHER_WORKERS"
+_MATCHER_PARALLEL_MIN_TARGETS = 64
 _LinearSumAssignment = Callable[[Any], tuple[NDArray[np.int64], NDArray[np.int64]]]
+_Assignment = tuple[NDArray[np.int64], NDArray[np.int64]]
 linear_sum_assignment = cast(_LinearSumAssignment, _linear_sum_assignment)
+
+
+def _run_linear_sum_assignment(cost_matrix: Tensor) -> _Assignment:
+    """Run SciPy Hungarian assignment on one per-image cost matrix.
+
+    Args:
+        cost_matrix: CPU cost matrix for a single image and one DETR group.
+
+    Returns:
+        Row and column indices produced by SciPy's Hungarian solver.
+    """
+    return linear_sum_assignment(cost_matrix)
+
+
+def _resolve_assignment_workers(task_count: int, max_targets_per_image: int = 0) -> int:
+    """Resolve how many worker threads to use for independent Hungarian solves.
+
+    Args:
+        task_count: Number of independent per-image/per-group assignment tasks.
+        max_targets_per_image: Largest target count in the current batch.
+
+    Returns:
+        Number of worker threads. Returns 1 when parallelism is unnecessary or disabled.
+    """
+    if task_count <= 1:
+        return 1
+
+    configured_workers = os.environ.get(_MATCHER_WORKERS_ENV)
+    if configured_workers is not None:
+        try:
+            return max(1, min(task_count, int(configured_workers)))
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid %s=%r; expected a positive integer.",
+                _MATCHER_WORKERS_ENV,
+                configured_workers,
+            )
+
+    if max_targets_per_image < _MATCHER_PARALLEL_MIN_TARGETS:
+        return 1
+
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(task_count, cpu_count))
 
 
 class HungarianMatcher(nn.Module):
@@ -98,6 +146,8 @@ class HungarianMatcher(nn.Module):
         self.keypoint_visible_loss_coef = keypoint_visible_loss_coef
         self.keypoint_nll_loss_coef = keypoint_nll_loss_coef
         self._warned_non_finite_costs = False
+        self._assignment_executor: ThreadPoolExecutor | None = None
+        self._assignment_executor_workers = 0
 
     @staticmethod
     def _sanitize_cost_matrix(cost_matrix: Tensor) -> Tensor:
@@ -138,6 +188,107 @@ class HungarianMatcher(nn.Module):
         sanitized_cost_matrix = cost_matrix.clone()
         sanitized_cost_matrix[~finite_mask] = replacement_cost
         return sanitized_cost_matrix
+
+    @staticmethod
+    def _solve_grouped_assignments(
+        cost_matrix: Tensor,
+        sizes: list[int],
+        group_detr: int,
+        max_workers: int | None = None,
+        executor: ThreadPoolExecutor | None = None,
+    ) -> list[_Assignment]:
+        """Solve all per-image/per-group Hungarian assignments.
+
+        Args:
+            cost_matrix: CPU cost matrix with shape ``[batch_size, num_queries, total_targets]``.
+            sizes: Number of targets for each batch element.
+            group_detr: Number of DETR groups packed into the query dimension.
+            max_workers: Optional explicit worker count. ``None`` resolves from environment and CPU count.
+            executor: Optional reusable executor owned by the matcher instance.
+
+        Returns:
+            A list of per-image assignments. When ``group_detr > 1``, assignments from later groups are concatenated
+            with query indices offset exactly as in the original serial implementation.
+        """
+        bs, num_queries = cost_matrix.shape[:2]
+        if num_queries % group_detr != 0:
+            raise ValueError(f"num_queries ({num_queries}) must be divisible by group_detr ({group_detr})")
+
+        g_num_queries = num_queries // group_detr
+        cost_matrix_list = cost_matrix.split(g_num_queries, dim=1)
+        task_count = bs * group_detr
+        workers = (
+            _resolve_assignment_workers(task_count, max(sizes, default=0))
+            if max_workers is None
+            else max(1, min(task_count, max_workers))
+        )
+
+        if workers == 1:
+            indices: list[_Assignment] = []
+            for g_i, grouped_cost_matrix in enumerate(cost_matrix_list):
+                indices_g = [
+                    _run_linear_sum_assignment(c[i]) for i, c in enumerate(grouped_cost_matrix.split(sizes, -1))
+                ]
+                if g_i == 0:
+                    indices = indices_g
+                else:
+                    indices = [
+                        (
+                            np.concatenate([indice1[0], indice2[0] + g_num_queries * g_i]),
+                            np.concatenate([indice1[1], indice2[1]]),
+                        )
+                        for indice1, indice2 in zip(indices, indices_g)
+                    ]
+            return indices
+
+        tasks: list[tuple[int, int, Tensor]] = []
+        for g_i, grouped_cost_matrix in enumerate(cost_matrix_list):
+            split_costs = grouped_cost_matrix.split(sizes, -1)
+            tasks.extend((g_i, image_i, split_cost[image_i]) for image_i, split_cost in enumerate(split_costs))
+
+        per_group: list[list[_Assignment | None]] = [[None for _ in range(bs)] for _ in range(group_detr)]
+        if executor is None:
+            with ThreadPoolExecutor(max_workers=workers) as local_executor:
+                assignments = local_executor.map(_run_linear_sum_assignment, (task[2] for task in tasks))
+                for (g_i, image_i, _), assignment in zip(tasks, assignments):
+                    per_group[g_i][image_i] = assignment
+        else:
+            assignments = executor.map(_run_linear_sum_assignment, (task[2] for task in tasks))
+            for (g_i, image_i, _), assignment in zip(tasks, assignments):
+                per_group[g_i][image_i] = assignment
+
+        indices = []
+        for g_i, indices_g_raw in enumerate(per_group):
+            indices_g = [cast(_Assignment, assignment) for assignment in indices_g_raw]
+            if g_i == 0:
+                indices = indices_g
+            else:
+                indices = [
+                    (
+                        np.concatenate([indice1[0], indice2[0] + g_num_queries * g_i]),
+                        np.concatenate([indice1[1], indice2[1]]),
+                    )
+                    for indice1, indice2 in zip(indices, indices_g)
+                ]
+        return indices
+
+    def _get_assignment_executor(self, workers: int) -> ThreadPoolExecutor | None:
+        """Return a reusable executor for parallel assignments.
+
+        Args:
+            workers: Requested number of worker threads.
+
+        Returns:
+            A reusable executor, or ``None`` when serial execution is requested.
+        """
+        if workers <= 1:
+            return None
+        if self._assignment_executor is None or self._assignment_executor_workers != workers:
+            if self._assignment_executor is not None:
+                self._assignment_executor.shutdown(wait=False, cancel_futures=True)
+            self._assignment_executor = ThreadPoolExecutor(max_workers=workers)
+            self._assignment_executor_workers = workers
+        return self._assignment_executor
 
     @torch.no_grad()
     def forward(
@@ -293,24 +444,9 @@ class HungarianMatcher(nn.Module):
             cost_matrix = self._sanitize_cost_matrix(cost_matrix)
 
         sizes = [len(v["boxes"]) for v in targets]
-        indices = []
-        if num_queries % group_detr != 0:
-            raise ValueError(f"num_queries ({num_queries}) must be divisible by group_detr ({group_detr})")
-        g_num_queries = num_queries // group_detr
-        cost_matrix_list = cost_matrix.split(g_num_queries, dim=1)
-        for g_i in range(group_detr):
-            grouped_cost_matrix = cost_matrix_list[g_i]
-            indices_g = [linear_sum_assignment(c[i]) for i, c in enumerate(grouped_cost_matrix.split(sizes, -1))]
-            if g_i == 0:
-                indices = indices_g
-            else:
-                indices = [
-                    (
-                        np.concatenate([indice1[0], indice2[0] + g_num_queries * g_i]),
-                        np.concatenate([indice1[1], indice2[1]]),
-                    )
-                    for indice1, indice2 in zip(indices, indices_g)
-                ]
+        workers = _resolve_assignment_workers(len(targets) * group_detr, max(sizes, default=0))
+        executor = self._get_assignment_executor(workers)
+        indices = self._solve_grouped_assignments(cost_matrix, sizes, group_detr, workers, executor)
         return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
 

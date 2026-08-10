@@ -2158,8 +2158,7 @@ class TestConfigureOptimizers:
     def test_optimizer_includes_projection_head_params(self, mock_get_param_dict, tmp_path):
         """启用投影头时，投影头参数作为独立参数组进入优化器。
 
-        投影头挂在 sscl_loss 上而非 LWDETR 内部，get_param_dict 收集不到，
-        由 get_projection_head_param_dict 手动追加——本测试验证该集成链路。
+        投影头挂在 sscl_loss 上而非 LWDETR 内部，get_param_dict 收集不到， 由 get_projection_head_param_dict 手动追加——本测试验证该集成链路。
         """
         module, param_dicts = self._setup_module(tmp_path)
         mock_get_param_dict.return_value = param_dicts
@@ -2640,8 +2639,7 @@ class TestManualOptLRSchedulerStepping:
 class TestProjectionHeadParamDict:
     """get_projection_head_param_dict 辅助函数的单元测试。
 
-    投影头挂在 sscl_loss 子模块上而非 LWDETR 内部，get_param_dict 收集不到，
-    该函数负责单独收集为独立参数组。验证各边界场景返回正确。
+    投影头挂在 sscl_loss 子模块上而非 LWDETR 内部，get_param_dict 收集不到， 该函数负责单独收集为独立参数组。验证各边界场景返回正确。
     """
 
     def test_none_returns_empty(self) -> None:

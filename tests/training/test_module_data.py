@@ -88,6 +88,18 @@ def _fake_dataset(length: int = 100, with_coco: bool = False) -> _FakeDataset:
     return _FakeDataset(length, with_coco)
 
 
+class _CacheableFakeDataset(_FakeDataset):
+    """Fake dataset that records raw-cache enable calls."""
+
+    def __init__(self, length: int = 100) -> None:
+        super().__init__(length)
+        self.raw_cache_calls: list[tuple[Path, bool]] = []
+
+    def enable_raw_cache(self, cache_dir: str | Path, *, rebuild: bool = False) -> None:
+        """Record cache activation arguments."""
+        self.raw_cache_calls.append((Path(cache_dir), rebuild))
+
+
 class _VisualDataset(torch.utils.data.Dataset):
     """Minimal transformed dataset item for DataModule sample visualization."""
 
@@ -192,6 +204,31 @@ class TestInit:
         tc = base_train_config(num_workers=0, prefetch_factor=5)
         dm = build_datamodule(train_config=tc)
         assert dm._prefetch_factor is None
+
+    def test_raw_cache_enabled_for_train_and_val_datasets(self, build_datamodule, base_train_config, tmp_path):
+        """dataset_cache_mode='raw' should activate cache support on built datasets."""
+        train_dataset = _CacheableFakeDataset(length=20)
+        val_dataset = _CacheableFakeDataset(length=20)
+        tc = base_train_config(
+            dataset_cache_mode="raw",
+            dataset_cache_dir=str(tmp_path / "cache"),
+            dataset_cache_rebuild=True,
+        )
+        dm = build_datamodule(train_config=tc)
+
+        with (
+            patch("rfdetr.training.module_data.build_dataset", side_effect=[train_dataset, val_dataset]),
+            patch("rfdetr.training.module_data._has_cuda_device", return_value=False),
+        ):
+            dm.setup("fit")
+
+        assert len(train_dataset.raw_cache_calls) == 1
+        assert len(val_dataset.raw_cache_calls) == 1
+        assert train_dataset.raw_cache_calls[0][1] is True
+        assert val_dataset.raw_cache_calls[0][1] is True
+        assert train_dataset.raw_cache_calls[0][0].parent == tmp_path / "cache"
+        assert "roboflow-train" in train_dataset.raw_cache_calls[0][0].name
+        assert "roboflow-val" in val_dataset.raw_cache_calls[0][0].name
 
     def test_pin_memory_override_is_respected(self, build_datamodule, base_train_config):
         """pin_memory can be explicitly overridden from TrainConfig."""

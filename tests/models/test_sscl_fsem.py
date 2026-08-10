@@ -32,7 +32,7 @@ def test_fsem_projection_shape() -> None:
 
 
 def test_fsem_artifacts_round_trip(tmp_path) -> None:
-    """save/load 往返后 S 矩阵与权重一致。"""
+    """Save/load 往返后 S 矩阵与权重一致。"""
     path = tmp_path / "fsem.pt"
     proj = FSemProjection(text_dim=768, hidden_dim=512, out_dim=256)
     s = torch.randn(25, 256)

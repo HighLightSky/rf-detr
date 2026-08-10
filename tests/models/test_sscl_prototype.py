@@ -125,8 +125,7 @@ class TestSSCLPrototypeLoss:
     """原型锚定 SSCL 损失的行为。"""
 
     def test_single_sample_per_class_prototype_loss_nonzero(self) -> None:
-        """核心：预热原型后，每类仅 1 个样本时原型模式损失非零且有限，
-        而实例模式同输入返回零损失——证明原型锚定规避了 batch 构成影响。"""
+        """核心：预热原型后，每类仅 1 个样本时原型模式损失非零且有限， 而实例模式同输入返回零损失——证明原型锚定规避了 batch 构成影响。"""
         loss_fn = _make_prototype_loss()
         _warm_bank(loss_fn)
         features = torch.randn(5, 16, requires_grad=True)

@@ -30,7 +30,6 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F  # noqa: N812 -- 项目约定别名（见 AGENTS.md）
-from tqdm.auto import tqdm  # 注意：必须用 tqdm.auto
 
 from rfdetr.sscl.channel_stats import compute_channel_tfidf, save_channel_stats
 from rfdetr.sscl.fsem import FSemProjection, evaluate_alignment, save_fsem_artifacts

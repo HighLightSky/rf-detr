@@ -59,14 +59,12 @@ def _make_artifacts(tmp_path) -> tuple[str, str]:
     idf = torch.randn(_D)
     tf = torch.rand(_C, _D)
     stats_path = tmp_path / "stats.pt"
-    save_channel_stats(
-        stats_path, SimpleNamespace(tf=tf, rank=rank, score=score, idf=idf, counts={}, meta={})
-    )
+    save_channel_stats(stats_path, SimpleNamespace(tf=tf, rank=rank, score=score, idf=idf, counts={}, meta={}))
     return str(fsem_path), str(stats_path)
 
 
 def test_forward_shape_and_switches(tmp_path) -> None:
-    """forward 输出形状正确，且 mask/alpha 开关各自生效。"""
+    """Forward 输出形状正确，且 mask/alpha 开关各自生效。"""
     fsem_path, stats_path = _make_artifacts(tmp_path)
     cfg = _build_cfg(semantic_fsem_path=fsem_path, semantic_channel_stats_path=stats_path)
     head = SemanticResidual.build(cfg, _C, _D)
@@ -93,7 +91,7 @@ def test_forward_shape_and_switches(tmp_path) -> None:
 
 
 def test_alpha_clamped_in_forward() -> None:
-    """α 在 forward 内被 clamp 到 [0, alpha_max]，且不修改原始参数。"""
+    """Α 在 forward 内被 clamp 到 [0, alpha_max]，且不修改原始参数。"""
     head = SemanticResidual(_C, _D, alpha_max=2.0, mask_tau=1.0)
     head.S.copy_(torch.nn.functional.normalize(torch.randn(_C, _D), dim=-1))
     with torch.no_grad():
@@ -106,7 +104,7 @@ def test_alpha_clamped_in_forward() -> None:
 
 
 def test_build_init_and_freeze(tmp_path) -> None:
-    """build() 装配：S/rank 载入、novel 类 α 更大、novel 类 θ 冻结。"""
+    """Build() 装配：S/rank 载入、novel 类 α 更大、novel 类 θ 冻结。"""
     fsem_path, stats_path = _make_artifacts(tmp_path)
     cfg = _build_cfg(semantic_fsem_path=fsem_path, semantic_channel_stats_path=stats_path)
     head = SemanticResidual.build(cfg, _C, _D)
@@ -139,6 +137,7 @@ def test_attach_from_checkpoint_round_trip(tmp_path) -> None:
     head.S.copy_(torch.nn.functional.normalize(torch.randn(_C, _D), dim=-1))
     sub_state = head.state_dict()
     full_state = {f"semantic_residual.{k}": v for k, v in sub_state.items()}
+
     # 模拟一个带语义头键的模型 state_dict
     class Stub:
         pass

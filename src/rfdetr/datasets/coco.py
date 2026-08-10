@@ -41,6 +41,7 @@ from rfdetr.datasets._torchvision import (
 )
 from rfdetr.datasets.aug_configs import AUG_CONFIG
 from rfdetr.datasets.kornia_transforms import is_gpu_postprocess, resolve_backend_for_build
+from rfdetr.datasets.raw_cache import RawImageCache, load_rgb_image
 from rfdetr.datasets.transforms import AlbumentationsWrapper, Normalize
 from rfdetr.utilities.logger import get_logger
 
@@ -281,11 +282,40 @@ class CocoDetection(torchvision.datasets.CocoDetection):
             cat2label=self.cat2label,
             num_keypoints_per_class=num_keypoints_per_class,
         )
+        self._raw_image_cache: RawImageCache | None = None
+
+    def enable_raw_cache(self, cache_dir: str | Path, *, rebuild: bool = False) -> None:
+        """Enable decoded-image caching for COCO image reads.
+
+        Args:
+            cache_dir: Directory used for per-image cache files.
+            rebuild: Whether to clear existing cache files in ``cache_dir`` first.
+        """
+        self._raw_image_cache = RawImageCache(cache_dir, rebuild=rebuild)
+
+    def _load_raw(self, idx: int) -> tuple[Image.Image, dict[str, Any]]:
+        """Load the raw COCO image and annotations.
+
+        Args:
+            idx: Dataset index.
+
+        Returns:
+            Tuple of PIL image and raw target dict.
+        """
+        image_id = self.ids[idx]
+        image_info = self.coco.loadImgs(image_id)[0]
+        image_path = Path(self.root) / image_info["file_name"]
+        if self._raw_image_cache is None:
+            rgb_image = load_rgb_image(image_path)
+        else:
+            rgb_image = self._raw_image_cache.load_or_create(image_path)
+        ann_ids = self.coco.getAnnIds(image_id)
+        annotations = self.coco.loadAnns(ann_ids)
+        target = {"image_id": image_id, "annotations": [dict(annotation) for annotation in annotations]}
+        return Image.fromarray(rgb_image), target
 
     def __getitem__(self, idx: int) -> tuple[Any, Any]:
-        img, target = super().__getitem__(idx)
-        image_id = self.ids[idx]
-        target = {"image_id": image_id, "annotations": target}
+        img, target = self._load_raw(idx)
         img, target = self.prepare(img, target)
         if self._transforms is not None:
             # boxes are absolute [x_min, y_min, x_max, y_max]; conversion to

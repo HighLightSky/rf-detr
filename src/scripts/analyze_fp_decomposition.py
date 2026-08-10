@@ -24,12 +24,9 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from collections import Counter
 from pathlib import Path
-
-import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = PROJECT_ROOT / "src"
@@ -40,6 +37,7 @@ if str(SRC_DIR / "scripts") not in sys.path:
 
 # 复用 test.py 的推理管线与数据集配置（DATASET="shwx" 为默认值）
 import test  # noqa: E402
+
 from rfdetr import RFDETRMedium  # noqa: E402
 from val.competition_metrics import (  # noqa: E402
     BoxRecord,
@@ -210,9 +208,7 @@ def main() -> None:
     print("\n===== ship 大类置信度阈值扫描（其他类保持 0.25）=====")
     ship_class_ids = {cid for cid, g in config.class_to_group.items() if g == "ship"}
     for thr in (0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.60):
-        filtered = [
-            p for p in pred_records if p.class_id not in ship_class_ids or (p.score or 0.0) >= thr
-        ]
+        filtered = [p for p in pred_records if p.class_id not in ship_class_ids or (p.score or 0.0) >= thr]
         res = evaluate_competition_metrics(gt_records, filtered, config)
         s = res["groups"]["ship"]
         a = res["all"]

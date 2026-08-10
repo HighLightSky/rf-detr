@@ -59,19 +59,19 @@ DATASET_FILE = "yolo"
 # 2026-08-09 实测（5090 + bf16 + torch.compile）：有效 batch 保持 64（B32×2），
 # 优化器/EMA/日志步数减半、GPU 单步 burst 更长、占用更平稳；compile B32 峰值 ~22.5GB。
 EPOCHS = 100
-BATCH_SIZE = 16          # 每 GPU 的 batch size（实测上限：compile 下 32 安全，40 OOM）
-GRAD_ACCUM_STEPS = 4     # 有效 batch = 32 × 2 = 64，与 0810 重采样实验一致
-NUM_WORKERS = 20          # DataLoader 工作进程数（20 核 CPU，worker 单线程）
-PREFETCH_FACTOR = 6       # 每 worker 预取样本数（默认 2；加深预取缓冲，平滑 decode/mosaic 抖动）
-LR = 1e-4                # 基础学习率
-LR_ENCODER = 1.5e-4      # 编码器（backbone）学习率
+BATCH_SIZE = 16  # 每 GPU 的 batch size（实测上限：compile 下 32 安全，40 OOM）
+GRAD_ACCUM_STEPS = 4  # 有效 batch = 32 × 2 = 64，与 0810 重采样实验一致
+NUM_WORKERS = 20  # DataLoader 工作进程数（20 核 CPU，worker 单线程）
+PREFETCH_FACTOR = 6  # 每 worker 预取样本数（默认 2；加深预取缓冲，平滑 decode/mosaic 抖动）
+LR = 1e-4  # 基础学习率
+LR_ENCODER = 1.5e-4  # 编码器（backbone）学习率
 WEIGHT_DECAY = 1e-4
 CLIP_MAX_NORM = 0.1
 LR_DROP = 60
 WARMUP_EPOCHS = 0.0
 
 # --- 数据增广 ---
-AUG_CONFIG = AUG_AERIAL   # 遥感、航拍预设
+AUG_CONFIG = AUG_AERIAL  # 遥感、航拍预设
 MOSAIC_P = 0.8
 
 # --- 性能优化（5090 利用率）---
@@ -92,8 +92,8 @@ COMPILE = True
 
 # --- 少数类重采样（与 0810 重采样实验同参数）---
 RARE_CLASS_OVERSAMPLE = True
-RARE_CLASS_OVERSAMPLE_FACTOR = 2       # 倍率
-RARE_CLASS_OVERSAMPLE_CLASS_IDS = [0, 1]   # 0=HM 航母, 1=LQS 两栖舰
+RARE_CLASS_OVERSAMPLE_FACTOR = 2  # 倍率
+RARE_CLASS_OVERSAMPLE_CLASS_IDS = [0, 1]  # 0=HM 航母, 1=LQS 两栖舰
 
 # --- 硬件 ---
 DEVICE = "cuda"
@@ -179,7 +179,9 @@ def main() -> None:
     print(f"模型: {MODEL}（实验二：QNorm-Obj + EUMix）| 类别数: {NUM_CLASSES}")
     print("起点: RF-DETR Medium 发布权重（DINOv2 backbone + COCO decoder）")
     print(f"Batch: {BATCH_SIZE} x {GRAD_ACCUM_STEPS} (有效={BATCH_SIZE * GRAD_ACCUM_STEPS}) | Epochs: {EPOCHS}")
-    print(f"重采样: {'开' if RARE_CLASS_OVERSAMPLE else '关'} (factor={RARE_CLASS_OVERSAMPLE_FACTOR}, ids={RARE_CLASS_OVERSAMPLE_CLASS_IDS})")
+    print(
+        f"重采样: {'开' if RARE_CLASS_OVERSAMPLE else '关'} (factor={RARE_CLASS_OVERSAMPLE_FACTOR}, ids={RARE_CLASS_OVERSAMPLE_CLASS_IDS})"
+    )
     print(f"SSCL: λ={SSCL_LAMBDA}, τ={SSCL_TAU}, ρ={SSCL_RHO}, anchor={SSCL_ANCHOR_CLASSES}")
     print(f"SSCL 起始 epoch: {SSCL_START_EPOCH}（最后 10 轮启用） | 冻结策略: {SSCL_FREEZE_STRATEGY}")
     print(

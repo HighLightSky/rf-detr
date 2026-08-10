@@ -31,6 +31,7 @@ from rfdetr.datasets.coco import (
     make_coco_transforms_square_div_64,
 )
 from rfdetr.datasets.kornia_transforms import is_gpu_postprocess, resolve_backend_for_build
+from rfdetr.datasets.raw_cache import RawImageCache, load_rgb_image
 from rfdetr.utilities.logger import get_logger
 
 logger = get_logger()
@@ -152,17 +153,26 @@ class _LazyYoloDetectionDataset:
     def __init__(self, classes: list[str], samples: list[_LazyYoloSample]) -> None:
         self.classes = classes
         self._samples = samples
+        self._raw_image_cache: RawImageCache | None = None
+
+    def enable_raw_cache(self, cache_dir: str | Path, *, rebuild: bool = False) -> None:
+        """Enable decoded-image caching for this lazy dataset.
+
+        Args:
+            cache_dir: Directory used for per-image cache files.
+            rebuild: Whether to clear existing cache files in ``cache_dir`` first.
+        """
+        self._raw_image_cache = RawImageCache(cache_dir, rebuild=rebuild)
 
     def __len__(self) -> int:
         return len(self._samples)
 
     def __getitem__(self, idx: int) -> tuple[str, np.ndarray, Detections]:
         sample = self._samples[idx]
-        try:
-            with Image.open(sample.image_path) as image:
-                rgb_image = np.array(image.convert("RGB"))
-        except (FileNotFoundError, OSError, Image.UnidentifiedImageError) as exc:
-            raise ValueError(f"Could not read image from path: {sample.image_path}") from exc
+        if self._raw_image_cache is None:
+            rgb_image = load_rgb_image(sample.image_path)
+        else:
+            rgb_image = self._raw_image_cache.load_or_create(sample.image_path)
         return sample.image_path, rgb_image, sample.to_detections()
 
     def get_image_info(self, idx: int) -> _LazyYoloSample:
@@ -952,9 +962,29 @@ class YoloDetection(VisionDataset):
     def __len__(self) -> int:
         return len(self.sv_dataset)
 
+    def enable_raw_cache(self, cache_dir: str | Path, *, rebuild: bool = False) -> None:
+        """Enable decoded-image caching for YOLO image reads.
+
+        Args:
+            cache_dir: Directory used for per-image cache files.
+            rebuild: Whether to clear existing cache files in ``cache_dir`` first.
+        """
+        self.sv_dataset.enable_raw_cache(cache_dir, rebuild=rebuild)
+
+    def load_raw(self, idx: int) -> tuple[str, np.ndarray, Detections]:
+        """Load the raw YOLO image and detections, honoring the raw cache when enabled.
+
+        Args:
+            idx: Dataset index.
+
+        Returns:
+            Tuple of image path, RGB image array, and detections.
+        """
+        return self.sv_dataset[idx]
+
     def __getitem__(self, idx: int):
         image_id = self.ids[idx]
-        image_path, rgb_image, detections = self.sv_dataset[idx]
+        image_path, rgb_image, detections = self.load_raw(idx)
 
         img = Image.fromarray(rgb_image)
 

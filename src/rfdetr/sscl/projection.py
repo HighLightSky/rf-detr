@@ -5,13 +5,9 @@
 # ------------------------------------------------------------------------
 """SSCL 对比空间投影头。
 
-把 decoder 输出的 matched foreground query features 投影到低维对比空间，
-再在该空间内计算 SSCL 对比损失。参照 CVPR 2026《Balanced Hierarchical
-Contrastive Learning with Decoupled Queries》的投影头做法：对比损失是强
-约束，直接作用在共享特征（同时喂给 class_embed 与 bbox_embed）上会迫使
-特征按对比几何剧烈变形，干扰任务分支。投影头提供一个可学习的缓冲层，
-让对比压力先被消化在低维空间，共享特征只被软约束。原型库同样建立在
-投影空间，保证正/负样本与原型在同一几何中计算。
+把 decoder 输出的 matched foreground query features 投影到低维对比空间， 再在该空间内计算 SSCL 对比损失。参照 CVPR 2026《Balanced Hierarchical
+Contrastive Learning with Decoupled Queries》的投影头做法：对比损失是强 约束，直接作用在共享特征（同时喂给 class_embed 与 bbox_embed）上会迫使
+特征按对比几何剧烈变形，干扰任务分支。投影头提供一个可学习的缓冲层， 让对比压力先被消化在低维空间，共享特征只被软约束。原型库同样建立在 投影空间，保证正/负样本与原型在同一几何中计算。
 """
 
 from __future__ import annotations

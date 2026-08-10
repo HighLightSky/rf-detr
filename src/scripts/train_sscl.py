@@ -15,7 +15,6 @@
 前置条件：
     - 已运行 build_semantic_matrix.py 生成 data/semantic_matrix_shwx.pt
     - 已有基线 checkpoint（默认 output/0724-shwx-rfdetr_medium/checkpoint_best_total.pth）
-
 """
 
 from __future__ import annotations

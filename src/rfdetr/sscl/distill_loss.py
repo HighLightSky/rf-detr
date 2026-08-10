@@ -5,16 +5,12 @@
 # ------------------------------------------------------------------------
 """基类 logit 蒸馏损失。
 
-teacher（原始 RF-DETR checkpoint，完全冻结）只监督基类（飞机类 + FSC），
-舰船类 logits 通道不参与蒸馏。原因：SSCL 的目标是重塑舰船类的特征空间
-边界，若 teacher 同时蒸馏舰船类，会把学生"锚定"到 teacher 已经混乱的
-舰船边界上，与 SSCL 的分离目标直接冲突。
+teacher（原始 RF-DETR checkpoint，完全冻结）只监督基类（飞机类 + FSC）， 舰船类 logits 通道不参与蒸馏。原因：SSCL 的目标是重塑舰船类的特征空间 边界，若 teacher
+同时蒸馏舰船类，会把学生"锚定"到 teacher 已经混乱的 舰船边界上，与 SSCL 的分离目标直接冲突。
 
-蒸馏作用在所有 query（matched + background）的基类通道上，以同时保护
-基类检测置信度和 background 抑制（避免基类 FP 增加）。
+蒸馏作用在所有 query（matched + background）的基类通道上，以同时保护 基类检测置信度和 background 抑制（避免基类 FP 增加）。
 
-默认使用 MSE logit 蒸馏（第一版推荐，工程风险低）；也支持伯努利 KL
-蒸馏（温度缩放的 sigmoid 软标签），梯度信息更柔和。
+默认使用 MSE logit 蒸馏（第一版推荐，工程风险低）；也支持伯努利 KL 蒸馏（温度缩放的 sigmoid 软标签），梯度信息更柔和。
 """
 
 from __future__ import annotations

@@ -323,6 +323,33 @@ class TestYoloDetectionLazyMasks:
         assert dataset.coco.getImgIds() == [0]
         assert dataset.coco.getAnnIds(imgIds=[0], catIds=[0]) == [0]
 
+    def test_raw_cache_reuses_decoded_image(self, tmp_path: Path) -> None:
+        """Raw cache should avoid reopening the source image after the first read."""
+        image_dir = tmp_path / "images"
+        label_dir = tmp_path / "labels"
+        image_dir.mkdir()
+        label_dir.mkdir()
+        Image.new("RGB", (8, 6), color=(10, 20, 30)).save(image_dir / "sample.png")
+        (label_dir / "sample.txt").write_text("0 0.5 0.5 0.5 0.5\n", encoding="utf-8")
+        data_file = tmp_path / "data.yaml"
+        data_file.write_text("names:\n  - carton\n", encoding="utf-8")
+        dataset = YoloDetection(
+            img_folder=str(image_dir),
+            lb_folder=str(label_dir),
+            data_file=str(data_file),
+            transforms=None,
+            include_masks=False,
+        )
+        dataset.enable_raw_cache(tmp_path / "cache")
+
+        _, first_image, _ = dataset.load_raw(0)
+
+        with patch.object(Image, "open", side_effect=AssertionError("source image should not be reopened")):
+            _, cached_image, _ = dataset.load_raw(0)
+
+        assert np.array_equal(first_image, cached_image)
+        assert list((tmp_path / "cache").glob("*.npz"))
+
     def test_pose_init_exposes_keypoint_coco_metadata_without_pixel_loading(self, tmp_path: Path) -> None:
         """YOLO pose construction should synthesize COCO keypoint metadata lazily."""
         image_dir, label_dir, data_file = _write_yolo_pose_dataset(tmp_path, keypoint_dim=3)

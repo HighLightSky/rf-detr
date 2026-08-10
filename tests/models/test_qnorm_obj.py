@@ -82,9 +82,8 @@ def test_forward_single_layer() -> None:
 def test_near_identity_init() -> None:
     """近恒等初始化：起点 logits 相对输入仅有界扰动。
 
-    门控初始 σ(z_obj)≈0.98、α_mix=0（特征混合恒等）、EUMix 混合权重 α=0.1
-    （背景列 90% 保持输入）——起步行为≈基线，不扰动预训练权重下的匹配。
-    前景/背景列分别给出宽松界（含门控 2% 缩放与前景软抑制 ≤λ·1）。
+    门控初始 σ(z_obj)≈0.98、α_mix=0（特征混合恒等）、EUMix 混合权重 α=0.1 （背景列 90% 保持输入）——起步行为≈基线，不扰动预训练权重下的匹配。 前景/背景列分别给出宽松界（含门控 2%
+    缩放与前景软抑制 ≤λ·1）。
     """
     hs, z_cls, w, b = _make_inputs()
     z_out, stats = _make_module()(hs, z_cls, w, b)
@@ -111,7 +110,7 @@ def test_grad_flows_to_all_params() -> None:
 
 
 def test_eumix_off_background_column_unchanged() -> None:
-    """eumix=False：背景列与输入完全一致（仅特征混合路径生效）。"""
+    """Eumix=False：背景列与输入完全一致（仅特征混合路径生效）。"""
     hs, z_cls, w, b = _make_inputs()
     z_out, _ = _make_module(eumix=False)(hs, z_cls, w, b)
     # α_mix=0 时特征混合重算 = class_embed(hs) = 输入（浮点精度内一致）
@@ -119,7 +118,7 @@ def test_eumix_off_background_column_unchanged() -> None:
 
 
 def test_gate_off_no_objectness_scaling() -> None:
-    """gate=False：前景 logits 不被物体性缩放（仅剩软抑制的有界扰动）。"""
+    """Gate=False：前景 logits 不被物体性缩放（仅剩软抑制的有界扰动）。"""
     hs, z_cls, w, b = _make_inputs()
     z_out, stats = _make_module(gate=False)(hs, z_cls, w, b)
     # 软抑制 ≤ λ·p_obj_bg ≤ 0.5；无 gate 缩放
@@ -168,7 +167,7 @@ def test_alpha_init_out_of_range_raises() -> None:
 
 
 def test_build_from_train_config() -> None:
-    """build() 从 TrainConfig 装配：开关映射正确，关闭时抛 ValueError。"""
+    """Build() 从 TrainConfig 装配：开关映射正确，关闭时抛 ValueError。"""
     cfg = TrainConfig(
         dataset_dir="dummy",
         qnorm_obj_enabled=True,

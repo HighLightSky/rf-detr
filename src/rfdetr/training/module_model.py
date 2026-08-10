@@ -550,9 +550,7 @@ class RFDETRModelModule(LightningModule):
         if cfg.sscl_freeze_strategy == "none":
             logger.info("[SSCL] 冻结策略为 none：保持全量微调，不冻结任何参数")
         elif cfg.sscl_freeze_strategy != "conservative":
-            raise ValueError(
-                f"不支持的 sscl_freeze_strategy: {cfg.sscl_freeze_strategy}，可选: 'conservative', 'none'"
-            )
+            raise ValueError(f"不支持的 sscl_freeze_strategy: {cfg.sscl_freeze_strategy}，可选: 'conservative', 'none'")
 
         # 可选：基类蒸馏（保护飞机类/FSC 指标）
         if cfg.sscl_distill_enabled:
@@ -595,13 +593,10 @@ class RFDETRModelModule(LightningModule):
     def _apply_sscl_freeze(self) -> None:
         """应用 SSCL 保守冻结策略。
 
-        冻结：backbone、encoder 主体、bbox 头、early decoder layers、
-        refpoint_embed、query_feat、enc_out_class_embed。
-        解冻：decoder 最后一层、decoder 最终 LayerNorm、分类头 class_embed、
-        语义头（SemHead）与 QNorm-Obj 附加模块参数（若装配）。
+        冻结：backbone、encoder 主体、bbox 头、early decoder layers、 refpoint_embed、query_feat、enc_out_class_embed。 解冻：decoder
+        最后一层、decoder 最终 LayerNorm、分类头 class_embed、 语义头（SemHead）与 QNorm-Obj 附加模块参数（若装配）。
 
-        该策略保证 SSCL 只通过 decoder 最后一层重塑 query 特征空间，
-        不扰动主干与目标定位能力。
+        该策略保证 SSCL 只通过 decoder 最后一层重塑 query 特征空间， 不扰动主干与目标定位能力。
         """
         model = self.model
         # 先冻结全部参数
@@ -694,12 +689,10 @@ class RFDETRModelModule(LightningModule):
     def _setup_semantic_head(self) -> None:
         """装配语义分类头（SemanticResidual）与训练监控。
 
-        从 f_sem/通道统计产物构建语义残差模块挂到 ``model.semantic_residual``，
-        并实例化 ``SemanticMonitor`` 累加器。冻结矩阵（novel 类 θ 冻结、α 可学习性）
-        在 ``_apply_sscl_freeze`` 中统一恢复。若 SSCL 未启用（仅语义头场景），
-        直接注册监控回调到 criterion。
+        从 f_sem/通道统计产物构建语义残差模块挂到 ``model.semantic_residual``， 并实例化 ``SemanticMonitor`` 累加器。冻结矩阵（novel 类 θ 冻结、α 可学习性） 在
+        ``_apply_sscl_freeze`` 中统一恢复。若 SSCL 未启用（仅语义头场景）， 直接注册监控回调到 criterion。
         """
-        from rfdetr.sscl import SemanticResidual, SemanticMonitor
+        from rfdetr.sscl import SemanticMonitor, SemanticResidual
 
         cfg = self.train_config
         model = self.model
@@ -740,10 +733,8 @@ class RFDETRModelModule(LightningModule):
     def _setup_qnorm_obj(self) -> None:
         """装配 QNorm-Obj + EUMix 模块（query 范数物体性门控 + 熵感知校准）。
 
-        在冻结策略之前调用（__init__ 顺序保证），确保门控参数创建后
-        按冻结策略统一处理可训练性。模块挂到 ``model.qnorm_obj``，
-        在 lwdetr 前向中于 class_embed/语义头之后校准全层 logits。
-        不加任何辅助监督损失，参数由标准检测损失隐式训练。
+        在冻结策略之前调用（__init__ 顺序保证），确保门控参数创建后 按冻结策略统一处理可训练性。模块挂到 ``model.qnorm_obj``， 在 lwdetr 前向中于 class_embed/语义头之后校准全层
+        logits。 不加任何辅助监督损失，参数由标准检测损失隐式训练。
         """
         from rfdetr.sscl.qnorm_obj import QNormObjectness
 
@@ -819,7 +810,9 @@ class RFDETRModelModule(LightningModule):
                     h_mean = torch.nn.functional.normalize(features[sel].mean(dim=0), dim=-1)
                     align[c] = torch.nn.functional.cosine_similarity(h_mean.unsqueeze(0), s_norm[c].unsqueeze(0))
 
-        monitor.update({"alpha": alpha, "theta": theta, "M": m, "ratio_sem": ratio_sem, "ratio_mask": ratio_mask, "align": align})
+        monitor.update(
+            {"alpha": alpha, "theta": theta, "M": m, "ratio_sem": ratio_sem, "ratio_mask": ratio_mask, "align": align}
+        )
         return {}
 
     def _setup_sscl_distill(self) -> None:
@@ -1242,10 +1235,8 @@ class RFDETRModelModule(LightningModule):
     def on_after_backward(self) -> None:
         """采集语义头 α/θ 的梯度范数供监控（自动优化路径 backward 完成后触发）。
 
-        在 no_grad 下**只读取** α/θ 的 ``.grad`` 范数喂给 SemanticMonitor，绝不置空：
-        PTL 自动优化路径在 optimizer.step() 前依赖这些梯度更新 α/θ，清空会导致
-        语义参数永远不更新。梯度累积（accumulate_grad_batches>1）时读取的是当前
-        累计梯度，用于监控"是否在学"仍具代表性。仅在语义头启用时执行。
+        在 no_grad 下**只读取** α/θ 的 ``.grad`` 范数喂给 SemanticMonitor，绝不置空： PTL 自动优化路径在 optimizer.step() 前依赖这些梯度更新 α/θ，清空会导致
+        语义参数永远不更新。梯度累积（accumulate_grad_batches>1）时读取的是当前 累计梯度，用于监控"是否在学"仍具代表性。仅在语义头启用时执行。
         """
         monitor = getattr(self, "_semantic_monitor", None)
         semantic_residual = getattr(self.model, "semantic_residual", None)
