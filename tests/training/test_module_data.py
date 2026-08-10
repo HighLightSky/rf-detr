@@ -6,6 +6,7 @@
 """Comprehensive unit tests for RFDETRDataModule (LightningDataModule wrapper)."""
 
 import builtins
+import types
 import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1539,3 +1540,102 @@ class TestWorkerInitFn:
         loader = dm.train_dataloader()
 
         assert loader.worker_init_fn is _worker_init_fn
+
+
+class _FakeClassInfoDataset(torch.utils.data.Dataset):
+    """带 sv_dataset 接口的裸数据集（供 ClassBalancedDataset 集成测试）。
+
+    Args:
+        per_image: 每张图的类别 id 列表。
+    """
+
+    def __init__(self, per_image: list[list[int]]) -> None:
+        self._per_image = per_image
+        self.ids = list(range(len(per_image)))
+
+        class _FakeSv:
+            def __len__(self) -> int:
+                return len(per_image)
+
+            def get_image_info(self, i: int) -> types.SimpleNamespace:
+                return types.SimpleNamespace(class_id=torch.tensor(per_image[i], dtype=torch.int64))
+
+        self.sv_dataset = _FakeSv()
+
+    def __len__(self) -> int:
+        return len(self._per_image)
+
+    def __getitem__(self, idx: int) -> int:
+        return idx
+
+
+class TestClassBalancedIntegration:
+    """ClassBalancedDataset 与 RFDETRDataModule/TrainConfig 的集成测试。"""
+
+    @staticmethod
+    def _class_balanced_fake_dataset(length: int = 10) -> _FakeClassInfoDataset:
+        """构造 10 图 fake：前 4 张含类别 0（freq=0.4），后 6 张空标注。"""
+        per_image: list[list[int]] = [[0]] * 4 + [[]] * 6
+        return _FakeClassInfoDataset(per_image)
+
+    def test_config_fields_roundtrip(self, base_train_config):
+        """新配置字段可构造，model_dump 往返保留。"""
+        tc = base_train_config(
+            class_balanced_sampling=True,
+            class_balanced_threshold=0.01,
+            class_balanced_class_ids=[0, 1],
+        )
+        dumped = tc.model_dump()
+        assert dumped["class_balanced_sampling"] is True
+        assert dumped["class_balanced_threshold"] == 0.01
+        assert dumped["class_balanced_class_ids"] == [0, 1]
+
+    def test_threshold_zero_raises_validation_error(self):
+        """Threshold=0 触发 pydantic gt=0 校验。"""
+        with pytest.raises(Exception):
+            TrainConfig(class_balanced_threshold=0)
+
+    def test_legacy_fields_removed(self):
+        """旧 rare_class_oversample 字段已删除：传入即触发 extra=forbid 校验。"""
+        with pytest.raises(Exception):
+            TrainConfig(rare_class_oversample=True)
+
+    def test_setup_fit_builds_class_balanced(self, tmp_path):
+        """Setup('fit') 在开启开关时用 ClassBalancedDataset 包装训练集。"""
+        from rfdetr.datasets.class_balanced import ClassBalancedDataset
+        from rfdetr.training.module_data import RFDETRDataModule
+
+        mc = _base_model_config()
+        tc = _base_train_config(
+            tmp_path,
+            class_balanced_sampling=True,
+            class_balanced_threshold=1.6,
+            class_balanced_class_ids=[0],
+        )
+        dm = RFDETRDataModule(mc, tc)
+        fake_train = self._class_balanced_fake_dataset()
+        fake_val = _fake_dataset(20)
+        with patch(
+            "rfdetr.training.module_data.build_dataset",
+            side_effect=[fake_train, fake_val],
+        ):
+            dm.setup("fit")
+        assert isinstance(dm._dataset_train, ClassBalancedDataset)
+        # freq(0)=0.4, threshold=1.6 → r(0)=2 → 长度 4×2 + 6×1 = 14
+        assert len(dm._dataset_train) == 14
+
+    def test_default_off_is_passthrough(self, tmp_path):
+        """开关关闭时训练集不被包装（基线行为不变）。"""
+        from rfdetr.training.module_data import RFDETRDataModule
+
+        mc = _base_model_config()
+        tc = _base_train_config(tmp_path)
+        dm = RFDETRDataModule(mc, tc)
+        fake_train = _fake_dataset(100)
+        fake_val = _fake_dataset(20)
+        with patch(
+            "rfdetr.training.module_data.build_dataset",
+            side_effect=[fake_train, fake_val],
+        ):
+            dm.setup("fit")
+        assert dm._dataset_train is fake_train

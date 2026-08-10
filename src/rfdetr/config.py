@@ -1110,18 +1110,22 @@ class TrainConfig(BaseConfig):
     eval_masks_head_resolution: bool = False
     aug_config: Optional[Dict[str, Any]] = None
     mosaic_p: float = Field(default=0.0, ge=0.0, le=1.0, description="Mosaic 增强触发概率，0 表示关闭。")
-    rare_class_oversample: bool = Field(
+    class_balanced_sampling: bool = Field(
         default=False,
-        description="少数类重采样开关：为 True 时训练集长度扩展 rare_class_oversample_factor 倍，扩展段循环映射到包含 rare_class_oversample_class_ids 中任意类别的图片。默认关闭，不影响基线行为。",
+        description=(
+            "平方根频率过采样开关（MMDetection ClassBalancedDataset 风格）："
+            "repeat_factor(c)=max(1, int(sqrt(t/freq(c))))，每图取白名单类最大倍率，"
+            "数据集长度 = Σ r(I)，DataLoader shuffle 全局混合。默认关闭，不影响基线行为。"
+        ),
     )
-    rare_class_oversample_factor: int = Field(
-        default=2,
-        ge=1,
-        description="少数类重采样倍率：总长度 = 原长度 × factor。",
+    class_balanced_threshold: float | None = Field(
+        default=None,
+        gt=0,
+        description="平方根频率过采样阈值 t。None 时自动推导 t = 4 × max(freq(目标类集))。",
     )
-    rare_class_oversample_class_ids: list[int] = Field(
+    class_balanced_class_ids: list[int] = Field(
         default_factory=list,
-        description="视为少数类的类别 id 列表（SHWX: 0=HM 航母, 1=LQS 两栖舰）。为空时退化为直通。",
+        description="平方根频率过采样目标类集白名单（SHWX: 0=HM, 1=LQS）。空列表 = 全部类别。",
     )
     scale_jitter: bool = True
     augmentation_backend: AugmentationBackend | Literal["cpu", "auto"] = "cpu"

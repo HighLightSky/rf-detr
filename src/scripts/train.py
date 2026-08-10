@@ -59,13 +59,15 @@ AUG_CONFIG = AUG_AERIAL  # 遥感、航拍预设
 # 设为 0.0 关闭
 MOSAIC_P = 0.8
 
-# --- 少数类重采样（实验性）---
-# 将训练集长度扩展 RARE_CLASS_OVERSAMPLE_FACTOR 倍，扩展段循环映射到包含
-# RARE_CLASS_OVERSAMPLE_CLASS_IDS 中任意类别的图片，提升稀有类训练参与度
-# （SHWX: HM 航母仅 6 框、LQS 两栖舰仅 15 框，训练中几乎不会被采样到）。
-RARE_CLASS_OVERSAMPLE = False  # 重采样开关
-RARE_CLASS_OVERSAMPLE_FACTOR = 2  # 倍率（总长度 = 原长 × factor，可做 2/4/8 消融）
-RARE_CLASS_OVERSAMPLE_CLASS_IDS = [0, 1]  # 0=HM 航母, 1=LQS 两栖舰
+# --- 平方根频率过采样（实验性，MMDetection ClassBalancedDataset 风格）---
+# freq(c)=含类别 c 的图数/总图数；repeat_factor(c)=max(1, int(sqrt(t/freq(c))))；
+# 每图 r(I)=白名单类最大倍率；数据集长度=Σr(I)；DataLoader shuffle=True 全局混合。
+# threshold=None → t=4×max(freq(白名单类))，SHWX 上 HM×3、LQS×2、长度 3920→3946；
+# GradAccumAlignedDataset 补齐后每 epoch 步数与基线一致（62 步），LR 调度完全可比。
+# 只提升稀有类、正常类不动；旧 factor×长度 方案（扩展段循环映射）已废弃。
+CLASS_BALANCED_SAMPLING = False  # 开关
+CLASS_BALANCED_THRESHOLD = None  # 阈值 t；None = 自动推导
+CLASS_BALANCED_CLASS_IDS = [0, 1]  # 0=HM 航母, 1=LQS 两栖舰；空 = 全部类别
 
 # --- 硬件 ---
 DEVICE = "cuda"  # 设备: cuda, cuda:0, cpu
@@ -159,9 +161,9 @@ def main() -> None:
         compute_val_loss=False,  # 关掉验证 loss 计算，省显存，mAP 指标不受影响
         aug_config=AUG_CONFIG if AUG_CONFIG is not None else {},
         mosaic_p=MOSAIC_P,
-        rare_class_oversample=RARE_CLASS_OVERSAMPLE,
-        rare_class_oversample_factor=RARE_CLASS_OVERSAMPLE_FACTOR,
-        rare_class_oversample_class_ids=RARE_CLASS_OVERSAMPLE_CLASS_IDS,
+        class_balanced_sampling=CLASS_BALANCED_SAMPLING,
+        class_balanced_threshold=CLASS_BALANCED_THRESHOLD,
+        class_balanced_class_ids=CLASS_BALANCED_CLASS_IDS,
     )
 
     print(f"\n训练完成！输出目录: {OUTPUT_DIR}")

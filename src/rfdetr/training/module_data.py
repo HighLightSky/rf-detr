@@ -21,8 +21,8 @@ from rfdetr._namespace import _namespace_from_configs
 from rfdetr.config import AugmentationBackend, ModelConfig, TrainConfig
 from rfdetr.datasets import build_dataset
 from rfdetr.datasets.aug_configs import AUG_CONFIG
+from rfdetr.datasets.class_balanced import ClassBalancedDataset
 from rfdetr.datasets.mosaic import MosaicDataset
-from rfdetr.datasets.rare_class_oversample import RareClassOversampleDataset
 from rfdetr.utilities.box_ops import box_xyxy_to_cxcywh
 from rfdetr.utilities.logger import get_logger
 from rfdetr.utilities.tensors import make_collate_fn
@@ -369,16 +369,16 @@ class RFDETRDataModule(LightningDataModule):
                         output_size=(resolution, resolution),
                     )
                     logger.info("Mosaic 增强已启用，触发概率: %.2f", mosaic_p)
-                # 少数类重采样（默认关闭 → 不构造包装器，训练行为与基线逐位一致）
-                if getattr(self.train_config, "rare_class_oversample", False):
-                    self._dataset_train = RareClassOversampleDataset(
+                # 平方根频率过采样（默认关闭 → 不构造包装器，训练行为与基线逐位一致）
+                if getattr(self.train_config, "class_balanced_sampling", False):
+                    self._dataset_train = ClassBalancedDataset(
                         self._dataset_train,
-                        rare_class_ids=list(getattr(self.train_config, "rare_class_oversample_class_ids", []) or []),
-                        oversample_factor=int(getattr(self.train_config, "rare_class_oversample_factor", 2)),
+                        threshold=getattr(self.train_config, "class_balanced_threshold", None),
+                        class_ids=list(getattr(self.train_config, "class_balanced_class_ids", []) or []),
                         info_dataset=raw_train_dataset,
                     )
                     logger.info(
-                        "少数类重采样已启用: len %d → %d",
+                        "平方根频率过采样已启用: len %d → %d",
                         len(raw_train_dataset),
                         len(self._dataset_train),
                     )
