@@ -7,7 +7,7 @@
 
 与 train_sscl.py（0807 基线配方）完全一致的超参，唯一差异是启用难例负
 样本：从每张图选择 Hungarian matching 之外、与任一 GT 的 IoU 落在
-[0.1, 0.5] 区间的 unmatched query，按最大前景 logit 取 top-k，作为额外
+[0.0, 0.3] 区间的 unmatched query，按最大前景 logit 取 top-k，作为额外
 负样本列追加进原型模式损失的分母（权重 1.0、detach、不进原型库、不 EMA）。
 对照实验矩阵：
 - 基线：output/0807-SHWX-SSCL-Proj-原型+实例正样本（复用，不重跑）
@@ -73,7 +73,7 @@ NUM_NODES = 1
 # --- 输出 & 日志 ---
 # 难例数量 k 由环境变量控制（默认 3，双臂实验用 3 与 5），输出目录随 k 区分
 SSCL_HARD_NEG_TOPK = int(os.environ.get("SSCL_HARD_NEG_TOPK", "3"))
-OUTPUT_DIR = f"output/0810-SHWX-SSCL-Proj-HardNeg-k{SSCL_HARD_NEG_TOPK}"
+OUTPUT_DIR = f"output/0810-SHWX-SSCL-Proj-HardNeg-k{SSCL_HARD_NEG_TOPK}-iou03"
 TENSORBOARD = True
 WANDB = False
 

@@ -8,9 +8,10 @@
 从单张图的 decoder 输出中选择"像目标但不是目标"的难例 query：
 
 1. 排除 Hungarian matching 匹配到的 query（补集 = 未匹配 query）；
-2. 未匹配 query 的预测框与全部 GT 计算 IoU，过滤 ``max_iou in [0.1, 0.5]``
-   带（下界剔除纯背景、上界剔除真实目标的重复检测——DETR 的 1-to-1 匹配
-   会让部分真实目标成为未匹配 query，绝不能把它们当负样本）；
+2. 未匹配 query 的预测框与全部 GT 计算 IoU，过滤 ``max_iou in [0.0, 0.3]``
+   带（下界 0.0 纳入纯背景/低 IoU 区域——对准"纯背景虚警"靶点；上界 0.3
+   剔除真实目标的重复检测——DETR 的 1-to-1 匹配会让部分真实目标成为
+   未匹配 query，绝不能把它们当负样本）；
 3. 分数 = 最大前景 logit ``pred_logits[:, :-1].max(-1)``，过滤
    ``>= score_thresh``；
 4. 按分数降序（stable）取 top-k，索引映射回 decoder hidden states。
@@ -29,9 +30,12 @@ from torch import Tensor
 
 from rfdetr.utilities.box_ops import box_cxcywh_to_xyxy, box_iou
 
-# 难例 IoU 带：与任一 GT 的最大 IoU 落在此区间内才视为"部分目标/相似背景"
-IOU_BAND_LOW = 0.1
-IOU_BAND_HIGH = 0.5
+# 难例 IoU 带：与任一 GT 的最大 IoU 落在此区间内才视为难例。
+# [0.1, 0.5] 偏"贴目标的次优框"（原默认）；实验改为 [0.0, 0.3] 对准
+# "纯背景虚警"（analyze_fp_decomposition 显示其占舰船 FP 的 56%），
+# 上界 0.3 仍排除真实目标的重复检测（召回保护）。
+IOU_BAND_LOW = 0.0
+IOU_BAND_HIGH = 0.3
 
 
 def select_hard_negatives_for_image(
