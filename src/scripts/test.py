@@ -133,6 +133,10 @@ USE_FP16 = False  # 用 FP16 张量核加速推理（RTX 30 系约 2.5 倍提速
 FP_DIR = EXP_OUTPUT_DIR / "FP"  # FP 可视化保存根目录
 FN_DIR = EXP_OUTPUT_DIR / "FN"  # FN 可视化保存根目录
 
+# ── YOLO 格式预测输出（供漏检/虚警归因统计脚本使用）──────────────────
+SAVE_YOLO_PREDS = False  # 是否输出 YOLO 格式预测框（每图一个 txt：cls_id cx cy w h conf）
+YOLO_PREDS_DIR = EXP_OUTPUT_DIR / "yolo_preds"  # YOLO 预测保存目录
+
 from rfdetr import RFDETRMedium  # noqa: E402
 from val.competition_metrics import (  # noqa: E402
     BoxRecord,
@@ -215,6 +219,40 @@ def load_coco_labels(annotation_path: str | Path) -> list[BoxRecord]:
             )
         )
     return records
+
+
+def save_yolo_predictions(
+    pred_records: list[BoxRecord],
+    output_dir: Path,
+    image_size_map: dict[str, tuple[int, int]],
+) -> None:
+    """把预测框保存为 YOLO 格式 txt（每图一个文件，与 load_yolo_predictions 兼容）。
+
+    每行 ``class_id cx cy w h conf``，坐标为按图像尺寸归一化的 cxcywh，
+    置信度追加在末尾（GT 标签无 conf 列，预测文件带 conf 列，可被
+    ``val.competition_metrics.load_yolo_predictions`` 读取）。
+
+    Args:
+        pred_records: 预测框记录列表（xyxy 像素坐标）。
+        output_dir: 输出目录（自动创建）。
+        image_size_map: {image_id: (width, height)} 映射，用于归一化。
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    by_image: dict[str, list[BoxRecord]] = {}
+    for r in pred_records:
+        by_image.setdefault(r.image_id, []).append(r)
+    for image_id, records in by_image.items():
+        w, h = image_size_map[image_id]
+        lines: list[str] = []
+        for r in sorted(records, key=lambda rec: rec.score or 0.0, reverse=True):
+            x0, y0, x1, y1 = r.xyxy
+            cx = (x0 + x1) / 2 / w
+            cy = (y0 + y1) / 2 / h
+            bw = (x1 - x0) / w
+            bh = (y1 - y0) / h
+            lines.append(f"{r.class_id} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f} {r.score:.6f}")
+        (output_dir / f"{image_id}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"[i] YOLO 预测已保存: {output_dir}（{len(by_image)} 个文件）")
 
 
 def resolve_device(device: str) -> str:
@@ -734,6 +772,14 @@ def predict_batched_to_records(
 if __name__ == "__main__":
     os.chdir(PROJECT_ROOT)
 
+    # 可选参数：`python test.py <checkpoint.pth>` 覆盖配置里的 checkpoint
+    if len(sys.argv) > 1:
+        override = Path(sys.argv[1]).resolve()
+        if not override.exists():
+            raise FileNotFoundError(f"checkpoint 不存在: {override}")
+        CHECKPOINT_PATH = override
+        print(f"[i] 命令行覆盖 checkpoint: {CHECKPOINT_PATH}")
+
     test_image_paths = read_test_image_paths(TEST_IMAGE_DIR)
     # YOLO 格式需要图像尺寸把归一化坐标换算成像素；COCO 的 bbox 本身就是像素坐标
     image_size_map = build_image_size_map(test_image_paths) if LABEL_FORMAT == "yolo" else None
@@ -767,6 +813,10 @@ if __name__ == "__main__":
     )
     del model
     release_cuda_cache(device)
+
+    # ── YOLO 格式预测输出（供漏检/虚警归因统计）────────────────────────
+    if SAVE_YOLO_PREDS:
+        save_yolo_predictions(pred_records, YOLO_PREDS_DIR, image_size_map)
 
     # ── 推理测速结果 ─────────────────────────────────────────────────
     print("=" * 80)
