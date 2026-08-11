@@ -45,8 +45,8 @@ from rfdetr.sscl.prompts import SHWX_CLASS_NAMES  # noqa: E402
 # ══════════════════════════════════════════════════════════════════════
 #  默认配置 —— 命令行参数可覆盖
 # ══════════════════════════════════════════════════════════════════════
-CHECKPOINT_PATH = PROJECT_ROOT / "output/0804-SHWX-rfdetr_medium_SSCL+prototype" / "checkpoint_best_total.pth"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output/0804-SHWX-rfdetr_medium_SSCL+prototype" / "predict"
+CHECKPOINT_PATH = PROJECT_ROOT / "output/0807-SHWX-SSCL-Proj-原型+实例正样本/checkpoint_best_total.pth"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output/0807-SHWX-SSCL-Proj-原型+实例正样本" / "predict"
 DEFAULT_CONF_THRESHOLD = 0.25
 
 # 细粒度类别名称映射：SHWX 类别 id 0-24 已连续，label 即 class_id

@@ -66,7 +66,7 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         "image_dir": "images/test",
         "label_format": "yolo",
         "label_dir": "labels/test",
-        "exp_output_dir": "output/0810-SHWX-SSCL-Proj-HardNeg-k3-iou03",
+        "exp_output_dir": "output/0807-SHWX-SSCL-Proj-原型+实例正样本",
         "checkpoint_file": "checkpoint_best_total.pth",
         "num_classes": 25,
         "vehicle_class_ids": {24},  # FSC 发射车，比赛规则按车辆目标 IoU=0.35
@@ -85,8 +85,6 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         "label_format": "coco",
         "annotation_file": "test/_annotations.coco.json",
         "exp_output_dir": "output/0804-DIOR-rfdetr_medium_SSCL",
-        # 注意：checkpoint_best_total.pth 因 val mAP 未超过 epoch0 基线，实际存的是基线权重；
-        # 真正训练过的模型在 checkpoint_best_regular.pth（epoch 6）。
         "checkpoint_file": "checkpoint_best_regular.pth",
         "num_classes": 20,
         "vehicle_class_ids": set(),  # DIOR 无比赛特殊 IoU 规则，全部按 0.50
@@ -122,6 +120,9 @@ PER_CLASS_IOU_THRESHOLDS: dict[str, float] = {
 CONF_THRESHOLD = 0.25
 DEVICE = "cuda:0"  # 使用 GPU 推理；无 CUDA 时脚本会自动回退到 CPU
 
+# ── 逐类置信度阈值（可选）────────────────────────────────────────────
+CLASS_CONF_THRESHOLDS: dict[int, float] = {}  # 默认全 0.25；按需填 {类别id: 阈值}
+
 # ── 推理性能配置（GPU 满载单轮推理）──────────────────────────────────
 BATCH_SIZE = 32  # GPU 单次前向处理的图像数；越大 GPU 利用率越高，受显存限制
 NUM_WORKERS = 12  # CPU 预取 worker 进程数（建议等于 CPU 核数）
@@ -130,14 +131,15 @@ GPU_UTIL_SAMPLE_INTERVAL = 0.5  # 后台采样 GPU 利用率的时间间隔（�
 USE_FP16 = False  # 用 FP16 张量核加速推理（RTX 30 系约 2.5 倍提速）；对精度敏感时保持 False
 
 # ── 可视化保存配置 ───────────────────────────────────────────────────
-FP_DIR = EXP_OUTPUT_DIR / "FP"  # FP 可视化保存根目录
-FN_DIR = EXP_OUTPUT_DIR / "FN"  # FN 可视化保存根目录
+FP_DIR = EXP_OUTPUT_DIR / "FP"
+FN_DIR = EXP_OUTPUT_DIR / "FN" 
 
 # ── YOLO 格式预测输出（供漏检/虚警归因统计脚本使用）──────────────────
 SAVE_YOLO_PREDS = False  # 是否输出 YOLO 格式预测框（每图一个 txt：cls_id cx cy w h conf）
 YOLO_PREDS_DIR = EXP_OUTPUT_DIR / "yolo_preds"  # YOLO 预测保存目录
 
-from rfdetr import RFDETRMedium  # noqa: E402
+
+from rfdetr import RFDETR  # noqa: E402
 from val.competition_metrics import (  # noqa: E402
     BoxRecord,
     EvalConfig,
@@ -453,7 +455,15 @@ def build_test_report(
             f"测试图像数: {len(test_image_paths)}",
             f"真实框数: {len(gt_records)}",
             f"预测框数: {len(pred_records)}",
-            f"置信度阈值: {CONF_THRESHOLD}",
+            f"置信度阈值: {CONF_THRESHOLD}"
+            + (
+                "；逐类 "
+                + "，".join(
+                    f"{CLASS_NAMES.get(cid, str(cid))}={thr:.2f}" for cid, thr in sorted(CLASS_CONF_THRESHOLDS.items())
+                )
+                if CLASS_CONF_THRESHOLDS
+                else ""
+            ),
             "IoU 阈值: " + "，".join(f"{key}={value:.2f}" for key, value in GROUP_IOU_THRESHOLDS.items()),
             sep,
         ]
@@ -629,12 +639,13 @@ class _GpuUtilMonitor:
 
 
 def predict_batched_to_records(
-    model: "RFDETRMedium",
+    model: RFDETR,
     image_paths: list[Path],
     device: str,
     conf_threshold: float,
     batch_size: int,
     num_workers: int,
+    class_conf_thresholds: Mapping[int, float] | None = None,
 ) -> tuple[list[BoxRecord], float, float | None]:
     """批量流水线推理：多进程预取解码 + GPU 批量前向，返回预测框与测速结果。
 
@@ -653,12 +664,15 @@ def predict_batched_to_records(
     仍被收集，但不计入测速吞吐。
 
     Args:
-        model: 已加载的 RFDETRMedium 实例。
+        model: 已加载的 RFDETR 实例（任意尺寸，nano/small/medium/large）。
         image_paths: 测试图像路径列表。
         device: 推理设备（如 ``"cuda:0"``）。
-        conf_threshold: 置信度阈值。
+        conf_threshold: 全局置信度阈值（未在 ``class_conf_thresholds`` 中
+            列出的类别回退到此值）。
         batch_size: GPU 单次前向的图像数。
         num_workers: 预取 worker 进程数。
+        class_conf_thresholds: 逐类置信度阈值表 ``{类别id: 阈值}``；为
+            ``None`` 或空字典时所有类别统一使用 ``conf_threshold``。
 
     Returns:
         ``(pred_records, steady_throughput, gpu_util, timed_images)``：
@@ -732,7 +746,15 @@ def predict_batched_to_records(
 
             # 收集预测框（每张测试图只推理一遍，全部收集）
             for stem, result in zip(stems, results):
-                keep = result["scores"] > conf_threshold
+                # 逐类阈值：命中 class_conf_thresholds 的类用类阈值，否则回退全局阈值
+                if class_conf_thresholds:
+                    per_class_thr = torch.tensor(
+                        [class_conf_thresholds.get(int(l), conf_threshold) for l in result["labels"].tolist()],
+                        device=result["scores"].device,
+                    )
+                else:
+                    per_class_thr = conf_threshold
+                keep = result["scores"] > per_class_thr
                 boxes = result["boxes"][keep].cpu().numpy()
                 class_ids = result["labels"][keep].cpu().numpy()
                 scores = result["scores"][keep].cpu().numpy()
@@ -792,10 +814,13 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"不支持的标签格式: {LABEL_FORMAT}")
 
-    # 加载 RF-DETR 模型并执行批量流水线推理（含测速）
+    # 加载 RF-DETR 模型并执行批量流水线推理（含测速）。
+    # from_checkpoint 自动按 checkpoint 中的 model_name 推断模型尺寸（nano/small/medium/large），
+    # 无需手动指定模型类。
     device = resolve_device(DEVICE)
     print(f"[i] 正在从 {CHECKPOINT_PATH} 加载 RF-DETR 模型...")
-    model = RFDETRMedium.from_checkpoint(str(CHECKPOINT_PATH))
+    model = RFDETR.from_checkpoint(str(CHECKPOINT_PATH))
+    print(f"[i] 已加载模型: {type(model).__name__} | 分辨率: {int(model.model.resolution)}")
     # [SemHead] 若 checkpoint 含语义头权重（语义分类头实验），重建语义残差模块，
     # 保证离线推理与训练前向一致（from_checkpoint 不经过 module_model 的装配逻辑）。
     from rfdetr.sscl.semantic_head import attach_from_checkpoint
@@ -808,6 +833,7 @@ if __name__ == "__main__":
         test_image_paths,
         device,
         conf_threshold=CONF_THRESHOLD,
+        class_conf_thresholds=CLASS_CONF_THRESHOLDS,
         batch_size=BATCH_SIZE,
         num_workers=NUM_WORKERS,
     )
@@ -843,6 +869,13 @@ if __name__ == "__main__":
     print(f"真实框数: {len(gt_records)}")
     print(f"预测框数: {len(pred_records)}")
     print(f"置信度阈值: {CONF_THRESHOLD}")
+    if CLASS_CONF_THRESHOLDS:
+        print(
+            "逐类阈值: "
+            + "，".join(
+                f"{CLASS_NAMES.get(cid, str(cid))}={thr:.2f}" for cid, thr in sorted(CLASS_CONF_THRESHOLDS.items())
+            )
+        )
     print("IoU 阈值: 车辆=0.35，其他目标=0.50")
     print("=" * 80)
 

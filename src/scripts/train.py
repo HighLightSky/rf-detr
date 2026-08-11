@@ -22,7 +22,7 @@ from rfdetr.variants import RFDETRLargeDeprecated, RFDETRMedium, RFDETRNano, RFD
 # ============================================================================
 
 # --- 模型 ---
-MODEL = "large"  # 可选: nano, small, medium, large
+MODEL = "nano"  # 可选: nano, small, medium, large
 
 # --- 数据集 ---
 DATASET_DIR = "/home/liu/wzt/datasets/SHWX-dataset-dict"
@@ -31,12 +31,12 @@ DATASET_FILE = "yolo"  # roboflow：Roboflow COCO 格式 (train/_annotations.coc
 # --- 训练超参数 ---
 NUM_CLASSES = 25  # 类别数
 EPOCHS = 100  # 训练轮数
-BATCH_SIZE = 8  # 每 GPU 的 batch size
+BATCH_SIZE = 32  # 每 GPU 的 batch size
 NUM_WORKERS = 12  # DataLoader 工作进程数
 LR = 1e-4  # 基础学习率
 LR_ENCODER = 1.5e-4  # 编码器（backbone）学习率
 WEIGHT_DECAY = 1e-4  # 权重衰减
-GRAD_ACCUM_STEPS = 8  # 梯度累积步数（有效 batch = BATCH_SIZE * GRAD_ACCUM_STEPS）
+GRAD_ACCUM_STEPS = 2  # 梯度累积步数（有效 batch = BATCH_SIZE * GRAD_ACCUM_STEPS）
 CLIP_MAX_NORM = 0.1  # 梯度裁剪
 
 # --- 学习率调度 ---
@@ -57,7 +57,7 @@ AUG_CONFIG = AUG_AERIAL  # 遥感、航拍预设
 # Mosaic 将 4 张图片拼接为 1 张训练样本，有效提升小目标检测和遥感数据集的性能。
 # 推荐值: 0.5 (前 80% 训练阶段开启，最后 20% 关闭)
 # 设为 0.0 关闭
-MOSAIC_P = 0.8
+MOSAIC_P = 0.5
 
 # --- 平方根频率过采样（实验性，MMDetection ClassBalancedDataset 风格）---
 # freq(c)=含类别 c 的图数/总图数；repeat_factor(c)=max(1, int(sqrt(t/freq(c))))；
@@ -65,7 +65,7 @@ MOSAIC_P = 0.8
 # threshold=None → t=4×max(freq(白名单类))，SHWX 上 HM×3、LQS×2、长度 3920→3946；
 # GradAccumAlignedDataset 补齐后每 epoch 步数与基线一致（62 步），LR 调度完全可比。
 # 只提升稀有类、正常类不动；旧 factor×长度 方案（扩展段循环映射）已废弃。
-CLASS_BALANCED_SAMPLING = False  # 开关
+CLASS_BALANCED_SAMPLING = True  # 开关
 CLASS_BALANCED_THRESHOLD = None  # 阈值 t；None = 自动推导
 CLASS_BALANCED_CLASS_IDS = [0, 1]  # 0=HM 航母, 1=LQS 两栖舰；空 = 全部类别
 
@@ -74,8 +74,12 @@ DEVICE = "cuda"  # 设备: cuda, cuda:0, cpu
 DEVICES = 1  # GPU 数量
 NUM_NODES = 1  # 节点数
 
+DATASET_CACHE_MODE = "raw"  # 缓存解码后的原始 RGB 图片，保留 Mosaic/随机增广在线执行
+DATASET_CACHE_DIR = None  # None 表示使用 output_dir/dataset_cache
+DATASET_CACHE_REBUILD = False
+
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0809-SHWX-rfdetr-large-baseline"  # 输出目录
+OUTPUT_DIR = "output/0811-SHWX-rfdetr-nano-baseline"  # 输出目录
 TENSORBOARD = True  # 是否启用 TensorBoard
 WANDB = False  # 是否启用 Wandb
 
@@ -164,6 +168,9 @@ def main() -> None:
         class_balanced_sampling=CLASS_BALANCED_SAMPLING,
         class_balanced_threshold=CLASS_BALANCED_THRESHOLD,
         class_balanced_class_ids=CLASS_BALANCED_CLASS_IDS,
+        dataset_cache_mode=DATASET_CACHE_MODE,
+        dataset_cache_dir=DATASET_CACHE_DIR,
+        dataset_cache_rebuild=DATASET_CACHE_REBUILD,
     )
 
     print(f"\n训练完成！输出目录: {OUTPUT_DIR}")
