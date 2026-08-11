@@ -77,7 +77,7 @@ DEVICES = 1
 NUM_NODES = 1
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0811-SHWX-SSCL-Proj-无均衡-E0"
+OUTPUT_DIR = "output/0811-SHWX-SSCL-Proj-类均衡-E3"
 TENSORBOARD = True
 WANDB = False
 
@@ -123,14 +123,14 @@ SSCL_PROTECTED_CLASSES = None
 # 分类损失均衡化配置
 # ============================================================================
 # --- P0 正样本类均衡 IA-BCE ---
-CLASS_BALANCE_ENABLED = False
-CLASS_BALANCE_BETA = 0.5  # E1：0.25；E2：0.5
-CLASS_BALANCE_MAX_WEIGHT = 5.0  # E1：3.0；E2：5.0
+CLASS_BALANCE_ENABLED = True
+CLASS_BALANCE_BETA = 0.25  # E1：0.25；E2：0.5
+CLASS_BALANCE_MAX_WEIGHT = 3.0  # E1：3.0；E2：5.0
 CLASS_BALANCE_MIN_COUNT = 10  # 分母下限，防极端小样本类权重过大
 CLASS_BALANCE_REF_COUNT = None  # None 自动取 sqrt(N_max * N_min)；也可显式指定
 CLASS_BALANCE_TARGET_CLASSES = [0, 1]  # 首发只作用于 HM/LQS；第二轮可扩 [0,1,2]
 # --- P1 居中截断 Logit Adjustment（E3 时开启）---
-LOGIT_ADJUSTMENT_ENABLED = False
+LOGIT_ADJUSTMENT_ENABLED = True
 LOGIT_ADJUSTMENT_TAU = 0.1
 LOGIT_ADJUSTMENT_BIAS_CLIP = 1.0
 LOGIT_ADJUSTMENT_WARMUP_EPOCHS = 1.0

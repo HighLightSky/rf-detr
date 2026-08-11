@@ -248,6 +248,14 @@ class SetCriterion(nn.Module):
             tau=logit_adjustment_tau,
             bias_clip=logit_adjustment_bias_clip,
         )
+        # 类别维补齐到 num_classes（= args.num_classes + 1，含背景槽位）：
+        # counts 只覆盖真实类别（如 SHWX 25 类），而 src_logits 最后一维是
+        # num_classes（背景槽位索引为 num_classes-1，训练时无正样本）。
+        # 权重补 1（不改变该槽位）、bias 补 0（背景槽位不做先验调整）。
+        if weights.numel() < self.num_classes:
+            pad = self.num_classes - weights.numel()
+            weights = torch.cat([weights, torch.ones(pad, dtype=weights.dtype)])
+            bias = torch.cat([bias, torch.zeros(pad, dtype=bias.dtype)])
         self.register_buffer("class_balance_weights", weights, persistent=False)
         self.register_buffer("logit_bias", bias, persistent=False)
 

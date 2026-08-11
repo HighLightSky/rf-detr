@@ -317,6 +317,50 @@ class TestClassBalanceBuffers:
 
         assert loss.item() == pytest.approx(manual.item(), abs=1e-6)
 
+    def test_counts_shorter_than_num_classes_pads_buffers(self):
+        """counts 长度 < num_classes（真实类别数 < 含背景槽位的类别维）时正常前向。
+
+        回归：训练时 SetCriterion(num_classes=args.num_classes+1) 而 counts 只有
+        真实类别数，P1 的 logit_bias 广播到 (B,Q,C) 会因维度不匹配报错——
+        buffer 必须补齐到 num_classes（权重补 1、bias 补 0）。
+        """
+        counts = torch.tensor([10.0, 40.0, 50.0])  # 3 个真实类别
+        criterion = SetCriterion(
+            num_classes=4,  # 3 真实 + 1 背景槽位，模拟 args.num_classes + 1
+            matcher=_MatcherStub(),
+            weight_dict={},
+            focal_alpha=0.25,
+            losses=["labels"],
+            ia_bce_loss=True,
+            class_balance_enabled=True,
+            class_balance_counts=counts,
+            class_balance_ref_count=40.0,
+            class_balance_beta=0.5,
+            class_balance_min_count=10,
+            class_balance_target_classes=[0],
+            logit_adjustment_enabled=True,
+            logit_adjustment_tau=0.5,
+            logit_adjustment_bias_clip=1.0,
+        )
+        # buffer 补齐到 num_classes
+        assert criterion.class_balance_weights.numel() == 4
+        assert criterion.logit_bias.numel() == 4
+        # 背景槽位（索引 3）权重为 1、bias 为 0
+        assert criterion.class_balance_weights[3].item() == pytest.approx(1.0)
+        assert criterion.logit_bias[3].item() == pytest.approx(0.0)
+
+        # 前向不报错（回归核心：bias 广播维度匹配）。
+        # 注意 logits 通道数须等于 num_classes（真实训练中模型输出
+        # args.num_classes+1 通道，与补齐后的 buffer 长度一致）。
+        logits = torch.tensor([[[1.0, 2.0, -1.0, 0.5], [0.5, -0.5, 1.5, 0.0]]])  # (1, 2, 4)
+        boxes = torch.tensor([[[0.25, 0.25, 0.5, 0.5], [0.1, 0.1, 0.2, 0.2]]])
+        outputs = {"pred_logits": logits, "pred_boxes": boxes}
+        targets = [{"labels": torch.tensor([0]), "boxes": torch.tensor([[0.25, 0.25, 0.5, 0.5]])}]
+        indices = [(torch.tensor([0]), torch.tensor([0]))]
+        criterion.set_la_warmup_factor(1.0)
+        loss = criterion.loss_labels(outputs, targets, indices, num_boxes=1.0)["loss_ce"]
+        assert loss is not None
+
     @pytest.mark.gpu
     def test_buffers_move_with_device(self):
         """Buffer 随 .to(device) 迁移，且与 num_classes 兼容。"""
