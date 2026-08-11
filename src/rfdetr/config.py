@@ -1252,6 +1252,34 @@ class TrainConfig(BaseConfig):
     sscl_hard_neg_log_interval: int = 100
     """难例诊断监控采样步间隔（每 N 步采样一次，epoch 末聚合输出到 train/sscl/*）。"""
     # ------------------------------------------------------------------
+    # [分类损失均衡化] 正样本类均衡 IA-BCE + 居中截断 Logit Adjustment（默认全部关闭）
+    # 见 docs/改进方案-SSCL/RF-DETR分类损失均衡化改进方案.md
+    # P0：仅对正样本 slot 乘类别权重，不降低负样本惩罚（优先保护 FDR）。
+    # P1：对分类 logit 加"居中 + 截断 + warmup"的先验去偏置 margin（LA 的安全化形式）。
+    # ------------------------------------------------------------------
+    class_balance_enabled: bool = False
+    """P0 总开关：对 IA-BCE 正样本 slot 乘类别频率权重（CB Loss 风格）。"""
+    class_balance_counts_path: str | None = None
+    """类别实例数统计 JSON 路径（由 scripts/stat_class_counts.py 生成），格式 {"counts": [n0, n1, ...]}。"""
+    class_balance_beta: float = 0.25
+    """幂律权重指数 β：w_c = (N_ref / max(n_c, n_min)) ** beta（推荐 {0.25, 0.5}）。"""
+    class_balance_max_weight: float = 3.0
+    """权重上限 w_max，防止稀有类过拟合（首发 3.0，上限测试 5.0）。"""
+    class_balance_min_count: int = 10
+    """分母下限 n_min：防极端小样本类（如 HM=6）产生极端权重。"""
+    class_balance_ref_count: float | None = None
+    """参考样本数 N_ref。默认 None 时自动取 sqrt(N_max * N_min)（几何平均）， 不要直接用 N_max 以免权重过大。"""
+    class_balance_target_classes: list[int] | None = None
+    """生效类别索引列表，其余类别权重固定为 1.0。默认 None（全部类别）。首发 [0, 1]（HM/LQS）。"""
+    logit_adjustment_enabled: bool = False
+    """P1 总开关：对分类 logit 加居中截断的先验 bias（训练侧）。"""
+    logit_adjustment_tau: float = 0.1
+    """LA 强度 τ（推荐 {0.1, 0.25, 0.5}，不要首发 1.0/2.0）。"""
+    logit_adjustment_bias_clip: float = 1.0
+    """居中 bias 的截断上限（推荐 {1.0, 2.0}）。"""
+    logit_adjustment_warmup_epochs: float = 1.0
+    """Bias warmup 轮数：前 N 个 epoch 从 0 线性升到目标值（防早期分配噪声放大）。"""
+    # ------------------------------------------------------------------
     # 语义分类头（SemanticResidual，默认全关）
     # 见 docs/改进方案-SSCL/RF-DETR语义分类头改进方案.md
     # ------------------------------------------------------------------

@@ -182,6 +182,18 @@ class SetCriterion(nn.Module):
         ia_bce_loss: bool = False,
         mask_point_sample_ratio: int = 16,
         num_keypoints_per_class: list[int] | None = None,
+        # [分类损失均衡化] P0 正样本类均衡 + P1 居中截断 Logit Adjustment（默认全关）
+        # 见 docs/改进方案-SSCL/RF-DETR分类损失均衡化改进方案.md
+        class_balance_enabled: bool = False,
+        class_balance_counts: Tensor | None = None,
+        class_balance_beta: float = 0.25,
+        class_balance_max_weight: float = 3.0,
+        class_balance_min_count: int = 10,
+        class_balance_ref_count: float | None = None,
+        class_balance_target_classes: list[int] | None = None,
+        logit_adjustment_enabled: bool = False,
+        logit_adjustment_tau: float = 0.1,
+        logit_adjustment_bias_clip: float = 1.0,
     ) -> None:
         """Create the criterion.
 
@@ -192,6 +204,18 @@ class SetCriterion(nn.Module):
             losses: list of all the losses to be applied. See get_loss for list of available losses.
             focal_alpha: alpha in Focal Loss
             group_detr: Number of groups to speed detr training. Default is 1.
+            class_balance_enabled: 是否启用 P0 正样本类均衡（只乘正样本 slot 权重，
+                不降低负样本惩罚，优先保护 FDR）。
+            class_balance_counts: 训练集每类实例数（长度须不小于 num_classes），
+                用于计算 P0 权重与 P1 bias。为 None 时 P0/P1 均不生效。
+            class_balance_beta: 幂律权重指数 β：w_c = (N_ref / max(n_c, n_min)) ** beta。
+            class_balance_max_weight: 权重上限 w_max。
+            class_balance_min_count: 分母下限 n_min，防极端小样本类产生极端权重。
+            class_balance_ref_count: 参考样本数 N_ref，None 时自动取 sqrt(N_max * N_min)。
+            class_balance_target_classes: 生效类别索引列表，其余类别权重固定 1.0。
+            logit_adjustment_enabled: 是否启用 P1 居中截断 Logit Adjustment（训练侧）。
+            logit_adjustment_tau: LA 强度 τ。
+            logit_adjustment_bias_clip: 居中 bias 截断上限。
         """
         super().__init__()
         self.num_classes = num_classes
@@ -209,6 +233,92 @@ class SetCriterion(nn.Module):
         # [SSCL] 可选的 SSCL 损失回调。默认不启用，通过 set_sscl_loss_fn 注入，
         # 在 forward() 复用已计算的 Hungarian matching indices 计算 SSCL 损失。
         self._sscl_loss_fn: Callable | None = None
+        # [分类损失均衡化] 预计算 P0 类别权重与 P1 logit bias 为 buffer（persistent=False
+        # 不进 state_dict；criterion 每次构建时由训练配置重建，device 随 .to(device) 迁移）。
+        self.class_balance_enabled = class_balance_enabled
+        self.logit_adjustment_enabled = logit_adjustment_enabled
+        self._la_warmup_factor = 1.0
+        weights, bias = self._build_class_balance_buffers(
+            counts=class_balance_counts,
+            beta=class_balance_beta,
+            max_weight=class_balance_max_weight,
+            min_count=class_balance_min_count,
+            ref_count=class_balance_ref_count,
+            target_classes=class_balance_target_classes,
+            tau=logit_adjustment_tau,
+            bias_clip=logit_adjustment_bias_clip,
+        )
+        self.register_buffer("class_balance_weights", weights, persistent=False)
+        self.register_buffer("logit_bias", bias, persistent=False)
+
+    @staticmethod
+    def _build_class_balance_buffers(
+        counts: Tensor | None,
+        beta: float,
+        max_weight: float,
+        min_count: int,
+        ref_count: float | None,
+        target_classes: list[int] | None,
+        tau: float,
+        bias_clip: float,
+    ) -> tuple[Tensor, Tensor]:
+        """按类别统计预计算 P0 权重与 P1 bias（均在 CPU 上，随 buffer 迁移 device）。
+
+        P0 公式：w_c = clamp((N_ref / max(n_c, n_min)) ** beta, 1.0, w_max)，
+        非 target_classes 的类别权重固定 1.0。
+        P1 公式：bias = tau * clamp(log(pi) - mean(log(pi)), -clip, clip)，pi 为类别频率。
+
+        Args:
+            counts: 每类实例数，None 时返回全 1 权重与全 0 bias。
+            beta: 幂律指数。
+            max_weight: 权重上限。
+            min_count: 分母下限。
+            ref_count: 参考样本数 N_ref，None 自动取 sqrt(N_max * N_min)。
+            target_classes: 生效类别，None 为全部。
+            tau: LA 强度。
+            bias_clip: bias 截断上限。
+
+        Returns:
+            (weights, bias) 两个长度等于 counts 的 CPU 张量。
+        """
+        num_real = counts.numel() if counts is not None else 0
+        weights = torch.ones(num_real)
+        bias = torch.zeros(num_real)
+        if counts is None:
+            return weights, bias
+        n = counts.float()
+        if n.numel() == 0:
+            raise ValueError("class_balance_counts 不能为空")
+        if torch.any(n < 0):
+            raise ValueError("class_balance_counts 不能包含负数")
+        positive = n[n > 0]
+        if positive.numel() == 0:
+            raise ValueError("class_balance_counts 至少需要一个正样本类别")
+        n_eff = torch.maximum(n, torch.full_like(n, float(min_count)))
+        if ref_count is None:
+            # 几何平均 sqrt(N_max * N_min_positive)，避免零样本类别让 N_ref 退化为 0。
+            n_ref = torch.sqrt(n.max() * positive.min())
+        else:
+            n_ref = torch.tensor(ref_count, dtype=n.dtype)
+        w = ((n_ref / n_eff) ** beta).clamp(min=1.0, max=max_weight)
+        if target_classes is not None:
+            mask = torch.zeros(num_real, dtype=torch.bool)
+            mask[torch.as_tensor(target_classes, dtype=torch.long)] = True
+            w = torch.where(mask, w, torch.ones_like(w))
+        weights = w
+        pi = n / n.sum()
+        raw = torch.log(pi.clamp_min(1e-6))
+        centered = raw - raw.mean()
+        bias = (tau * centered).clamp(min=-bias_clip, max=bias_clip)
+        return weights, bias
+
+    def set_la_warmup_factor(self, factor: float) -> None:
+        """设置 P1 Logit Adjustment 的 warmup 缩放因子（0~1），由训练模块每步调用。
+
+        Args:
+            factor: 当前 warmup 进度，0 表示完全关闭 bias，1 表示全量生效。
+        """
+        self._la_warmup_factor = float(factor)
 
     @staticmethod
     def _output_device(outputs: dict[str, Any]) -> torch.device:
@@ -312,7 +422,14 @@ class SetCriterion(nn.Module):
                 )[0]
             )
             pos_ious = iou_targets.clone().detach()
-            prob = src_logits.sigmoid()
+            # [P1] 居中截断 Logit Adjustment：只调整用于计算损失的局部 logits 副本，
+            # 绝不能原地修改 src_logits（与 outputs["pred_logits"] 是同一 tensor，
+            # 会污染后续 postprocess 的推理输出）。bias 按 warmup 因子缩放。
+            adjusted_logits = src_logits
+            if self.logit_adjustment_enabled and self._la_warmup_factor > 0:
+                adjusted_logits = src_logits + self._la_warmup_factor * self.logit_bias.to(src_logits.dtype)
+
+            prob = adjusted_logits.sigmoid()
             # init positive weights and negative weights
             pos_weights = torch.zeros_like(src_logits)
             neg_weights = prob**gamma
@@ -325,9 +442,13 @@ class SetCriterion(nn.Module):
 
             pos_weights[tuple(pos_ind)] = t.to(pos_weights.dtype)
             neg_weights[tuple(pos_ind)] = 1 - t.to(neg_weights.dtype)
+            # [P0] 正样本类均衡：只乘正样本 slot 的类别权重，neg_weights 不动
+            # （不降低稀有类负样本惩罚，优先保护 FDR）。
+            if self.class_balance_enabled:
+                pos_weights[tuple(pos_ind)] *= self.class_balance_weights[target_classes_o].to(pos_weights.dtype)
             # a reformulation of the standard loss_ce = - pos_weights * prob.log() - neg_weights * (1 - prob).log()
             # with a focus on statistical stability by using fused logsigmoid
-            loss_ce = neg_weights * src_logits - F.logsigmoid(src_logits) * (pos_weights + neg_weights)
+            loss_ce = neg_weights * adjusted_logits - F.logsigmoid(adjusted_logits) * (pos_weights + neg_weights)
             loss_ce = loss_ce.sum() / num_boxes
 
         elif self.use_position_supervised_loss:

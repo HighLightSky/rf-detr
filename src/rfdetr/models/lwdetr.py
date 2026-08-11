@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 from typing import TYPE_CHECKING, Any, cast
 
@@ -914,6 +915,29 @@ def build_criterion_and_postprocessors(args: "BuilderArgs") -> tuple[SetCriterio
         losses.append("keypoints")
 
     sum_group_losses = getattr(args, "sum_group_losses", False)
+    # [分类损失均衡化] P0/P1 参数与类别统计：每个 rank 读同一 JSON，天然 DDP 一致；
+    # counts 转 CPU 张量，随 criterion buffer 迁移 device。默认全关时 kwargs 为空。
+    class_balance_kwargs: dict[str, Any] = {}
+    if getattr(args, "class_balance_enabled", False) or getattr(args, "logit_adjustment_enabled", False):
+        counts_path = getattr(args, "class_balance_counts_path", None)
+        if counts_path is None:
+            raise ValueError(
+                "启用 class_balance_enabled / logit_adjustment_enabled 时必须提供 class_balance_counts_path"
+            )
+        with open(counts_path, encoding="utf-8") as f:
+            counts_data = json.load(f)
+        class_balance_kwargs = {
+            "class_balance_enabled": getattr(args, "class_balance_enabled", False),
+            "class_balance_counts": torch.as_tensor(counts_data["counts"], dtype=torch.float32),
+            "class_balance_beta": getattr(args, "class_balance_beta", 0.25),
+            "class_balance_max_weight": getattr(args, "class_balance_max_weight", 3.0),
+            "class_balance_min_count": getattr(args, "class_balance_min_count", 10),
+            "class_balance_ref_count": getattr(args, "class_balance_ref_count", None),
+            "class_balance_target_classes": getattr(args, "class_balance_target_classes", None),
+            "logit_adjustment_enabled": getattr(args, "logit_adjustment_enabled", False),
+            "logit_adjustment_tau": getattr(args, "logit_adjustment_tau", 0.1),
+            "logit_adjustment_bias_clip": getattr(args, "logit_adjustment_bias_clip", 1.0),
+        }
     if args.segmentation_head:
         criterion = SetCriterion(
             args.num_classes + 1,
@@ -928,6 +952,7 @@ def build_criterion_and_postprocessors(args: "BuilderArgs") -> tuple[SetCriterio
             ia_bce_loss=args.ia_bce_loss,
             mask_point_sample_ratio=args.mask_point_sample_ratio,
             num_keypoints_per_class=getattr(args, "num_keypoints_per_class", []),
+            **class_balance_kwargs,
         )
     else:
         criterion = SetCriterion(
@@ -942,6 +967,7 @@ def build_criterion_and_postprocessors(args: "BuilderArgs") -> tuple[SetCriterio
             use_position_supervised_loss=args.use_position_supervised_loss,
             ia_bce_loss=args.ia_bce_loss,
             num_keypoints_per_class=getattr(args, "num_keypoints_per_class", []),
+            **class_balance_kwargs,
         )
     criterion.to(device)
     postprocess = PostProcess(

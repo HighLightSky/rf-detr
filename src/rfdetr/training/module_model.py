@@ -1181,6 +1181,18 @@ class RFDETRModelModule(LightningModule):
                 "your criterion subclass and implement the num_boxes parameter in forward()."
             )
         normalizer = self.criterion.num_boxes_for_targets(outputs, targets)
+        # [P1] Logit Adjustment warmup：前 logit_adjustment_warmup_epochs 个 epoch
+        # bias 从 0 线性升到目标值（global_step 为优化器步数，与 LR warmup 同口径；
+        # warmup_epochs <= 0 表示立即全量生效）。
+        if getattr(self.criterion, "logit_adjustment_enabled", False):
+            warmup_epochs = self.train_config.logit_adjustment_warmup_epochs
+            if warmup_epochs > 0:
+                total_steps = max(1, self.trainer.estimated_stepping_batches)
+                steps_per_epoch = max(1.0, float(total_steps) / max(1, self.train_config.epochs))
+                warmup_steps = max(1.0, warmup_epochs * steps_per_epoch)
+                self.criterion.set_la_warmup_factor(min(1.0, self.global_step / warmup_steps))
+            else:
+                self.criterion.set_la_warmup_factor(1.0)
         numerator_loss_dict = self.criterion(outputs, targets, num_boxes=torch.ones_like(normalizer))
         # Keys in weight_dict are loss terms whose criterion implementation divides by num_boxes
         # (so passing num_boxes=1.0 yields raw numerators that we divide by normalizer here).

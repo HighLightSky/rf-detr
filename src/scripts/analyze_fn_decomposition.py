@@ -32,7 +32,7 @@
 from __future__ import annotations
 
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -56,6 +56,7 @@ from val.competition_metrics import (  # noqa: E402
 
 # 面积分桶（像素）：小 <20×20、中 20×20-50×50、大 >50×50（640 分辨率下）
 _AREA_BINS = [(0, 400, "小(<20px)"), (400, 2500, "中(20-50px)"), (2500, float("inf"), "大(>50px)")]
+
 
 def _area_bucket(gt: BoxRecord) -> str:
     """按 GT 框像素面积返回面积分桶标签。"""

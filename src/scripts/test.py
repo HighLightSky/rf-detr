@@ -10,6 +10,7 @@ GPU 持续满载。预测结果与逐张 ``model.predict`` 完全一致。
 """
 
 import gc
+import json
 import os
 import subprocess
 import sys
@@ -66,7 +67,7 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         "image_dir": "images/test",
         "label_format": "yolo",
         "label_dir": "labels/test",
-        "exp_output_dir": "output/0807-SHWX-SSCL-Proj-原型+实例正样本",
+        "exp_output_dir": "output/0811-SHWX-SSCL-Proj-类均衡-E2",
         "checkpoint_file": "checkpoint_best_total.pth",
         "num_classes": 25,
         "vehicle_class_ids": {24},  # FSC 发射车，比赛规则按车辆目标 IoU=0.35
@@ -123,6 +124,14 @@ DEVICE = "cuda:0"  # 使用 GPU 推理；无 CUDA 时脚本会自动回退到 CP
 # ── 逐类置信度阈值（可选）────────────────────────────────────────────
 CLASS_CONF_THRESHOLDS: dict[int, float] = {}  # 默认全 0.25；按需填 {类别id: 阈值}
 
+# ── 推理侧 Logit Adjustment bias（可选，须与训练侧 P1 配方一致）──────
+# 设置后 score' = sigmoid(logit - k * bias)，bias 由 class_counts.json
+# （stat_class_counts.py 产物）按训练侧同配方重建；None 表示不生效。
+LOGIT_ADJUSTMENT_BIAS_PATH: str | None = None
+LOGIT_ADJUSTMENT_BIAS_K: float = 1.0  # 推理侧扣减系数 k（0/0.5/1）
+LOGIT_ADJUSTMENT_BIAS_TAU: float = 0.1  # 与训练侧 logit_adjustment_tau 一致
+LOGIT_ADJUSTMENT_BIAS_CLIP: float = 1.0  # 与训练侧 logit_adjustment_bias_clip 一致
+
 # ── 推理性能配置（GPU 满载单轮推理）──────────────────────────────────
 BATCH_SIZE = 32  # GPU 单次前向处理的图像数；越大 GPU 利用率越高，受显存限制
 NUM_WORKERS = 12  # CPU 预取 worker 进程数（建议等于 CPU 核数）
@@ -132,7 +141,7 @@ USE_FP16 = False  # 用 FP16 张量核加速推理（RTX 30 系约 2.5 倍提速
 
 # ── 可视化保存配置 ───────────────────────────────────────────────────
 FP_DIR = EXP_OUTPUT_DIR / "FP"
-FN_DIR = EXP_OUTPUT_DIR / "FN" 
+FN_DIR = EXP_OUTPUT_DIR / "FN"
 
 # ── YOLO 格式预测输出（供漏检/虚警归因统计脚本使用）──────────────────
 SAVE_YOLO_PREDS = False  # 是否输出 YOLO 格式预测框（每图一个 txt：cls_id cx cy w h conf）
@@ -646,7 +655,7 @@ def predict_batched_to_records(
     batch_size: int,
     num_workers: int,
     class_conf_thresholds: Mapping[int, float] | None = None,
-) -> tuple[list[BoxRecord], float, float | None]:
+) -> tuple[list[BoxRecord], float, float | None, int]:
     """批量流水线推理：多进程预取解码 + GPU 批量前向，返回预测框与测速结果。
 
     相比逐张调用 ``model.predict``，本函数通过以下方式让 GPU 满载：
@@ -681,6 +690,31 @@ def predict_batched_to_records(
         ``None``；``timed_images`` 为参与稳态计时（剔除预热批）的图像数。
     """
     resolution = int(model.model.resolution)
+
+    # [分类损失均衡化] 可选推理侧 LA bias：由 class_counts.json 按训练侧同配方
+    # 重建 logit bias，并在 postprocess/top-k 前修正 logits，确保被 bias 抬升
+    # 后才应进入 top-k 的稀有类候选不会被提前丢掉。
+    la_bias: torch.Tensor | None = None
+    if LOGIT_ADJUSTMENT_BIAS_PATH:
+        from rfdetr.models.criterion import SetCriterion
+
+        counts = torch.as_tensor(
+            json.loads(Path(LOGIT_ADJUSTMENT_BIAS_PATH).read_text(encoding="utf-8"))["counts"],
+            dtype=torch.float32,
+        )
+        _, la_bias = SetCriterion._build_class_balance_buffers(
+            counts=counts,
+            beta=0.25,
+            max_weight=3.0,
+            min_count=10,
+            ref_count=None,
+            target_classes=None,
+            tau=LOGIT_ADJUSTMENT_BIAS_TAU,
+            bias_clip=LOGIT_ADJUSTMENT_BIAS_CLIP,
+        )
+        la_bias = la_bias.to(device)
+        print(f"[i] 推理侧 LA bias 生效: {LOGIT_ADJUSTMENT_BIAS_PATH}（k={LOGIT_ADJUSTMENT_BIAS_K}）")
+
     dataset = _InferenceDataset(image_paths)
     loader = DataLoader(
         dataset,
@@ -741,6 +775,11 @@ def predict_batched_to_records(
             batch_tensor = F.normalize(torch.stack(gpu_images), means, stds)
 
             predictions = model.model.model(batch_tensor)
+            if la_bias is not None:
+                adjusted_logits = predictions["pred_logits"] - LOGIT_ADJUSTMENT_BIAS_K * la_bias.to(
+                    dtype=predictions["pred_logits"].dtype
+                )
+                predictions = {**predictions, "pred_logits": adjusted_logits}
             target_sizes = torch.tensor(orig_sizes, device=device)
             results = model.model.postprocess(predictions, target_sizes=target_sizes)
 
