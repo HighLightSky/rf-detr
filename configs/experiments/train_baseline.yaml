@@ -1,0 +1,41 @@
+# 基线全量微调（等价旧 src/scripts/train.py）
+# 用法: python src/scripts/train.py -c configs/experiments/train_baseline.yaml
+model:
+  variant: nano                 # nano/small/medium/large/large_deprecated
+  num_classes: 25
+  resolution: 384               # nano 默认 384；旧脚本显式传（medium 等默认分辨率以 config 为准）
+  gradient_checkpointing: true
+  freeze_encoder: false         # 0805 对比实验证明全量微调更优（ship Recall 0.42 -> 0.80）
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict
+  dataset_file: yolo
+  output_dir: output/0811-SHWX-rfdetr-nano-baseline
+  epochs: 100
+  batch_size: 32
+  num_workers: 12
+  lr: 1e-4
+  lr_encoder: 1.5e-4
+  weight_decay: 1e-4
+  grad_accum_steps: 2            # 有效 batch = 64
+  clip_max_norm: 0.1
+  lr_drop: 60
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 5
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL             # 预设名：AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/none
+  mosaic_p: 0.5
+  # 平方根频率过采样（注意与 P0 class_balance_* 区分，两套机制不同）
+  class_balanced_sampling: true
+  class_balanced_threshold: null
+  class_balanced_class_ids: [0, 1]   # 0=HM 航母, 1=LQS 两栖舰；空=全部类别
+  dataset_cache_mode: raw
+  dataset_cache_dir: null        # null=使用 output_dir/dataset_cache
+  dataset_cache_rebuild: false

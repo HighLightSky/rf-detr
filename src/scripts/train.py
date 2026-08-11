@@ -3,177 +3,118 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-"""RF-DETR 训练脚本 —— 使用 Python API，所有参数集中配置。
+"""统一训练模板：按 yaml 配置启动 RF-DETR 训练（替代全部旧 train_*.py 脚本）。
 
-用法：     python src/scripts/train.py
+``train:`` 段 100% 透传为 ``model.train(**kwargs)``（零映射表，新字段自动可用）；
+``model:`` 段为变体类构造参数（``variant`` 查 ``expcfg.MODEL_REGISTRY``）。
+``TrainConfig`` 的 ``extra="forbid"`` 天然校验 yaml 键拼写错误。
 
-修改本文件下方的「训练参数」常量即可切换模型、数据集等配置。
+用法：
+    python src/scripts/train.py -c configs/experiments/train_sscl_class_balance_E1.yaml
+    # --set 覆盖任意配置项（yaml < --set < 专用 CLI 参数）：
+    python src/scripts/train.py -c ... --set train.class_balance_enabled=true
+    # 只打印展开后的 kwargs 不训练（等价性验证用）：
+    python src/scripts/train.py -c ... --dump-kwargs
+
+配置结构（详见 configs/experiments/README.md 与 templates/train_template.yaml）：
+
+.. code-block:: yaml
+
+    _template: {class_counts: auto}   # auto=训练前统计类别数并自动注入
+    model: {variant: medium, num_classes: 25, resolution: 640, ...}
+    train: {dataset_dir: ..., output_dir: ..., epochs: 6, sscl_enabled: true, ...}
 """
 
 from __future__ import annotations
 
+import argparse
+import json
+import sys
 from pathlib import Path
 
-from rfdetr.datasets.aug_configs import AUG_AERIAL
-from rfdetr.variants import RFDETRLargeDeprecated, RFDETRMedium, RFDETRNano, RFDETRSmall
+from pydantic import ValidationError
 
-# ============================================================================
-# 训练参数 —— 在这里修改配置
-# ============================================================================
+# ── 项目路径 ───────────────────────────────────────────────────────
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
-# --- 模型 ---
-MODEL = "nano"  # 可选: nano, small, medium, large
+from scripts import expcfg  # noqa: E402
+from scripts.stat_class_counts import write_counts_json  # noqa: E402
 
-# --- 数据集 ---
-DATASET_DIR = "/home/liu/wzt/datasets/SHWX-dataset-dict"
-DATASET_FILE = "yolo"  # roboflow：Roboflow COCO 格式 (train/_annotations.coco.json)，还有coco yolo
 
-# --- 训练超参数 ---
-NUM_CLASSES = 25  # 类别数
-EPOCHS = 100  # 训练轮数
-BATCH_SIZE = 32  # 每 GPU 的 batch size
-NUM_WORKERS = 12  # DataLoader 工作进程数
-LR = 1e-4  # 基础学习率
-LR_ENCODER = 1.5e-4  # 编码器（backbone）学习率
-WEIGHT_DECAY = 1e-4  # 权重衰减
-GRAD_ACCUM_STEPS = 2  # 梯度累积步数（有效 batch = BATCH_SIZE * GRAD_ACCUM_STEPS）
-CLIP_MAX_NORM = 0.1  # 梯度裁剪
-
-# --- 学习率调度 ---
-LR_DROP = 60  # 学习率下降的 epoch 数
-WARMUP_EPOCHS = 0.0  # 预热 epoch 数
-
-# --- 数据增广 ---
-# 可选预设:
-#   None          → 使用默认 torchvision 增广（HorizontalFlip + 多尺度缩放裁剪）
-#   AUG_CONSERVATIVE → 保守增广（小数据集推荐，<500 张）
-#   AUG_AGGRESSIVE   → 激进增广（大数据集推荐，2000+ 张）
-#   AUG_AERIAL       → 航拍/遥感影像（水平/垂直翻转 + 90° 旋转）
-#   AUG_INDUSTRIAL   → 工业/检测影像（光照噪声 + 模糊）
-#   {}             → 关闭额外增广
-AUG_CONFIG = AUG_AERIAL  # 遥感、航拍预设
-
-# --- Mosaic 增强 ---
-# Mosaic 将 4 张图片拼接为 1 张训练样本，有效提升小目标检测和遥感数据集的性能。
-# 推荐值: 0.5 (前 80% 训练阶段开启，最后 20% 关闭)
-# 设为 0.0 关闭
-MOSAIC_P = 0.5
-
-# --- 平方根频率过采样（实验性，MMDetection ClassBalancedDataset 风格）---
-# freq(c)=含类别 c 的图数/总图数；repeat_factor(c)=max(1, int(sqrt(t/freq(c))))；
-# 每图 r(I)=白名单类最大倍率；数据集长度=Σr(I)；DataLoader shuffle=True 全局混合。
-# threshold=None → t=4×max(freq(白名单类))，SHWX 上 HM×3、LQS×2、长度 3920→3946；
-# GradAccumAlignedDataset 补齐后每 epoch 步数与基线一致（62 步），LR 调度完全可比。
-# 只提升稀有类、正常类不动；旧 factor×长度 方案（扩展段循环映射）已废弃。
-CLASS_BALANCED_SAMPLING = True  # 开关
-CLASS_BALANCED_THRESHOLD = None  # 阈值 t；None = 自动推导
-CLASS_BALANCED_CLASS_IDS = [0, 1]  # 0=HM 航母, 1=LQS 两栖舰；空 = 全部类别
-
-# --- 硬件 ---
-DEVICE = "cuda"  # 设备: cuda, cuda:0, cpu
-DEVICES = 1  # GPU 数量
-NUM_NODES = 1  # 节点数
-
-DATASET_CACHE_MODE = "raw"  # 缓存解码后的原始 RGB 图片，保留 Mosaic/随机增广在线执行
-DATASET_CACHE_DIR = None  # None 表示使用 output_dir/dataset_cache
-DATASET_CACHE_REBUILD = False
-
-# --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0811-SHWX-rfdetr-nano-baseline"  # 输出目录
-TENSORBOARD = True  # 是否启用 TensorBoard
-WANDB = False  # 是否启用 Wandb
-
-# --- 骨干微调 ---
-# 原版默认是全量微调（freeze_encoder=False）。
-# 0805（全量微调）vs 0808（冻结骨干）对比实验表明：冻结 DINOv2 骨干后
-# ship 类 Recall 从 0.80 暴跌到 0.42，全量微调明显更优。
-FREEZE_ENCODER = False
-
-# --- EMA (指数移动平均) ---
-USE_EMA = True  # EMA 提升收敛稳定性与最终精度，原版默认开启
-
-# --- 验证 ---
-EVAL_INTERVAL = 5  # 每隔 N 个 epoch 验证一次（减少 CPU 阻塞，加快训练）
-
-# --- 恢复训练 ---
-# RESUME = "output/0726-DIOR-rfdetr_medium/last.ckpt"
-RESUME = ""
-
-# ============================================================================
-# 模型注册表（无需修改）
-# ============================================================================
-
-_MODEL_REGISTRY: dict[str, tuple[type, int]] = {
-    "nano": (RFDETRNano, 384),
-    "small": (RFDETRSmall, 512),
-    "medium": (RFDETRMedium, 640),
-    # 原版 Large（DINOv2-Base 骨干，135M 参数，medium 的 4 倍）。
-    # 注意：新版 RFDETRLarge(2026) 的骨干与 medium 相同（ViT-S），只是分辨率 704；
-    # 真正更大的骨干是这里的 RFDETRLargeDeprecated（已标记废弃但功能完整）。
-    # 原生分辨率 560，位置编码 PE=37 与预训练权重绑定，不能随意改分辨率。
-    "large": (RFDETRLargeDeprecated, 560),
-}
+def _parse_args() -> argparse.Namespace:
+    """解析命令行参数（-c 必填，--set 可多次，--dump-kwargs 只打印）。"""
+    parser = argparse.ArgumentParser(description="RF-DETR 统一训练模板（yaml 配置）")
+    parser.add_argument(
+        "-c", "--config",
+        type=str,
+        required=True,
+        help="实验 yaml 配置文件路径（configs/experiments/*.yaml）",
+    )
+    parser.add_argument(
+        "--set",
+        type=str,
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="覆盖配置项（可多次），如 --set train.sscl_lambda=0.2",
+    )
+    parser.add_argument(
+        "--dump-kwargs",
+        action="store_true",
+        help="只打印展开后的 model/train kwargs 不训练（等价性验证用）",
+    )
+    return parser.parse_args()
 
 
 def main() -> None:
-    """加载配置并启动训练。"""
-    # --- 校验模型和数据集 ---
-    if MODEL not in _MODEL_REGISTRY:
-        raise ValueError(f"不支持的模型: {MODEL}，可选: {list(_MODEL_REGISTRY)}")
+    """加载 yaml 配置，展开 kwargs 并启动训练。"""
+    args = _parse_args()
+    cfg = expcfg.load_config(args.config)
+    cfg = expcfg.apply_overrides(cfg, args.set)
+    model_kwargs, variant = expcfg.build_model_kwargs(cfg.get("model"))
+    train_kwargs = expcfg.build_train_kwargs(cfg)
 
-    model_cls, default_resolution = _MODEL_REGISTRY[MODEL]
-    dataset_dir = str(Path(DATASET_DIR).resolve())
+    model_cls, default_resolution = expcfg.MODEL_REGISTRY[variant]
+    model_kwargs.setdefault("resolution", default_resolution)
 
-    print(f"模型: {MODEL} | 类别数: {NUM_CLASSES} | 分辨率: {default_resolution}")
-    print(f"Batch: {BATCH_SIZE} x {GRAD_ACCUM_STEPS} (有效={BATCH_SIZE * GRAD_ACCUM_STEPS}) | Epochs: {EPOCHS}")
-    print(f"数据集: {dataset_dir} | 输出: {OUTPUT_DIR}")
-    print(f"增广预设: {'无' if AUG_CONFIG is None else AUG_CONFIG}")
+    # [_template.class_counts=auto] 训练前自动统计类别实例数并写 class_counts.json，
+    # 同时注入 class_balance_counts_path（等价旧 train_sscl_class_balance 的前置步骤）。
+    if cfg.get("_template", {}).get("class_counts") == "auto":
+        labels_dir = Path(train_kwargs["dataset_dir"]) / "labels" / "train"
+        if not labels_dir.is_dir():
+            raise FileNotFoundError(f"未找到训练集标签目录（YOLO 布局）: {labels_dir}")
+        counts_json = str(Path(train_kwargs["output_dir"]) / "class_counts.json")
+        payload = write_counts_json(labels_dir, counts_json, model_kwargs["num_classes"])
+        print(f"类别实例数（自动统计）: {payload['counts']}")
+        print(
+            f"n_max={payload['n_max']:.0f}  n_min={payload['n_min']:.0f}  "
+            f"n_ref={payload['n_ref']:.2f}  -> {counts_json}"
+        )
+        train_kwargs.setdefault("class_balance_counts_path", counts_json)
 
-    # --- 构建模型 ---
-    # gradient_checkpointing=True: 用计算换显存，backbone 中间激活值不缓存，
-    # 反向传播时重新计算。可将激活值显存从 ~15 GB 降到 ~3 GB。
-    model = model_cls(
-        num_classes=NUM_CLASSES,
-        resolution=default_resolution,
-        gradient_checkpointing=True,
-        freeze_encoder=FREEZE_ENCODER,
-    )
+    # 打印本次实验配置摘要
+    print(f"模型: {variant} | 类别数: {model_kwargs.get('num_classes')} | 分辨率: {model_kwargs.get('resolution')}")
+    print(f"数据集: {train_kwargs.get('dataset_dir')} | 输出: {train_kwargs.get('output_dir')}")
+    print(f"Epochs: {train_kwargs.get('epochs')} | Batch: {train_kwargs.get('batch_size')}")
 
-    # --- 训练 ---
-    model.train(
-        dataset_dir=dataset_dir,
-        dataset_file=DATASET_FILE,
-        output_dir=OUTPUT_DIR,
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
-        num_workers=NUM_WORKERS,
-        lr=LR,
-        lr_encoder=LR_ENCODER,
-        weight_decay=WEIGHT_DECAY,
-        grad_accum_steps=GRAD_ACCUM_STEPS,
-        clip_max_norm=CLIP_MAX_NORM,
-        lr_drop=LR_DROP,
-        warmup_epochs=WARMUP_EPOCHS,
-        tensorboard=TENSORBOARD,
-        wandb=WANDB,
-        device=DEVICE,
-        devices=DEVICES,
-        num_nodes=NUM_NODES,
-        resume=RESUME,
-        eval_interval=EVAL_INTERVAL,
-        use_ema=USE_EMA,  # 关闭 EMA 以节省显存
-        compute_val_loss=False,  # 关掉验证 loss 计算，省显存，mAP 指标不受影响
-        aug_config=AUG_CONFIG if AUG_CONFIG is not None else {},
-        mosaic_p=MOSAIC_P,
-        class_balanced_sampling=CLASS_BALANCED_SAMPLING,
-        class_balanced_threshold=CLASS_BALANCED_THRESHOLD,
-        class_balanced_class_ids=CLASS_BALANCED_CLASS_IDS,
-        dataset_cache_mode=DATASET_CACHE_MODE,
-        dataset_cache_dir=DATASET_CACHE_DIR,
-        dataset_cache_rebuild=DATASET_CACHE_REBUILD,
-    )
+    if args.dump_kwargs:
+        print(json.dumps({"model": model_kwargs, "train": train_kwargs}, ensure_ascii=False, indent=2))
+        return
 
-    print(f"\n训练完成！输出目录: {OUTPUT_DIR}")
+    # TrainConfig extra="forbid"：yaml 键拼错会抛 ValidationError，这里打印出错字段
+    try:
+        model = model_cls(**model_kwargs)
+        model.train(**train_kwargs)
+    except ValidationError as exc:
+        print("[错误] 训练配置校验失败（请检查 yaml 键名与取值）：")
+        for err in exc.errors():
+            print(f"  - 字段 {'.'.join(str(x) for x in err['loc'])}: {err['msg']}")
+        raise
+
+    print(f"\n训练完成！输出目录: {train_kwargs.get('output_dir')}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,88 @@
+# SSCL + 分类损失均衡化（等价旧 src/scripts/train_sscl_class_balance.py，当前配方）
+# 0807 配方 + P0 正样本类均衡 IA-BCE + P1 居中截断 Logit Adjustment（默认关闭）
+# 当前为「仅验证 QNorm-Obj 物体性门控」配置：P0/P1 关、判别矩阵 λ=0.03。
+# 用法: python src/scripts/train.py -c configs/experiments/train_sscl_class_balance_E1.yaml
+# E2: --set train.class_balance_beta=0.5 --set train.class_balance_max_weight=5.0
+# E3: --set train.class_balance_enabled=true --set train.logit_adjustment_enabled=true
+_template:
+  class_counts: auto             # 训练前统计类别数写 <output_dir>/class_counts.json
+                                 # 并自动注入 class_balance_counts_path
+
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 640
+  gradient_checkpointing: true
+  pretrain_weights: output/0805-SHWX-data-expand-rfdetr-baseline/checkpoint_best_total.pth
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict
+  dataset_file: yolo
+  output_dir: output/0811-SHWX-SSCL-仅验证QNorm-Obj物体性门控
+  epochs: 6
+  batch_size: 32
+  grad_accum_steps: 2
+  num_workers: 12
+  lr: 1e-5
+  lr_encoder: 1e-5
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  lr_drop: 6
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 1
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+  # --- SSCL（判别矩阵 + 实例正样本，0807 配方变体）---
+  sscl_enabled: true
+  sscl_semantic_matrix_path: data/semantic_matrix_shwx_disc.pt
+  sscl_matrix_normalize: minmax
+  sscl_lambda: 0.03
+  sscl_tau: 0.1
+  sscl_rho: 0.3
+  sscl_omega_max: 2.0
+  sscl_anchor_classes: [0, 1, 2, 3]
+  sscl_confusing_classes: [0, 1, 2, 3]
+  sscl_start_epoch: 0
+  sscl_freeze_strategy: conservative
+  sscl_prototype_enabled: true
+  sscl_prototype_momentum: 0.99
+  sscl_prototype_min_samples: 1
+  sscl_projection_enabled: true
+  sscl_projection_dim: 128
+  sscl_prototype_instance_pos: true
+  sscl_distill_enabled: false
+  sscl_distill_lambda: 0.5
+  sscl_distill_temperature: 2.0
+  sscl_distill_mode: mse
+  sscl_teacher_checkpoint: null
+  sscl_protected_classes: null
+  # --- 难例负样本（本组实验关闭）---
+  sscl_hard_neg_enabled: false
+  sscl_hard_neg_topk: 3
+  sscl_hard_neg_score_thresh: -2.0
+  sscl_hard_neg_log_interval: 100
+  # --- P0 正样本类均衡 IA-BCE（默认关闭）---
+  # 注意与上方 class_balanced_*（平方根频率过采样）区分，两套机制不同！
+  class_balance_enabled: false
+  class_balance_beta: 0.25       # E1：0.25；E2：0.5
+  class_balance_max_weight: 3.0  # E1：3.0；E2：5.0
+  class_balance_min_count: 10    # 分母下限，防极端小样本类权重过大
+  class_balance_ref_count: null  # null=自动取 sqrt(N_max * N_min)
+  class_balance_target_classes: [0, 1]   # 首发只作用于 HM/LQS
+  # class_balance_counts_path 由 _template.class_counts=auto 自动注入，不手写
+  # --- P1 居中截断 Logit Adjustment（默认关闭）---
+  logit_adjustment_enabled: false
+  logit_adjustment_tau: 0.1
+  logit_adjustment_bias_clip: 1.0
+  logit_adjustment_warmup_epochs: 1.0
+  # --- QNorm-Obj 物体性门控（语义头模块）---
+  qnorm_obj_enabled: true

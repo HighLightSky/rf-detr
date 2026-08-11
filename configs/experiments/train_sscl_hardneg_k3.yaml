@@ -1,0 +1,70 @@
+# SSCL 难例负样本实验（等价旧 src/scripts/train_sscl_hardneg.py，k=3 默认配方）
+# 与 0807 配方超参一致，唯一差异：启用难例负样本（top-k=3，IoU∈[0,0.3] 带内
+# unmatched query 按最大前景 logit 取 top-k 加入 SSCL 分母）。
+# 用法: python src/scripts/train.py -c configs/experiments/train_sscl_hardneg_k3.yaml
+# k=5 变体: --set train.sscl_hard_neg_topk=5 --set train.output_dir=output/0810-SHWX-SSCL-Proj-HardNeg-k5-iou03
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 640
+  gradient_checkpointing: true
+  pretrain_weights: output/0805-SHWX-data-expand-rfdetr-baseline/checkpoint_best_total.pth
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict
+  dataset_file: yolo
+  output_dir: output/0810-SHWX-SSCL-Proj-HardNeg-k3-iou03
+  epochs: 6
+  batch_size: 64
+  grad_accum_steps: 1            # 有效 batch = 64
+  num_workers: 12
+  lr: 1e-5
+  lr_encoder: 1e-5
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  lr_drop: 6
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 1
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+  dataset_cache_mode: raw        # 缓存解码后的原始 RGB 图片加速训练
+  dataset_cache_dir: null
+  dataset_cache_rebuild: false
+  # --- SSCL（0807 配方 + 实例正样本）---
+  sscl_enabled: true
+  sscl_semantic_matrix_path: data/semantic_matrix_shwx.pt
+  sscl_matrix_normalize: minmax
+  sscl_lambda: 0.02
+  sscl_tau: 0.1
+  sscl_rho: 0.3
+  sscl_omega_max: 2.0
+  sscl_anchor_classes: [0, 1, 2, 3]
+  sscl_confusing_classes: [0, 1, 2, 3]
+  sscl_start_epoch: 0
+  sscl_freeze_strategy: conservative
+  sscl_prototype_enabled: true
+  sscl_prototype_momentum: 0.99
+  sscl_prototype_min_samples: 1
+  sscl_projection_enabled: true
+  sscl_projection_dim: 128
+  sscl_prototype_instance_pos: true
+  sscl_distill_enabled: false
+  sscl_distill_lambda: 0.5
+  sscl_distill_temperature: 2.0
+  sscl_distill_mode: mse
+  sscl_teacher_checkpoint: null
+  sscl_protected_classes: null
+  # --- 难例负样本（本次实验变量）---
+  sscl_hard_neg_enabled: true
+  sscl_hard_neg_topk: 3
+  sscl_hard_neg_score_thresh: -2.0   # 最大前景 logit 下限（≈ p>0.12）
+  sscl_hard_neg_log_interval: 100

@@ -3,24 +3,30 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-"""轻量级单图推理脚本。
+"""统一推理模板：加载 checkpoint 对单张图片或整个目录执行推理。
 
-加载 SHWX SSCL 微调 checkpoint（``output/0804-SHWX-rfdetr_medium_SSCL+prototype``），
-对单张图片执行推理，输出：
-
+输出：
 - **YOLO 格式预测文件**：``<output_dir>/labels/<图像名>.txt``，每行
   ``class_id x_center y_center width height confidence``（坐标已归一化到 [0,1]），
-  与测试脚本 ``val.competition_metrics.load_yolo_predictions`` 读取的格式完全兼容。
+  与 ``val.competition_metrics.load_yolo_predictions`` 读取的格式完全兼容。
 - **推理结果可视化**：``<output_dir>/visualization/<图像名>.jpg``，绘制预测框、
   类别名称与置信度。
 
 用法：
-    python src/scripts/predict.py --image /path/to/image.jpg        # 单张图片
-    python src/scripts/predict.py --image /path/to/folder           # 批量处理整个文件夹
-    python src/scripts/predict.py --image img.jpg --conf 0.3 --output-dir my_out
+    python src/scripts/predict.py -c configs/experiments/predict_shwx.yaml --image /path/to/image.jpg
+    python src/scripts/predict.py --image img.jpg                 # 缺省 -c：内置默认 checkpoint
+    python src/scripts/predict.py -c ... --image folder --conf 0.3 --output-dir my_out
 
-``--image`` 既可以是图片文件，也可以是包含图片的目录（自动扫描 ``.jpg/.jpeg/.png``）。
-批量模式与单图模式共用同一份模型权重，输出目录结构一致。
+配置结构（predict: 段，详见 configs/experiments/README.md）：
+
+.. code-block:: yaml
+
+    predict:
+      checkpoint: output/xxx/checkpoint_best_total.pth   # 相对项目根
+      conf: 0.25
+      output_dir: output/xxx/predict
+      image: null              # 通常由 --image 命令行提供
+      class_names: shwx        # 内置名 shwx/dior，或 {label: 名称} 字典
 """
 
 from __future__ import annotations
@@ -38,37 +44,54 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-# 类别名称统一来自 sscl/prompts/*.yaml，保证与语义矩阵的类别索引一致
-from rfdetr import RFDETRMedium  # noqa: E402
-from rfdetr.sscl.prompts import SHWX_CLASS_NAMES  # noqa: E402
+from rfdetr import RFDETR  # noqa: E402
+from rfdetr.sscl.prompts import DIOR_CLASS_NAMES, SHWX_CLASS_NAMES  # noqa: E402
+from scripts import expcfg  # noqa: E402
 
-# ══════════════════════════════════════════════════════════════════════
-#  默认配置 —— 命令行参数可覆盖
-# ══════════════════════════════════════════════════════════════════════
-CHECKPOINT_PATH = PROJECT_ROOT / "output/0807-SHWX-SSCL-Proj-原型+实例正样本/checkpoint_best_total.pth"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output/0807-SHWX-SSCL-Proj-原型+实例正样本" / "predict"
+# 缺省配置（不传 -c 时使用，保持向后兼容）
+DEFAULT_CHECKPOINT = "output/0807-SHWX-SSCL-Proj-原型+实例正样本/checkpoint_best_total.pth"
+DEFAULT_OUTPUT_DIR = "output/0807-SHWX-SSCL-Proj-原型+实例正样本/predict"
 DEFAULT_CONF_THRESHOLD = 0.25
 
 # 细粒度类别名称映射：SHWX 类别 id 0-24 已连续，label 即 class_id
-CLASS_NAMES: dict[int, str] = {label: SHWX_CLASS_NAMES[cid] for label, cid in enumerate(sorted(SHWX_CLASS_NAMES))}
+_DEFAULT_CLASS_NAMES: dict[int, str] = {
+    label: SHWX_CLASS_NAMES[cid] for label, cid in enumerate(sorted(SHWX_CLASS_NAMES))
+}
+
+
+def _resolve_class_names(value) -> dict[int, str]:
+    """解析类别名配置：内置名（shwx/dior）或 ``{label: 名称}`` 字典。
+
+    Args:
+        value: yaml ``predict.class_names`` 的值（``"shwx"``/``"dior"``/字典/省略）。
+
+    Returns:
+        ``{label: 名称}`` 映射。
+    """
+    if isinstance(value, dict):
+        return {int(k): str(v) for k, v in value.items()}
+    if value == "dior":
+        return {label: DIOR_CLASS_NAMES[cid] for label, cid in enumerate(sorted(DIOR_CLASS_NAMES))}
+    return _DEFAULT_CLASS_NAMES
 
 
 def _parse_args() -> argparse.Namespace:
-    """解析命令行参数。
-
-    Returns:
-        包含 ``image`` / ``conf`` / ``output_dir`` 的命名空间。
-    """
-    parser = argparse.ArgumentParser(description="RF-DETR SHWX 单图推理脚本")
+    """解析命令行参数（--image 必填，其余可经 yaml/命令行覆盖）。"""
+    parser = argparse.ArgumentParser(description="RF-DETR 统一推理模板（yaml 配置）")
+    parser.add_argument(
+        "-c", "--config",
+        type=str,
+        default=None,
+        help="实验 yaml 配置文件路径；缺省使用内置默认 checkpoint",
+    )
     parser.add_argument(
         "--image",
         type=str,
-        required=True,
+        required=False,
         help="输入图片路径，或包含图片的目录路径（自动扫描 .jpg/.jpeg/.png 批量推理）",
     )
-    conf_default = DEFAULT_CONF_THRESHOLD
-    parser.add_argument("--conf", type=float, default=conf_default, help=f"置信度阈值（默认 {conf_default}）")
-    parser.add_argument("--output-dir", type=str, default=str(DEFAULT_OUTPUT_DIR), help="结果输出目录")
+    parser.add_argument("--conf", type=float, default=None, help="置信度阈值（覆盖 yaml）")
+    parser.add_argument("--output-dir", type=str, default=None, help="结果输出目录（覆盖 yaml）")
     return parser.parse_args()
 
 
@@ -124,6 +147,7 @@ def _draw_detections(
     xyxy_array: np.ndarray,
     score_array: np.ndarray,
     class_id_array: np.ndarray,
+    class_names: dict[int, str],
 ) -> np.ndarray:
     """在 BGR 图像上绘制预测框、类别名称与置信度。
 
@@ -132,6 +156,7 @@ def _draw_detections(
         xyxy_array: ``(N, 4)`` 的 xyxy 像素坐标框。
         score_array: ``(N,)`` 的置信度。
         class_id_array: ``(N,)`` 的类别索引。
+        class_names: ``{类别id: 名称}`` 映射。
 
     Returns:
         绘制后的图像。
@@ -142,7 +167,7 @@ def _draw_detections(
         color = _box_color(int(class_id))
         cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
 
-        label = f"{CLASS_NAMES.get(int(class_id), str(int(class_id)))} {float(score):.2f}"
+        label = f"{class_names.get(int(class_id), str(int(class_id)))} {float(score):.2f}"
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.5
         (text_width, text_height), baseline = cv2.getTextSize(label, font, font_scale, 1)
@@ -194,14 +219,14 @@ def _collect_image_paths(image_arg: str | Path) -> list[Path]:
 
 
 def _infer_image(
-    model: RFDETRMedium,
+    model: RFDETR,
     image_path: Path,
     conf_threshold: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, tuple[int, int]]:
     """对单张图片执行推理。
 
     Args:
-        model: 已加载的 RFDETRMedium 实例。
+        model: 已加载的 RFDETR 实例（任意尺寸，nano/small/medium/large）。
         image_path: 图像路径。
         conf_threshold: 置信度阈值。
 
@@ -235,6 +260,7 @@ def _save_results(
     class_id_array: np.ndarray,
     image_bgr: np.ndarray,
     output_dir: Path,
+    class_names: dict[int, str],
 ) -> tuple[Path, Path]:
     """保存单张图片的 YOLO 结果文件与可视化图像。
 
@@ -245,6 +271,7 @@ def _save_results(
         class_id_array: ``(N,)`` 的类别索引。
         image_bgr: 原图 BGR 数组。
         output_dir: 结果输出根目录（内含 ``labels/`` 与 ``visualization/`` 子目录）。
+        class_names: ``{类别id: 名称}`` 映射（可视化标签用）。
 
     Returns:
         ``(label_path, vis_path)`` 保存路径二元组。
@@ -262,7 +289,7 @@ def _save_results(
             f.write(f"{int(class_id)} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f} {float(score):.6f}\n")
 
     # 可视化：绘制预测框与类别标签
-    annotated = _draw_detections(image_bgr, xyxy_array, score_array, class_id_array)
+    annotated = _draw_detections(image_bgr, xyxy_array, score_array, class_id_array, class_names)
     vis_path = vis_dir / f"{image_path.stem}.jpg"
     cv2.imwrite(str(vis_path), annotated)
     return label_path, vis_path
@@ -271,21 +298,36 @@ def _save_results(
 def main() -> None:
     """加载模型，对单张图片或整个目录中的图片推理并保存 YOLO 结果与可视化。"""
     args = _parse_args()
-    image_paths = _collect_image_paths(args.image)
-    # 传入的是文件 → 单图模式（详细打印）；传入的是目录 → 批量模式（逐张一行进度）
-    single_mode = Path(args.image).is_file()
 
-    # 单图/批量共用同一份模型权重
-    print(f"[i] 加载 checkpoint: {CHECKPOINT_PATH}")
-    model = RFDETRMedium.from_checkpoint(str(CHECKPOINT_PATH))
-    output_dir = Path(args.output_dir)
+    # ── 配置来源：yaml（可选）> 命令行覆盖 > 内置默认 ────────────────
+    predict_cfg: dict = {}
+    if args.config:
+        cfg = expcfg.load_config(args.config)
+        predict_cfg = expcfg.build_predict_kwargs(cfg)
+    checkpoint = predict_cfg.get("checkpoint") or DEFAULT_CHECKPOINT
+    conf_threshold = args.conf if args.conf is not None else predict_cfg.get("conf", DEFAULT_CONF_THRESHOLD)
+    output_dir = Path(args.output_dir or predict_cfg.get("output_dir") or DEFAULT_OUTPUT_DIR)
+    image_arg = args.image or predict_cfg.get("image")
+    if not image_arg:
+        raise SystemExit("缺少 --image 参数（或 yaml 的 predict.image）: 请输入图片路径或目录")
+
+    class_names = _resolve_class_names(predict_cfg.get("class_names", "shwx"))
+
+    image_paths = _collect_image_paths(image_arg)
+    # 传入的是文件 → 单图模式（详细打印）；传入的是目录 → 批量模式（逐张一行进度）
+    single_mode = Path(image_arg).is_file()
+
+    # 单图/批量共用同一份模型权重（from_checkpoint 自动推断模型尺寸）
+    resolved_checkpoint = expcfg.resolve_paths(expcfg.PROJECT_ROOT, checkpoint)
+    print(f"[i] 加载 checkpoint: {resolved_checkpoint}")
+    model = RFDETR.from_checkpoint(str(resolved_checkpoint))
 
     total_detections = 0
     for index, image_path in enumerate(image_paths, start=1):
         xyxy_array, score_array, class_id_array, image_bgr, (width, height) = _infer_image(
             model,
             image_path,
-            args.conf,
+            conf_threshold,
         )
         label_path, vis_path = _save_results(
             image_path,
@@ -294,6 +336,7 @@ def main() -> None:
             class_id_array,
             image_bgr,
             output_dir,
+            class_names,
         )
         total_detections += len(xyxy_array)
 
@@ -302,9 +345,9 @@ def main() -> None:
             print("=" * 60)
             print(f"图像: {image_path}")
             print(f"尺寸: {width} x {height}")
-            print(f"检测目标数: {len(xyxy_array)}  置信度阈值: {args.conf}")
+            print(f"检测目标数: {len(xyxy_array)}  置信度阈值: {conf_threshold}")
             for xyxy, score, class_id in zip(xyxy_array, score_array, class_id_array):
-                name = CLASS_NAMES.get(int(class_id), str(int(class_id)))
+                name = class_names.get(int(class_id), str(int(class_id)))
                 x1, y1, x2, y2 = (float(v) for v in xyxy)
                 print(f"  [{name:>8s}] score={float(score):.3f}  xyxy=({x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f})")
             print("=" * 60)
@@ -316,7 +359,7 @@ def main() -> None:
 
     if not single_mode:
         print("=" * 60)
-        print(f"共处理 {len(image_paths)} 张图片，检出 {total_detections} 个目标，置信度阈值: {args.conf}")
+        print(f"共处理 {len(image_paths)} 张图片，检出 {total_detections} 个目标，置信度阈值: {conf_threshold}")
         print(f"[完成] YOLO 结果目录: {output_dir / 'labels'}")
         print(f"[完成] 可视化目录:   {output_dir / 'visualization'}")
 

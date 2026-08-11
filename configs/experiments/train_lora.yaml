@@ -1,0 +1,40 @@
+# LoRA 微调（等价旧 src/scripts/train_LoRA.py）
+# 冻结 DINOv2 骨干 + LoRA/DoRA 适配器参数高效微调。
+# 用法: python src/scripts/train.py -c configs/experiments/train_lora.yaml
+model:
+  variant: medium                # LoRA 推荐 small/medium；large 请显式 resolution: 768（新版 RFDETRLarge）
+  num_classes: 25
+  resolution: 640                # 旧脚本显式 640
+  freeze_encoder: true           # 冻结 DINOv2 主干
+  backbone_lora: true            # 注入 LoRA/DoRA 适配器
+  gradient_checkpointing: true
+
+train:
+  dataset_dir: /home/liu/datasets/SHWX-dataset-dict
+  dataset_file: yolo
+  output_dir: output/0728-SHWX-rfdetr_medium_LoRA
+  epochs: 60
+  batch_size: 12                 # group_detr=13 时 query 3900 个，box loss O(N²) 显存，不宜大
+  num_workers: 8
+  lr: 2e-4                       # 解码器部分
+  lr_encoder: 1e-4               # 仅作用于 LoRA 适配器参数（backbone 已冻结）
+  weight_decay: 1e-4
+  grad_accum_steps: 8            # 有效 batch = 96
+  clip_max_norm: 0.1
+  lr_drop: 40
+  warmup_epochs: 3.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 5
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.8
+  persistent_workers: true       # 复用 worker 进程减少 fork 开销
+  prefetch_factor: 4
+  pin_memory: true
+  multi_scale: true

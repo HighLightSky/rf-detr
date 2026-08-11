@@ -101,8 +101,33 @@ def load_config(path: str | Path) -> dict[str, Any]:
     return cfg
 
 
+def _parse_scalar(raw: str) -> int | float | str:
+    """解析标量字符串：先试数值（int/float），失败保持字符串。
+
+    PyYAML 会把 ``1e-5``（无小数点）解析为字符串而非 float，这里补上数值
+    转换，保证 yaml 里写 ``lr: 1e-5`` 也能得到 0.00001。
+    """
+    lowered = raw.lower()
+    if lowered in ("inf", "+inf", "-inf", "nan"):
+        return float(raw)
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        return raw
+
+
 def resolve_paths(root: Path, value: Any) -> Any:
-    """递归解析相对路径：字符串相对路径（不以 ``/`` 开头）→ ``root / path``。
+    """递归解析相对路径：形如 ``dir/file`` 的相对路径 → ``root / path``。
+
+    规则（仅对字符串生效）：
+    1. 数值字面量（如 ``"1e-5"``，PyYAML 不会自动转 float）→ 转数值；
+    2. 绝对路径（``/`` 开头）或空串 → 原样保留；
+    3. 含 ``/`` 的相对路径（如 ``output/xxx``、``data/xxx.pt``）→ ``root / path``；
+    4. 其余普通字符串（``yolo``/``cuda``/``conservative`` 等取值）→ 原样保留。
 
     Args:
         root: 相对路径解析基准（项目根）。
@@ -114,7 +139,12 @@ def resolve_paths(root: Path, value: Any) -> Any:
     if isinstance(value, str):
         if value.startswith("/") or not value:  # 绝对路径或空串原样保留
             return value
-        return str(root / value)
+        numeric = _parse_scalar(value)
+        if not isinstance(numeric, str):
+            return numeric
+        if "/" in value:  # 形如 dir/file 的相对路径
+            return str(root / value)
+        return value
     if isinstance(value, dict):
         return {k: resolve_paths(root, v) for k, v in value.items()}
     if isinstance(value, list):
@@ -138,17 +168,7 @@ def _parse_override_value(raw: str) -> Any:
         return lowered == "true"
     if lowered in ("null", "none", "~"):
         return None
-    if lowered == "inf":
-        return float("inf")
-    try:
-        return int(raw)
-    except ValueError:
-        pass
-    try:
-        return float(raw)
-    except ValueError:
-        pass
-    return raw
+    return _parse_scalar(raw)
 
 
 def apply_overrides(cfg: dict[str, Any], overrides: list[str]) -> dict[str, Any]:
@@ -213,15 +233,17 @@ def build_train_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
     train_section = cfg.get("train")
     if train_section is None:
         raise ConfigError("配置文件缺少 train: 段（训练模板必须提供）")
-    train_kwargs = resolve_paths(PROJECT_ROOT, dict(train_section))
+    train_kwargs = dict(train_section)
 
-    # aug_config 只接受预设名（AUG_* 是嵌套 dict 无法写在 yaml 里）
-    aug_name = train_kwargs.get("aug_config")
-    if aug_name is not None and aug_name not in AUG_PRESETS:
-        raise ConfigError(
-            f"aug_config 只支持预设名: {', '.join(AUG_PRESETS)}（得到: {aug_name}）"
-        )
+    # aug_config 只接受预设名（AUG_* 是嵌套 dict 无法写在 yaml 里），
+    # 且预设名是字符串，不能被 resolve_paths 当相对路径解析——先弹出再放回
+    aug_name = train_kwargs.pop("aug_config", None)
+    train_kwargs = resolve_paths(PROJECT_ROOT, train_kwargs)
     if aug_name is not None:
+        if aug_name not in AUG_PRESETS:
+            raise ConfigError(
+                f"aug_config 只支持预设名: {', '.join(AUG_PRESETS)}（得到: {aug_name}）"
+            )
         train_kwargs["aug_config"] = AUG_PRESETS[aug_name]
     return train_kwargs
 
