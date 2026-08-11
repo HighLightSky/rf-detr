@@ -77,7 +77,7 @@ DEVICES = 1
 NUM_NODES = 1
 
 # --- 输出 & 日志 ---
-OUTPUT_DIR = "output/0811-SHWX-SSCL-Proj-类均衡-E3"
+OUTPUT_DIR = "output/0811-SHWX-SSCL-仅验证QNorm-Obj物体性门控"
 TENSORBOARD = True
 WANDB = False
 
@@ -90,9 +90,9 @@ RESUME = ""
 # SSCL 配置（与 0807 配方一致：原型 + 投影头 + 实例正样本）
 # ============================================================================
 SSCL_ENABLED = True
-SSCL_SEMANTIC_MATRIX_PATH = "data/semantic_matrix_shwx.pt"  # SHWX 25 类矩阵
+SSCL_SEMANTIC_MATRIX_PATH = "data/semantic_matrix_shwx_disc.pt"  # SHWX 25 类矩阵
 SSCL_MATRIX_NORMALIZE = "minmax"
-SSCL_LAMBDA = 0.02  # SSCL 损失权重 λ
+SSCL_LAMBDA = 0.03  # SSCL 损失权重 λ
 SSCL_TAU = 0.1  # 对比学习温度 τ
 SSCL_RHO = 0.3  # 语义先验放大系数 ρ
 SSCL_OMEGA_MAX = 2.0  # 负样本语义权重上限
@@ -119,18 +119,23 @@ SSCL_DISTILL_MODE = "mse"
 SSCL_TEACHER_CHECKPOINT = str(_BASE_CHECKPOINT)
 SSCL_PROTECTED_CLASSES = None
 
+# --- 难例负样本 ---
+SSCL_HARD_NEG_ENABLED = False
+SSCL_HARD_NEG_SCORE_THRESH = -2.0
+SSCL_HARD_NEG_LOG_INTERVAL = 100  # 训练监控采样步间隔（epoch 末输出 train/sscl/*）
+
 # ============================================================================
 # 分类损失均衡化配置
 # ============================================================================
 # --- P0 正样本类均衡 IA-BCE ---
-CLASS_BALANCE_ENABLED = True
+CLASS_BALANCE_ENABLED = False
 CLASS_BALANCE_BETA = 0.25  # E1：0.25；E2：0.5
 CLASS_BALANCE_MAX_WEIGHT = 3.0  # E1：3.0；E2：5.0
 CLASS_BALANCE_MIN_COUNT = 10  # 分母下限，防极端小样本类权重过大
 CLASS_BALANCE_REF_COUNT = None  # None 自动取 sqrt(N_max * N_min)；也可显式指定
 CLASS_BALANCE_TARGET_CLASSES = [0, 1]  # 首发只作用于 HM/LQS；第二轮可扩 [0,1,2]
 # --- P1 居中截断 Logit Adjustment（E3 时开启）---
-LOGIT_ADJUSTMENT_ENABLED = True
+LOGIT_ADJUSTMENT_ENABLED = False
 LOGIT_ADJUSTMENT_TAU = 0.1
 LOGIT_ADJUSTMENT_BIAS_CLIP = 1.0
 LOGIT_ADJUSTMENT_WARMUP_EPOCHS = 1.0
@@ -238,6 +243,11 @@ def main() -> None:
         logit_adjustment_tau=LOGIT_ADJUSTMENT_TAU,
         logit_adjustment_bias_clip=LOGIT_ADJUSTMENT_BIAS_CLIP,
         logit_adjustment_warmup_epochs=LOGIT_ADJUSTMENT_WARMUP_EPOCHS,
+        sscl_hard_neg_enabled=SSCL_HARD_NEG_ENABLED,
+        sscl_hard_neg_topk=3,
+        sscl_hard_neg_score_thresh=SSCL_HARD_NEG_SCORE_THRESH,
+        sscl_hard_neg_log_interval=SSCL_HARD_NEG_LOG_INTERVAL,
+        qnorm_obj_enabled=True
     )
 
     print(f"\n训练完成！输出目录: {output_dir}")

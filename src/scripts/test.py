@@ -67,7 +67,7 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         "image_dir": "images/test",
         "label_format": "yolo",
         "label_dir": "labels/test",
-        "exp_output_dir": "output/0811-SHWX-SSCL-Proj-类均衡-E2",
+        "exp_output_dir": "output/0811-SHWX-SSCL-仅验证QNorm-Obj物体性门控",
         "checkpoint_file": "checkpoint_best_total.pth",
         "num_classes": 25,
         "vehicle_class_ids": {24},  # FSC 发射车，比赛规则按车辆目标 IoU=0.35
@@ -712,6 +712,13 @@ def predict_batched_to_records(
             tau=LOGIT_ADJUSTMENT_BIAS_TAU,
             bias_clip=LOGIT_ADJUSTMENT_BIAS_CLIP,
         )
+        # 补齐到分类头输出通道数（pred_logits 最后一维 = num_classes + 1，
+        # 含背景槽位；counts 只覆盖真实类别），背景槽位 bias 补 0。
+        num_logit_classes = NUM_CLASSES + 1
+        if la_bias.numel() < num_logit_classes:
+            la_bias = torch.cat(
+                [la_bias, torch.zeros(num_logit_classes - la_bias.numel(), dtype=la_bias.dtype)]
+            )
         la_bias = la_bias.to(device)
         print(f"[i] 推理侧 LA bias 生效: {LOGIT_ADJUSTMENT_BIAS_PATH}（k={LOGIT_ADJUSTMENT_BIAS_K}）")
 
