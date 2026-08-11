@@ -74,18 +74,18 @@ hidden_dim = projection_dim if projection_dim is not None else hidden_dim
 2. **小 λ + 低 LR + 保守冻结**：只有 decoder 最后一层 + class_embed + 投影头可训练，λ=0.01~0.05、LR=1e-5，协同适应窗口的扰动被双保险吸收。
 3. **实例正样本锚定**：真实同类实例从第一步提供正向引力，投影头快速学到有意义投影 → EMA 原型随之变准 → 良性循环。
 4. **实验配置**：
-   - 微调（train_sscl.py）：`SSCL_START_EPOCH=0`，投影头 + 原型 + 实例正样本从第 0 epoch 协同训练，原型约 1 个 epoch 内稳定。
-   - 从头（train_sscl_all.py）：保持 `SSCL_START_EPOCH=30`，基类先收敛，到 30 后同时启动。
+    - 微调（train_sscl.py）：`SSCL_START_EPOCH=0`，投影头 + 原型 + 实例正样本从第 0 epoch 协同训练，原型约 1 个 epoch 内稳定。
+    - 从头（train_sscl_all.py）：保持 `SSCL_START_EPOCH=30`，基类先收敛，到 30 后同时启动。
 
 ## 5. 副作用与风险
 
-| 副作用 | 说明 | 检测/缓解 |
-|---|---|---|
-| 同类视觉差异大的实例被强行拉近 | 点对点引力是"硬目标"，可能压缩同类框回归差异 | 盯 GIoU / AP75 |
-| 损失系统性变小 | 正样本同时进分子分母，`log(denom)-log(num)` 单调不增，梯度被稀释 | 必要时调大 λ |
-| batch 组成方差回潮 | 实例正样本数量随 batch 变化，部分违背原型模式"batch 无关"初衷 | 观察 loss_sscl step 波动 |
-| 冷启动收益是统计上的 | 随机投影下同类相似度仍带噪声，只是平均优于异类 | 投影头 LR 需足够，否则学不出来 |
-| 损失数值不因投影头变小 | 低维空间随机向量余弦更分散，损失量级相当或略大 | 无 |
+| 副作用                         | 说明                                                             | 检测/缓解                      |
+| ------------------------------ | ---------------------------------------------------------------- | ------------------------------ |
+| 同类视觉差异大的实例被强行拉近 | 点对点引力是"硬目标"，可能压缩同类框回归差异                     | 盯 GIoU / AP75                 |
+| 损失系统性变小                 | 正样本同时进分子分母，`log(denom)-log(num)` 单调不增，梯度被稀释 | 必要时调大 λ                   |
+| batch 组成方差回潮             | 实例正样本数量随 batch 变化，部分违背原型模式"batch 无关"初衷    | 观察 loss_sscl step 波动       |
+| 冷启动收益是统计上的           | 随机投影下同类相似度仍带噪声，只是平均优于异类                   | 投影头 LR 需足够，否则学不出来 |
+| 损失数值不因投影头变小         | 低维空间随机向量余弦更分散，损失量级相当或略大                   | 无                             |
 
 **关键提示**：真正的瓶颈更可能是**投影头 LR 太低**（当前与 decoder 共用 `tc.lr`=1e-5）。投影头从随机初始化学整个对比空间，可能需要比 decoder 高 10~100 倍的学习率（如 1e-4）。若 `train/loss_sscl` 曲线平着不动或升高，优先调投影头 LR，而不是 λ。
 
@@ -93,23 +93,23 @@ hidden_dim = projection_dim if projection_dim is not None else hidden_dim
 
 ### 6.1 对照实验矩阵
 
-| 实验 | 投影头 | 原型 | 实例正样本 | 验证目标 |
-|---|---|---|---|---|
-| 基线 | 关 | 开 | 关 | 现有 SSCL 原型模式的基准 |
-| 实验 1（本次） | 开 | 开 | 开 | 完整方案：投影头 + 原型 + 实例正样本 |
-| 实验 2（消融） | 开 | 开 | 关 | 实例正样本的独立贡献（对比实验 1） |
-| 实验 3（消融） | 关 | 开 | 开 | 投影头的独立贡献（对比实验 1） |
+| 实验           | 投影头 | 原型 | 实例正样本 | 验证目标                             |
+| -------------- | ------ | ---- | ---------- | ------------------------------------ |
+| 基线           | 关     | 开   | 关         | 现有 SSCL 原型模式的基准             |
+| 实验 1（本次） | 开     | 开   | 开         | 完整方案：投影头 + 原型 + 实例正样本 |
+| 实验 2（消融） | 开     | 开   | 关         | 实例正样本的独立贡献（对比实验 1）   |
+| 实验 3（消融） | 关     | 开   | 开         | 投影头的独立贡献（对比实验 1）       |
 
 每组**输出目录必须分开**（如 `output/0807-...-纯原型`、`...-Proj-原型+实例正样本`），否则无法归因收益来源。
 
 ### 6.2 训练脚本开关（src/scripts/train_sscl.py）
 
 ```python
-SSCL_PROTOTYPE_ENABLED = True       # 原型锚定（主开关）
-SSCL_PROJECTION_ENABLED = True      # 投影头（本次实验变量）
-SSCL_PROJECTION_DIM = 128           # 投影空间维度
+SSCL_PROTOTYPE_ENABLED = True  # 原型锚定（主开关）
+SSCL_PROJECTION_ENABLED = True  # 投影头（本次实验变量）
+SSCL_PROJECTION_DIM = 128  # 投影空间维度
 SSCL_PROTOTYPE_INSTANCE_POS = True  # 实例正样本（本次实验变量）
-SSCL_START_EPOCH = 0                # 协同训练从第 0 epoch
+SSCL_START_EPOCH = 0  # 协同训练从第 0 epoch
 SSCL_FREEZE_STRATEGY = "conservative"
 ```
 
@@ -131,14 +131,14 @@ SSCL_FREEZE_STRATEGY = "conservative"
 
 ### 7.1 新增/改动文件
 
-| 文件 | 改动 |
-|---|---|
-| `src/rfdetr/sscl/projection.py`（新增） | `ProjectionHead` 两层 MLP |
-| `src/rfdetr/sscl/sscl_loss.py` | 构造参数 `projection_dim` / `prototype_instance_pos`；`_project()` 辅助；原型库维度随投影；`_prototype_forward` 实例正样本；零损失图连接修复 |
-| `src/rfdetr/config.py` | `sscl_projection_enabled` / `sscl_projection_dim` / `sscl_prototype_instance_pos` |
-| `src/rfdetr/training/param_groups.py` | `get_projection_head_param_dict()` 收集投影头参数为独立参数组 |
-| `src/rfdetr/training/module_model.py` | `_setup_sscl` 传参；`configure_optimizers` 在 requires_grad 过滤后追加投影头参数组 |
-| `src/scripts/train_sscl.py` / `train_sscl_all.py` | 常量开关 `SSCL_PROJECTION_ENABLED` 等 |
+| 文件                                              | 改动                                                                                                                                         |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/rfdetr/sscl/projection.py`（新增）           | `ProjectionHead` 两层 MLP                                                                                                                    |
+| `src/rfdetr/sscl/sscl_loss.py`                    | 构造参数 `projection_dim` / `prototype_instance_pos`；`_project()` 辅助；原型库维度随投影；`_prototype_forward` 实例正样本；零损失图连接修复 |
+| `src/rfdetr/config.py`                            | `sscl_projection_enabled` / `sscl_projection_dim` / `sscl_prototype_instance_pos`                                                            |
+| `src/rfdetr/training/param_groups.py`             | `get_projection_head_param_dict()` 收集投影头参数为独立参数组                                                                                |
+| `src/rfdetr/training/module_model.py`             | `_setup_sscl` 传参；`configure_optimizers` 在 requires_grad 过滤后追加投影头参数组                                                           |
+| `src/scripts/train_sscl.py` / `train_sscl_all.py` | 常量开关 `SSCL_PROJECTION_ENABLED` 等                                                                                                        |
 
 ### 7.2 两个关键工程细节
 
@@ -159,6 +159,6 @@ SSCL_FREEZE_STRATEGY = "conservative"
 
 ```bash
 uv run --no-sync pytest tests/models/test_sscl.py tests/models/test_sscl_prototype.py \
-  tests/models/test_sscl_projection.py tests/training/test_sscl_prototype_callback.py \
-  tests/training/test_module_model.py -q -o addopts=""
+    tests/models/test_sscl_projection.py tests/training/test_sscl_prototype_callback.py \
+    tests/training/test_module_model.py -q -o addopts=""
 ```

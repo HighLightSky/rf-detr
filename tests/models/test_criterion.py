@@ -318,10 +318,9 @@ class TestClassBalanceBuffers:
         assert loss.item() == pytest.approx(manual.item(), abs=1e-6)
 
     def test_counts_shorter_than_num_classes_pads_buffers(self):
-        """counts 长度 < num_classes（真实类别数 < 含背景槽位的类别维）时正常前向。
+        """Counts 长度 < num_classes（真实类别数 < 含背景槽位的类别维）时正常前向。
 
-        回归：训练时 SetCriterion(num_classes=args.num_classes+1) 而 counts 只有
-        真实类别数，P1 的 logit_bias 广播到 (B,Q,C) 会因维度不匹配报错——
+        回归：训练时 SetCriterion(num_classes=args.num_classes+1) 而 counts 只有 真实类别数，P1 的 logit_bias 广播到 (B,Q,C) 会因维度不匹配报错——
         buffer 必须补齐到 num_classes（权重补 1、bias 补 0）。
         """
         counts = torch.tensor([10.0, 40.0, 50.0])  # 3 个真实类别
