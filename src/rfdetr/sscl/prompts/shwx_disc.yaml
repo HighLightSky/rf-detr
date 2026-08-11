@@ -1,0 +1,153 @@
+# SHWX 数据集 25 个类别的 CLIP 文本提示词（判别性增强版）。
+#
+# 与 shwx.yaml 的区别：舰船四类（0-3）的提示词改为**判别性**描述——
+# 重点刻画每类在遥感俯视下的显著形态差异（甲板形状、跑道/标识线、
+# 长宽比、上层建筑），确保 CLIP 文本空间里四类船互相可区分；
+# 飞机与车辆类保持原提示词不变。
+#
+# 四类舰船的遥感判别特征（来自领域知识）：
+# - HM 航母：甲板覆盖全舰体、轮廓不规则（前尖后方），中部有舰桥，
+#   甲板上有斜角跑道与舰载机——最大的一类；
+# - LQS 两栖舰：甲板为规则矩形直通甲板（无斜角跑道），画有圆形
+#   直升机起降标识线，停靠直升机——像"简化版航母"；
+# - QHS 驱护舰：舰体细长（长宽比大），舰艏尖锐，上层建筑复杂
+#   （雷达/导弹/桅杆），比民船细长得多；
+# - MS 民船：除前三类外的所有船只，类型多样（集装箱/散货/渔船），
+#   无军事上层建筑与武器。
+#
+# 类别索引与 SHWX 数据集 data.yaml 中的 `names` 保持一致（0-24）。
+dataset: SHWX_DISC
+
+# 类别索引 → 人类可读类别名称（用于日志与矩阵验证输出）
+class_names:
+  0: HM
+  1: LQS
+  2: QHS
+  3: MS
+  4: A1_SU-35
+  5: A2_C-130
+  6: A3_C-17
+  7: A4_C-5
+  8: A5_F-16
+  9: A6_TU-160
+  10: A7_E-3
+  11: A8_B-52
+  12: A9_P-3C
+  13: A10_B-1B
+  14: A11_E-8
+  15: A12_TU-22
+  16: A13_F-15
+  17: A14_KC-135
+  18: A15_F-22
+  19: A16_FA-18
+  20: A17_TU-95
+  21: A18_KC-10
+  22: A19_SU-34
+  23: A20_SU-24
+  24: FSC
+
+# 类别索引 → 提示词列表
+class_prompts:
+  # ------------------------------------------------------------------
+  # 舰船类 (0-3)：判别性描述（遥感俯视视角）
+  # ------------------------------------------------------------------
+  0: # HM —— 航空母舰 (Aircraft Carrier)
+    # 判别特征：甲板覆盖全舰且轮廓不规则，中部偏侧舰桥，斜角跑道，
+    # 甲板停放舰载机；体型为四类船中最大
+    # 注意：提示词不带共享套话（如 overhead satellite view）——实测证明
+    # 共享词汇主导 CLIP 嵌入，会压平类别间相似度（船间 0.83→0.55）
+    - "huge flight deck covering the entire hull, angled runway painted across the deck, island bridge, carrier aircraft parked on deck"
+    - "the largest warship, full-length flat deck with a skewed landing runway stripe, jet fighters parked on deck"
+    - "giant carrier with flight deck spanning bow to stern and a diagonal runway, island superstructure on the deck"
+  1: # LQS —— 两栖攻击舰 (Amphibious Assault Ship)
+    # 判别特征：规则矩形直通甲板（无斜角跑道），圆形直升机起降标识线，
+    # 甲板停放直升机，中部舰桥
+    - "rectangular straight deck, circular helicopter landing markings, helicopters parked on deck, bridge island"
+    - "amphibious assault ship with a clean boxy rectangular flight deck, round helipad circles drawn on the deck, helicopters onboard"
+    - "helicopter carrier with a straight rectangular deck and painted landing circles, no angled runway"
+  2: # QHS —— 驱逐舰/护卫舰 (Destroyers & Frigates)
+    # 判别特征：舰体细长（长宽比大），舰艏尖锐，上层建筑复杂
+    # （雷达/导弹/桅杆），比民用船细长得多
+    - "slender narrow hull, sharp pointed bow, radar masts and missile launchers amidships, complex superstructure"
+    - "long thin destroyer with a narrow beam and pointed bow, grey weapon superstructure packed midship"
+    - "slim elongated warship, much longer than wide, dense mast and launcher equipment on deck"
+  3: # MS —— 民用船舶 (Merchant / Civilian Ships)
+    # 判别特征：排除法（非军事船），类型多样：集装箱船甲板堆满箱子、
+    # 散货船有开敞货舱、渔船小且简单；无武器与密集军事上层建筑
+    - "civilian merchant ship, cargo containers stacked on deck or open holds, no weapons, varied hull shapes"
+    - "non-military commercial vessel, container boxes or cranes on deck, simple superstructure"
+    - "general cargo ship or fishing boat of any size, no pointed warship bow, no military equipment"
+  # ------------------------------------------------------------------
+  # 军用飞机类 (4-23)：与原 shwx.yaml 一致
+  # ------------------------------------------------------------------
+  4: # A1_SU-35 —— 苏-35 战斗机 (Sukhoi Su-35, NATO: Flanker-E)
+    - "a Sukhoi Su-35 fighter jet with twin engines, twin tail fins and large swept-back delta wings, overhead satellite view"
+    - "a Russian Su-35 Flanker fighter with a single seat canopy and side-by-side twin engine exhausts, top-down aerial image"
+  5: # A2_C-130 —— C-130 运输机 (Lockheed C-130 Hercules)
+    - "a Lockheed C-130 Hercules transport aircraft with four propeller engines and high-mounted wings, overhead satellite view"
+    - "a four turboprop military cargo plane with straight high wing and fuselage-mounted landing gear pods, top-down aerial image"
+    - "a C-130 tactical transport with a boxy fuselage and four propeller nacelles, remote sensing view"
+  6: # A3_C-17 —— C-17 运输机 (Boeing C-17 Globemaster III)
+    - "a Boeing C-17 Globemaster III transport aircraft with four jet engines, high wing and T-tail, overhead satellite view"
+    - "a large military cargo jet with a blunt fuselage and four underwing engine pods, top-down aerial image"
+    - "a C-17 strategic transport with swept high wing and T-shaped tail, larger than C-130, remote sensing view"
+  7: # A4_C-5 —— C-5 运输机 (Lockheed C-5 Galaxy)
+    - "a Lockheed C-5 Galaxy strategic transport aircraft with four jet engines and a huge high wing, the largest US military cargo plane, overhead satellite view"
+    - "a very large military heavy-lift transport with four engines and a massive upswept fuselage, top-down aerial image"
+  8: # A5_F-16 —— F-16 战斗机 (General Dynamics F-16 Fighting Falcon)
+    - "a General Dynamics F-16 Fighting Falcon fighter jet with a single engine, single tail fin and a side-mounted air intake, overhead satellite view"
+    - "a single-engine F-16 fighter with a bubble canopy and small delta wing with leading edge extensions, top-down aerial image"
+  9: # A6_TU-160 —— 图-160 轰炸机 (Tupolev Tu-160, NATO: Blackjack)
+    - "a Tupolev Tu-160 Blackjack strategic bomber with variable-sweep wings and twin tail fins, the largest supersonic bomber, overhead satellite view"
+    - "a huge white Russian strategic bomber with swept-back variable geometry wings and four paired engines, top-down aerial image"
+  10: # A7_E-3 —— E-3 预警机 (Boeing E-3 Sentry AWACS)
+    - "a Boeing E-3 Sentry AWACS early warning aircraft with a large circular rotodome radar dish on top of the fuselage, overhead satellite view"
+    - "an E-3 airborne warning and control aircraft converted from a Boeing 707 with a mushroom-shaped radar dome above the fuselage, top-down aerial image"
+  11: # A8_B-52 —— B-52 轰炸机 (Boeing B-52 Stratofortress)
+    - "a Boeing B-52 Stratofortress long-range bomber with eight engines in four twin pods under high wings and a long slender fuselage, overhead satellite view"
+    - "a large strategic bomber with eight jet engines grouped in pairs and swept wings, top-down aerial image"
+  12: # A9_P-3C —— P-3C 反潜巡逻机 (Lockheed P-3C Orion)
+    - "a Lockheed P-3C Orion anti-submarine patrol aircraft with four turboprop engines and a magnetic anomaly detector tail stinger, overhead satellite view"
+    - "a four propeller maritime patrol aircraft with a long tail boom and weapons bay, top-down aerial image"
+  13: # A10_B-1B —— B-1B 轰炸机 (Rockwell B-1B Lancer)
+    - "a Rockwell B-1B Lancer strategic bomber with variable-sweep wings and a blended wing-body design, overhead satellite view"
+    - "a swing-wing supersonic bomber with four small engines and a tapering nose, top-down aerial image"
+  14: # A11_E-8 —— E-8 战场监视机 (Northrop Grumman E-8 Joint STARS)
+    - "a Northrop Grumman E-8 Joint STARS battlefield surveillance aircraft converted from a Boeing 707 with a canoe-shaped radome under the forward fuselage, overhead satellite view"
+    - "an E-8 ground surveillance aircraft with a long white ventral radar fairing and four engines under swept wings, top-down aerial image"
+  15: # A12_TU-22 —— 图-22M 轰炸机 (Tupolev Tu-22M, NATO: Backfire)
+    - "a Tupolev Tu-22M Backfire bomber with variable-sweep wings and two large engine nacelles, overhead satellite view"
+    - "a Russian swing-wing supersonic bomber with twin engines mounted in the fuselage and swept back wings, top-down aerial image"
+  16: # A13_F-15 —— F-15 战斗机 (McDonnell Douglas F-15 Eagle)
+    - "a McDonnell Douglas F-15 Eagle air superiority fighter with twin engines and twin tail fins, overhead satellite view"
+    - "a twin-engine F-15 fighter with a flat wide fuselage and two canted vertical tails, top-down aerial image"
+  17: # A14_KC-135 —— KC-135 加油机 (Boeing KC-135 Stratotanker)
+    - "a Boeing KC-135 Stratotanker aerial refueling aircraft with four engines under swept wings and a boom, overhead satellite view"
+    - "a narrow-bodied tanker aircraft converted from a Boeing 707 with four underwing jet engines, top-down aerial image"
+  18: # A15_F-22 —— F-22 战斗机 (Lockheed Martin F-22 Raptor)
+    - "a Lockheed Martin F-22 Raptor stealth fighter with diamond-shaped wings and canted twin tails, overhead satellite view"
+    - "a stealth fifth-generation fighter with a flat angular airframe and twin engines, top-down aerial image"
+  19: # A16_FA-18 —— F/A-18 战斗机 (Boeing F/A-18 Super Hornet)
+    - "a Boeing F/A-18 Super Hornet carrier-based fighter with twin engines and twin tail fins, overhead satellite view"
+    - "a twin-engine carrier fighter with a blunt nose and large wing leading edge extensions, top-down aerial image"
+  20: # A17_TU-95 —— 图-95 轰炸机 (Tupolev Tu-95, NATO: Bear)
+    - "a Tupolev Tu-95 Bear strategic bomber with four huge contra-rotating propeller engines and swept wings, overhead satellite view"
+    - "a large Russian turboprop bomber with eight-bladed contra-rotating propellers on four nacelles, top-down aerial image"
+  21: # A18_KC-10 —— KC-10 加油机 (McDonnell Douglas KC-10 Extender)
+    - "a McDonnell Douglas KC-10 Extender aerial refueling aircraft converted from a DC-10 with three engines and a refueling boom, overhead satellite view"
+    - "a wide-body tanker aircraft with two engines under the wings and one at the tail base, top-down aerial image"
+  22: # A19_SU-34 —— 苏-34 战斗机 (Sukhoi Su-34, NATO: Fullback)
+    - "a Sukhoi Su-34 Fullback fighter-bomber with a flattened duckbill nose, twin engines and canards, overhead satellite view"
+    - "a Russian strike aircraft with side-by-side cockpit seats and a wide flattened forward fuselage, top-down aerial image"
+  23: # A20_SU-24 —— 苏-24 战斗轰炸机 (Sukhoi Su-24, NATO: Fencer)
+    - "a Sukhoi Su-24 Fencer fighter-bomber with variable-sweep wings and twin tail fins, overhead satellite view"
+    - "a Russian swing-wing attack aircraft with a long pointed nose and twin engines, top-down aerial image"
+  # ------------------------------------------------------------------
+  # 车辆类 (24)：与原 shwx.yaml 一致
+  # ------------------------------------------------------------------
+  24: # FSC —— 导弹发射车 (Missile Launch Vehicle / Transporter-Erector-Launcher, TEL)
+    # 注：类别有严格限制，仅指导弹发射车（带发射筒/发射架的军用车辆），非普通军用车辆。
+    # 具体导弹型号未知，使用通用 TEL 描述（轮式底盘 + 圆柱形发射筒/箱式发射架）。
+    - "a missile launch vehicle with cylindrical launch tubes mounted on the rear chassis, overhead satellite view"
+    - "a transporter-erector-launcher military truck with launch canisters on its flatbed, top-down aerial image"
+    - "a wheeled missile transporter erector launcher vehicle with boxy launcher racks, remote sensing image"
