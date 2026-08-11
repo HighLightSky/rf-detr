@@ -20,7 +20,7 @@ checkpoint 上完成"推理一次 → 离线阈值搜索"：
     python src/scripts/calibrate_thresholds.py <checkpoint.pth> [--bias-json class_counts.json] [--bias-k 0.5] [--output-dir <实验目录>]
 
 输出：
-- calibrated_thresholds.json：{类别id: 阈值}（可直接贴入 test.py 的 CLASS_CONF_THRESHOLDS）
+- calibrated_thresholds.json：{类别id: 阈值}（可直接贴入 test yaml 的 class_conf_thresholds）
 - calibration_report.txt：逐类/大类/总指标报告
 
 说明：评估口径与 test.py 完全一致（置信度降序贪心一对一匹配、
@@ -41,14 +41,17 @@ if str(SRC_DIR) not in sys.path:
 if str(SRC_DIR / "scripts") not in sys.path:
     sys.path.insert(0, str(SRC_DIR / "scripts"))
 
-import test  # noqa: E402
-
+from scripts import eval_lib  # noqa: E402
 from val.competition_metrics import (  # noqa: E402
     BoxRecord,
     EvalConfig,
     evaluate_competition_metrics,
     load_yolo_labels,
 )
+
+# SHWX 数据集配置与推理参数（评估口径与 test.py 模板一致）
+_DS = eval_lib.build_dataset_cfg("shwx")
+_INF = eval_lib.InferenceCfg()
 
 # ── 搜索配置 ──────────────────────────────────────────────────────────
 # 推理收集地板：所有 score >= 该值的检测都参与离线阈值搜索（须低于网格下限）
@@ -87,8 +90,8 @@ def _eval_metrics(
         {类别名: EvalResult} 字典（供详细报告）。
     """
     per_class_config = EvalConfig(
-        class_to_group=test.PER_CLASS_TO_GROUP,
-        group_iou_thresholds=test.PER_CLASS_IOU_THRESHOLDS,
+        class_to_group=_DS.per_class_to_group,
+        group_iou_thresholds=_DS.per_class_iou_thresholds,
         default_iou_threshold=0.50,
         class_aware=True,
     )
@@ -98,8 +101,8 @@ def _eval_metrics(
         if pred.score is not None and pred.score >= thresholds.get(pred.class_id, AIRCRAFT_THR)
     ]
     per_class_results = evaluate_competition_metrics(gt_records, kept, per_class_config)["groups"]
-    group_macro = test.compute_group_macro_averages(per_class_results, cfg["class_to_group"], cfg["class_names"])
-    total_macro = test.compute_total_metrics(group_macro)
+    group_macro = eval_lib.compute_group_macro_averages(per_class_results, cfg["class_to_group"], cfg["class_names"])
+    total_macro = eval_lib.compute_total_metrics(group_macro)
     return total_macro, per_class_results
 
 
@@ -222,7 +225,7 @@ def _write_report(
     cfg: dict,
 ) -> None:
     """写出逐类阈值与逐类指标报告文本。"""
-    lines = ["逐类阈值重标定报告", "=" * 60, "最优逐类阈值（可贴入 test.py CLASS_CONF_THRESHOLDS）:"]
+    lines = ["逐类阈值重标定报告", "=" * 60, "最优逐类阈值（可贴入 test yaml 的 class_conf_thresholds）:"]
     lines.append("CLASS_CONF_THRESHOLDS = " + json.dumps({str(k): v for k, v in sorted(thresholds.items())}))
     lines.append("=" * 60)
     lines.append("逐类 TP/FP/FN/Recall/FDR:")
@@ -250,44 +253,40 @@ def main() -> None:
     output_dir = Path(args.output_dir) if args.output_dir else checkpoint_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = test.DATASET_CONFIGS["shwx"]
+    cfg = eval_lib.DATASET_CONFIGS["shwx"]
     data_dir = Path(cfg["data_dir"])
-    test_image_paths = test.read_test_image_paths(data_dir / cfg["image_dir"])
-    image_size_map = test.build_image_size_map(test_image_paths)
+    test_image_paths = eval_lib.read_test_image_paths(data_dir / cfg["image_dir"])
+    image_size_map = eval_lib.build_image_size_map(test_image_paths)
     gt_records = load_yolo_labels(data_dir / cfg["label_dir"], image_size_map)
 
     print(f"加载模型: {checkpoint_path}")
-    model = test.RFDETR.from_checkpoint(str(checkpoint_path))
+    model = eval_lib.RFDETR.from_checkpoint(str(checkpoint_path))
 
-    old_bias_path = test.LOGIT_ADJUSTMENT_BIAS_PATH
-    old_bias_k = test.LOGIT_ADJUSTMENT_BIAS_K
-    old_bias_tau = test.LOGIT_ADJUSTMENT_BIAS_TAU
-    old_bias_clip = test.LOGIT_ADJUSTMENT_BIAS_CLIP
+    # 可选 LA 推理侧 bias（经 LaBiasCfg 显式传入，替代旧的模块级常量改写模式）
+    la_bias_cfg: eval_lib.LaBiasCfg | None = None
     if args.bias_json:
         counts_json = Path(args.bias_json)
         if not counts_json.exists():
             raise FileNotFoundError(f"bias-json 不存在: {counts_json}")
-        test.LOGIT_ADJUSTMENT_BIAS_PATH = str(counts_json)
-        test.LOGIT_ADJUSTMENT_BIAS_K = args.bias_k
-        test.LOGIT_ADJUSTMENT_BIAS_TAU = BIAS_TAU
-        test.LOGIT_ADJUSTMENT_BIAS_CLIP = BIAS_CLIP
+        la_bias_cfg = eval_lib.LaBiasCfg(
+            counts_path=str(counts_json),
+            k=args.bias_k,
+            tau=BIAS_TAU,
+            clip=BIAS_CLIP,
+        )
 
     # ── 推理一次：低地板阈值收集全量检测 ─────────────────────────────
     print(f"推理测试集（{len(test_image_paths)} 张，收集地板 {CONF_FLOOR}）...")
-    try:
-        pred_records, throughput, gpu_util, timed_images = test.predict_batched_to_records(
-            model=model,
-            image_paths=test_image_paths,
-            device=test.DEVICE,
-            conf_threshold=CONF_FLOOR,
-            batch_size=test.BATCH_SIZE,
-            num_workers=test.NUM_WORKERS,
-        )
-    finally:
-        test.LOGIT_ADJUSTMENT_BIAS_PATH = old_bias_path
-        test.LOGIT_ADJUSTMENT_BIAS_K = old_bias_k
-        test.LOGIT_ADJUSTMENT_BIAS_TAU = old_bias_tau
-        test.LOGIT_ADJUSTMENT_BIAS_CLIP = old_bias_clip
+    pred_records, throughput, gpu_util, timed_images = eval_lib.predict_batched_to_records(
+        model=model,
+        image_paths=test_image_paths,
+        device=_INF.device,
+        conf_threshold=CONF_FLOOR,
+        batch_size=_INF.batch_size,
+        num_workers=_INF.num_workers,
+        la_bias=la_bias_cfg,
+        num_classes=_DS.num_classes,
+    )
     print(f"推理吞吐: {throughput:.1f} img/s | 收集检测框 {len(pred_records)} 个")
 
     # ── 坐标上升搜索逐类阈值 ─────────────────────────────────────────

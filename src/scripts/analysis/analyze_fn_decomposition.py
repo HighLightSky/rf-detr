@@ -35,16 +35,18 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 if str(SRC_DIR / "scripts") not in sys.path:
     sys.path.insert(0, str(SRC_DIR / "scripts"))
 
-import test  # noqa: E402
-
 from rfdetr import RFDETRMedium  # noqa: E402
+from scripts import eval_lib  # noqa: E402
+
+# SHWX 数据集配置（类别名/分组/阈值与 test 模板一致）
+_DS = eval_lib.build_dataset_cfg("shwx")
 from val.competition_metrics import (  # noqa: E402
     BoxRecord,
     EvalConfig,
@@ -122,7 +124,7 @@ def match_and_find_fn(
                 if p.class_id == gt.class_id:
                     same_iou = max(same_iou, iou)
                 elif iou > cross_iou:
-                    cross_iou, cross_cls = iou, test.CLASS_NAMES[p.class_id]
+                    cross_iou, cross_cls = iou, _DS.class_names[p.class_id]
             if cross_iou >= 0.5:
                 fn_findings.append((gt, "检测到但分类错", cross_cls, cross_iou))
             elif same_iou >= 0.5:
@@ -142,10 +144,10 @@ def main() -> None:
         print("用法: python src/scripts/analyze_fn_decomposition.py [checkpoint.pth] [yolo_preds_dir]")
         sys.exit(1)
 
-    cfg = test.DATASET_CONFIGS["shwx"]
+    cfg = eval_lib.DATASET_CONFIGS["shwx"]
     data_dir = Path(cfg["data_dir"])
-    test_image_paths = test.read_test_image_paths(data_dir / cfg["image_dir"])
-    image_size_map = test.build_image_size_map(test_image_paths)
+    test_image_paths = eval_lib.read_test_image_paths(data_dir / cfg["image_dir"])
+    image_size_map = eval_lib.build_image_size_map(test_image_paths)
     gt_records = load_yolo_labels(data_dir / cfg["label_dir"], image_size_map)
 
     class_to_group = {int(k): v for k, v in cfg["class_to_group"].items()}
@@ -163,12 +165,12 @@ def main() -> None:
     else:
         if checkpoint_path is None or not checkpoint_path.exists():
             raise FileNotFoundError(f"checkpoint 不存在: {checkpoint_path}")
-        device = test.resolve_device("cuda:0")
+        device = eval_lib.resolve_device("cuda:0")
         print(f"[i] 加载 {checkpoint_path} 并推理 ...")
         model = RFDETRMedium.from_checkpoint(str(checkpoint_path))
         model.model.model = model.model.model.to(device)
         model.model.model.eval()
-        pred_records, _, _, _ = test.predict_batched_to_records(
+        pred_records, _, _, _ = eval_lib.predict_batched_to_records(
             model,
             test_image_paths,
             device,
@@ -177,7 +179,7 @@ def main() -> None:
             num_workers=12,
         )
         # 顺带输出 YOLO 格式预测（checkpoint 同目录 yolo_preds/），供后续统计复用
-        test.save_yolo_predictions(pred_records, checkpoint_path.parent / "yolo_preds", image_size_map)
+        eval_lib.save_yolo_predictions(pred_records, checkpoint_path.parent / "yolo_preds", image_size_map)
 
     eval_results = evaluate_competition_metrics(gt_records, pred_records, config)
     all_result = eval_results["all"]
@@ -209,9 +211,9 @@ def main() -> None:
 
     # 漏检最多的类别（top 8）
     print("\n===== 漏检最多的类别（Top 8）=====")
-    by_class = Counter(test.CLASS_NAMES[gt.class_id] for gt, _, _, _ in findings)
+    by_class = Counter(_DS.class_names[gt.class_id] for gt, _, _, _ in findings)
     for cls_name, count in by_class.most_common(8):
-        n_total = sum(1 for g in gt_records if test.CLASS_NAMES[g.class_id] == cls_name)
+        n_total = sum(1 for g in gt_records if _DS.class_names[g.class_id] == cls_name)
         print(f"  {cls_name:<10s} FN={count:4d}  (该类 GT 总数 {n_total})")
 
     # 分类错的去向（混淆信息）

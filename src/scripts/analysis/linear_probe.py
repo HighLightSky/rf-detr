@@ -46,18 +46,21 @@ import torchvision.transforms.functional as TF  # noqa: N812
 from torch import Tensor, nn
 from torchvision.ops import roi_align
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 if str(SRC_DIR / "scripts") not in sys.path:
     sys.path.insert(0, str(SRC_DIR / "scripts"))
 
-import test  # noqa: E402
-
 from rfdetr import RFDETR  # noqa: E402
 from rfdetr.utilities.tensors import nested_tensor_from_tensor_list  # noqa: E402
+from scripts import eval_lib  # noqa: E402
 from val.competition_metrics import BoxRecord, compute_iou, load_yolo_labels  # noqa: E402
+
+# SHWX 数据集配置与推理参数（与 test 模板一致）
+_DS = eval_lib.build_dataset_cfg("shwx")
+_INF = eval_lib.InferenceCfg()
 
 # ============================================================================
 # 实验配置
@@ -96,12 +99,12 @@ def _load_train_images_and_gt() -> tuple[list[Path], list[BoxRecord]]:
     Returns:
         ``(image_paths, gt_records)``：图像路径列表与真实框记录列表。
     """
-    image_dir = test.DATA_DIR / "images" / "train"
+    image_dir = _DS.data_dir / "images" / "train"
     image_paths = sorted(image_dir.glob("*.jpg"))
     if not image_paths:
         image_paths = sorted(image_dir.glob("*.png"))
-    image_size_map = test.build_image_size_map(image_paths)
-    gt_records = load_yolo_labels(test.DATA_DIR / "labels" / "train", image_size_map)
+    image_size_map = eval_lib.build_image_size_map(image_paths)
+    gt_records = load_yolo_labels(_DS.data_dir / "labels" / "train", image_size_map)
     return image_paths, gt_records
 
 
@@ -366,9 +369,9 @@ def run_cv_probe(x: np.ndarray, y: np.ndarray, class_ids: list[int], name: str) 
     for c in range(len(class_ids)):
         n_counts[c] = int((y_comp == c).sum())
     return {
-        "per_class_acc": {test.CLASS_NAMES[class_ids[c]]: float(np.mean(v)) for c, v in per_acc.items()},
-        "per_class_std": {test.CLASS_NAMES[class_ids[c]]: float(np.std(v)) for c, v in per_acc.items()},
-        "n": {test.CLASS_NAMES[class_ids[c]]: n_counts[c] for c in range(len(class_ids))},
+        "per_class_acc": {_DS.class_names[class_ids[c]]: float(np.mean(v)) for c, v in per_acc.items()},
+        "per_class_std": {_DS.class_names[class_ids[c]]: float(np.std(v)) for c, v in per_acc.items()},
+        "n": {_DS.class_names[class_ids[c]]: n_counts[c] for c in range(len(class_ids))},
     }
 
 
@@ -422,7 +425,7 @@ def run_cross_probe(
         for c in range(len(class_ids)):
             mask = y_te_c == c
             if mask.sum() > 0:
-                out[test.CLASS_NAMES[class_ids[c]]] = float((preds[mask] == c).float().mean().item())
+                out[_DS.class_names[class_ids[c]]] = float((preds[mask] == c).float().mean().item())
         return out
 
     results: dict[str, dict[str, float]] = {"full": _eval(x_tr, y_tr_c)}
@@ -479,7 +482,7 @@ def run_fewshot_probe(x: np.ndarray, y: np.ndarray, class_ids: list[int], name: 
             acc = train_probe(x[train_idx], y_comp[train_idx], x[va_idx], y_comp[va_idx], len(class_ids), seed)
             for c, a in acc.items():
                 acc_by_class[c].append(a)
-        out[str(k)] = {test.CLASS_NAMES[class_ids[c]]: float(np.mean(v)) for c, v in acc_by_class.items()}
+        out[str(k)] = {_DS.class_names[class_ids[c]]: float(np.mean(v)) for c, v in acc_by_class.items()}
     return {"K": out}
 
 
@@ -498,7 +501,7 @@ def main() -> None:
     out_dir = OUTPUT_ROOT / exp_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    device = test.resolve_device(test.DEVICE)
+    device = eval_lib.resolve_device(_INF.device)
     print(f"[i] 加载模型 {checkpoint} ...")
     model = RFDETR.from_checkpoint(str(checkpoint))
     model_lw = model.model.model.to(device)
@@ -507,7 +510,7 @@ def main() -> None:
     print(f"[i] 模型: {type(model).__name__} | 分辨率 {resolution}")
 
     image_paths, gt_records = _load_train_images_and_gt()
-    size_map = test.build_image_size_map(image_paths)
+    size_map = eval_lib.build_image_size_map(image_paths)
     scaled = _scale_boxes(gt_records, resolution, size_map)
     # {image_id: [(cls_id, [x1,y1,x2,y2]), ...]}，只保留实验目标类
     target_ids = set(SHIP_CLASS_IDS + CONTROL_CLASS_IDS)
@@ -576,7 +579,7 @@ def main() -> None:
     )
     print(f"[i] matched query 特征: {xq.shape}（框匹配，不看类别）")
     for cid, st in model_acc.items():
-        print(f"[i]   模型自身分类准确率 {test.CLASS_NAMES[cid]}: {st['acc']:.3f} (n={int(st['n'])})")
+        print(f"[i]   模型自身分类准确率 {_DS.class_names[cid]}: {st['acc']:.3f} (n={int(st['n'])})")
     q_res = run_cv_probe(xq, yq, SHIP_CLASS_IDS, "query-舰船")
     q_fs = run_fewshot_probe(xq, yq, SHIP_CLASS_IDS, "query-舰船")
     report["query_cv"] = q_res
@@ -590,9 +593,9 @@ def main() -> None:
 
     # 4) 跨域探针：训练集特征训 → 测试集特征测（分类头泛化上限）
     print("\n===== 跨域探针（训练特征 → 测试特征，舰船 4 类）=====")
-    test_image_paths = test.read_test_image_paths(test.TEST_IMAGE_DIR)
-    test_size_map = test.build_image_size_map(test_image_paths)
-    test_gt = load_yolo_labels(test.LABEL_DIR, test_size_map)
+    test_image_paths = eval_lib.read_test_image_paths(_DS.test_image_dir)
+    test_size_map = eval_lib.build_image_size_map(test_image_paths)
+    test_gt = load_yolo_labels(_DS.label_dir, test_size_map)
     test_scaled = _scale_boxes(test_gt, resolution, test_size_map)
     gt_map_test = _build_gt_map(test_gt, test_scaled, ship_target_ids)
     img_paths_test = [p for p in test_image_paths if p.stem in gt_map_test]

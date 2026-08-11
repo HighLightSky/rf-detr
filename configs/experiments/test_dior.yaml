@@ -1,0 +1,14 @@
+# DIOR 数据集测试评估配置（Roboflow COCO 格式，单组 "all"，IoU=0.50）
+# 用法: python src/scripts/test.py -c configs/experiments/test_dior.yaml
+test:
+  dataset: dior                        # eval_lib.DATASET_CONFIGS 内置名
+  checkpoint: output/0804-DIOR-rfdetr_medium_SSCL/checkpoint_best_regular.pth
+  conf_threshold: 0.25
+  class_conf_thresholds: {}
+  device: cuda:0
+  batch_size: 32
+  num_workers: 12
+  use_fp16: false
+  # DIOR 无分类损失均衡化实验，la_bias 关闭
+  save_fp_fn: true
+  save_yolo_preds: false

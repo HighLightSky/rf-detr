@@ -43,7 +43,6 @@ for _p in (str(SRC_DIR), str(SCRIPTS_DIR), str(PROJECT_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import test as _test  # noqa: E402  (复用 SHWX 配置与推理预处理)
 import torch  # noqa: E402
 import torchvision.transforms.functional as F  # noqa: E402, N812 -- 与 test.py 一致（resize/normalize）
 from torch.utils.data import DataLoader  # noqa: E402
@@ -52,6 +51,7 @@ from rfdetr import RFDETRMedium  # noqa: E402
 from rfdetr.sscl import SSCLLoss, load_semantic_matrix, normalize_semantic_matrix  # noqa: E402
 from rfdetr.sscl.hard_neg_selection import select_hard_negatives_for_image  # noqa: E402
 from rfdetr.utilities.box_ops import box_cxcywh_to_xyxy, box_iou  # noqa: E402
+from scripts import eval_lib as _lib  # noqa: E402  (复用 SHWX 配置与推理预处理)
 from val.competition_metrics import load_yolo_labels  # noqa: E402
 
 # ── 0807 基线实验输出目录（双源 checkpoint 加载）──
@@ -59,10 +59,12 @@ RUN_DIR = PROJECT_ROOT / "output/0807-SHWX-SSCL-Proj-原型+实例正样本"
 DET_CHECKPOINT = RUN_DIR / "checkpoint_best_total.pth"
 LIGHTNING_CKPT = RUN_DIR / "last.ckpt"
 
-# 测试集（与 test.py 一致）
-TEST_IMAGE_DIR = _test.TEST_IMAGE_DIR
-LABEL_DIR = _test.LABEL_DIR
-DEVICE = _test.DEVICE
+# 测试集（与 test 模板一致，来自 eval_lib 的 SHWX 配置）
+_DS = _lib.build_dataset_cfg("shwx")
+_INF = _lib.InferenceCfg()
+TEST_IMAGE_DIR = _DS.test_image_dir
+LABEL_DIR = _DS.label_dir
+DEVICE = _INF.device
 BATCH_SIZE = 8  # 诊断脚本从简：主进程解码，batch 小一点避免 CPU 瓶颈
 RESOLUTION = 640
 
@@ -156,7 +158,7 @@ def main() -> None:
     """运行难例硬度前置验证并输出判据结论。"""
     print(f"难例硬度前置验证 | 检测权重: {DET_CHECKPOINT}")
     print(f"SSCL 投影头/原型库: {LIGHTNING_CKPT}")
-    print(f"测试集: {TEST_IMAGE_DIR}（{len(_test.read_test_image_paths(TEST_IMAGE_DIR))} 张）")
+    print(f"测试集: {TEST_IMAGE_DIR}（{len(_lib.read_test_image_paths(TEST_IMAGE_DIR))} 张）")
 
     # 1. 加载检测模型（eval 模式，单组 query；与 test.py 相同的预处理）
     model = RFDETRMedium.from_checkpoint(str(DET_CHECKPOINT))
@@ -169,8 +171,8 @@ def main() -> None:
     loss_fn = loss_fn.to(DEVICE)
 
     # 3. GT 记录 → 按图像分组（像素 xyxy → 归一化 cxcywh）
-    image_paths = _test.read_test_image_paths(TEST_IMAGE_DIR)
-    image_size_map = _test.build_image_size_map(image_paths)
+    image_paths = _lib.read_test_image_paths(TEST_IMAGE_DIR)
+    image_size_map = _lib.build_image_size_map(image_paths)
     gt_records = load_yolo_labels(LABEL_DIR, image_size_map)
     gt_by_image: dict[str, list[torch.Tensor]] = {}
     for rec in gt_records:
@@ -182,11 +184,11 @@ def main() -> None:
 
     # 4. 逐 batch 推理 + 难例选择 + 特征收集
     loader = DataLoader(
-        _test._InferenceDataset(image_paths),
+        _lib._InferenceDataset(image_paths),
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=0,
-        collate_fn=_test._inference_collate,
+        collate_fn=_lib._inference_collate,
     )
     hn_parts: list[torch.Tensor] = []
     random_parts: list[torch.Tensor] = []
@@ -244,7 +246,7 @@ def main() -> None:
     print()
 
     del raw_model
-    _test.release_cuda_cache(DEVICE)
+    _lib.release_cuda_cache(DEVICE)
 
     # 5. 硬度统计与判据结论
     if not hn_parts:

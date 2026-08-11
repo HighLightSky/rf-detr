@@ -1,0 +1,24 @@
+# SHWX 数据集测试评估配置（比赛口径：ship/aircraft IoU=0.50，vehicle=0.35）
+# 用法: python src/scripts/test.py -c configs/experiments/test_shwx.yaml
+test:
+  dataset: shwx                        # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
+  checkpoint: output/0811-SHWX-SSCL-仅验证QNorm-Obj物体性门控/checkpoint_best_total.pth
+  # 相对项目根路径；省略则用数据集配置的默认（exp_output_dir / checkpoint_file）
+  conf_threshold: 0.25                 # 全局置信度阈值
+  class_conf_thresholds: {}            # 逐类阈值 {类别id: 阈值}；可整段贴入 calibrate_thresholds 产物
+  device: cuda:0                       # 无 CUDA 时自动回退 CPU
+  batch_size: 32                       # GPU 单次前向图像数
+  num_workers: 12                      # CPU 预取 worker 数
+  prefetch_factor: 3
+  gpu_util_sample_interval: 0.5
+  use_fp16: false
+  la_bias:                             # 推理侧 Logit Adjustment；省略/置 null = 关闭
+    counts_path: output/0811-SHWX-SSCL-仅验证QNorm-Obj物体性门控/class_counts.json
+    k: 1.0                             # 推理侧扣减系数（须与训练侧 P1 一致）
+    tau: 0.1                           # 与训练侧 logit_adjustment_tau 一致
+    clip: 1.0                          # 与训练侧 logit_adjustment_bias_clip 一致
+    beta: 0.25                         # 与训练侧 class_balance_beta 一致
+    max_weight: 3.0                    # 与训练侧 class_balance_max_weight 一致
+    min_count: 10
+  save_fp_fn: true                     # 保存 FP/FN 可视化
+  save_yolo_preds: false               # 输出 YOLO 格式预测框（供归因/探针脚本复用）

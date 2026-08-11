@@ -30,9 +30,8 @@ for _p in (str(SRC_DIR), str(SCRIPTS_DIR), str(PROJECT_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import test as _test  # noqa: E402
-
 from rfdetr import RFDETRMedium  # noqa: E402
+from scripts import eval_lib as _lib  # noqa: E402  (复用统一评估库：推理管线与 SHWX 配置)
 from val.competition_metrics import EvalConfig, evaluate_competition_metrics, load_yolo_labels  # noqa: E402
 
 # ── 三臂：基线（复用 0807 checkpoint）+ 难例 k=3 / k=5 ──
@@ -55,20 +54,24 @@ RUNS = {
 }
 
 OUTPUT_DIR = PROJECT_ROOT / "output/0810-SHWX-SSCL-HardNeg-compare"
-CONF_THRESHOLD = _test.CONF_THRESHOLD
-BATCH_SIZE = _test.BATCH_SIZE
-NUM_WORKERS = _test.NUM_WORKERS
-DEVICE = _test.DEVICE
+
+# SHWX 数据集配置与推理参数（eval_lib，与 test 模板一致）
+_DS = _lib.build_dataset_cfg("shwx")
+_INF = _lib.InferenceCfg()
+CONF_THRESHOLD = _INF.conf_threshold
+BATCH_SIZE = _INF.batch_size
+NUM_WORKERS = _INF.num_workers
+DEVICE = _INF.device
 NOVEL_CLASSES = [0, 1, 2, 3]
 FSC_CLASS = 24
 
-TEST_IMAGE_DIR = _test.TEST_IMAGE_DIR
-LABEL_DIR = _test.LABEL_DIR
-CLASS_NAMES: dict[int, str] = _test.CLASS_NAMES
-CLASS_TO_GROUP = _test.CLASS_TO_GROUP
-GROUP_IOU_THRESHOLDS = _test.GROUP_IOU_THRESHOLDS
-PER_CLASS_TO_GROUP = _test.PER_CLASS_TO_GROUP
-PER_CLASS_IOU_THRESHOLDS = _test.PER_CLASS_IOU_THRESHOLDS
+TEST_IMAGE_DIR = _DS.test_image_dir
+LABEL_DIR = _DS.label_dir
+CLASS_NAMES: dict[int, str] = _DS.class_names
+CLASS_TO_GROUP = _DS.class_to_group
+GROUP_IOU_THRESHOLDS = _DS.group_iou_thresholds
+PER_CLASS_TO_GROUP = _DS.per_class_to_group
+PER_CLASS_IOU_THRESHOLDS = _DS.per_class_iou_thresholds
 
 
 def _precision_recall_f1(result) -> tuple[float, float, float]:
@@ -95,16 +98,16 @@ def evaluate_run(name: str) -> dict[str, float]:
         if not checkpoint.exists():
             raise FileNotFoundError(f"难例实验缺少 checkpoint: {spec['output_dir']}")
 
-    image_paths = _test.read_test_image_paths(TEST_IMAGE_DIR)
-    image_size_map = _test.build_image_size_map(image_paths)
+    image_paths = _lib.read_test_image_paths(TEST_IMAGE_DIR)
+    image_size_map = _lib.build_image_size_map(image_paths)
     gt_records = load_yolo_labels(LABEL_DIR, image_size_map)
 
     model = RFDETRMedium.from_checkpoint(str(checkpoint))
-    pred_records, _, _, _ = _test.predict_batched_to_records(
+    pred_records, _, _, _ = _lib.predict_batched_to_records(
         model, image_paths, DEVICE, conf_threshold=CONF_THRESHOLD, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS
     )
     del model
-    _test.release_cuda_cache(DEVICE)
+    _lib.release_cuda_cache(DEVICE)
 
     config = EvalConfig(
         class_to_group=CLASS_TO_GROUP,
@@ -140,7 +143,7 @@ def main() -> None:
     """评估三臂并输出 Markdown + CSV 对照表。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"评估目录: {OUTPUT_DIR}")
-    print(f"测试集: {TEST_IMAGE_DIR}（{len(_test.read_test_image_paths(TEST_IMAGE_DIR))} 张）")
+    print(f"测试集: {TEST_IMAGE_DIR}（{len(_lib.read_test_image_paths(TEST_IMAGE_DIR))} 张）")
 
     results: dict[str, dict[str, float]] = {}
     for name in RUNS:

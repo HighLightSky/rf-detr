@@ -44,18 +44,21 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import nn
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 if str(SRC_DIR / "scripts") not in sys.path:
     sys.path.insert(0, str(SRC_DIR / "scripts"))
 
-import linear_probe  # noqa: E402
-import test  # noqa: E402
-
 from rfdetr import RFDETR  # noqa: E402
 from rfdetr.sscl.sscl_loss import SSCLLoss  # noqa: E402
+from scripts import eval_lib  # noqa: E402
+from scripts.analysis import linear_probe  # noqa: E402
+
+# SHWX 数据集配置与推理参数（与 test 模板一致）
+_DS = eval_lib.build_dataset_cfg("shwx")
+_INF = eval_lib.InferenceCfg()
 
 OUTPUT_ROOT = PROJECT_ROOT / "output" / "prototype_probe"
 
@@ -140,7 +143,7 @@ def evaluate_prototype_classifier(
     for i in range(len(class_ids)):
         mask = y_comp == i
         if mask.sum() > 0:
-            acc[test.CLASS_NAMES[class_ids[i]]] = float((pred[mask] == i).mean())
+            acc[_DS.class_names[class_ids[i]]] = float((pred[mask] == i).mean())
         for j in range(len(class_ids)):
             confusion[i, j] = int(((y_comp == i) & (pred == j)).sum())
     return {"per_class_acc": acc, "confusion": confusion.tolist(), "valid_prototypes": valid[class_ids].tolist()}
@@ -156,17 +159,17 @@ def main() -> None:
     out_dir = OUTPUT_ROOT / exp_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    device = test.resolve_device(test.DEVICE)
+    device = eval_lib.resolve_device(_INF.device)
     print(f"[i] 加载 {checkpoint} ...")
     model_lw, sscl_loss, resolution = load_lwdetr_and_sscl(checkpoint, device)
     print("[i] LWDETR 已恢复 | SSCL 模块已恢复（原型/投影头/语义矩阵）")
 
     # 1) 提取测试集 matched query 特征（hidden 空间，框匹配 IoU≥0.5 不看类）
-    test_image_paths = test.read_test_image_paths(test.TEST_IMAGE_DIR)
-    test_size_map = test.build_image_size_map(test_image_paths)
+    test_image_paths = eval_lib.read_test_image_paths(_DS.test_image_dir)
+    test_size_map = eval_lib.build_image_size_map(test_image_paths)
     from val.competition_metrics import load_yolo_labels
 
-    test_gt = load_yolo_labels(test.LABEL_DIR, test_size_map)
+    test_gt = load_yolo_labels(_DS.label_dir, test_size_map)
     test_scaled = linear_probe._scale_boxes(test_gt, resolution, test_size_map)
     gt_map = linear_probe._build_gt_map(test_gt, test_scaled, set(linear_probe.SHIP_CLASS_IDS))
     img_paths = [p for p in test_image_paths if p.stem in gt_map]
@@ -192,7 +195,7 @@ def main() -> None:
     valid = valid.cpu()
     ship_ids = linear_probe.SHIP_CLASS_IDS
     ship_sim = [[round(v, 3) for v in row] for row in (proto_norm[ship_ids] @ proto_norm[ship_ids].T).tolist()]
-    names4 = [test.CLASS_NAMES[c] for c in ship_ids]
+    names4 = [_DS.class_names[c] for c in ship_ids]
     print("\n===== 船类原型间余弦（投影空间）=====")
     print("     " + " ".join(f"{n:>6s}" for n in names4))
     for i, n in enumerate(names4):
@@ -231,7 +234,7 @@ def main() -> None:
     report["model_own_class_acc"] = model_acc
     print("\n===== 模型自身 class_embed（matched 集）=====")
     for cid, st in model_acc.items():
-        print(f"  {test.CLASS_NAMES[cid]:<6s} acc={st['acc']:.3f} (n={int(st['n'])})")
+        print(f"  {_DS.class_names[cid]:<6s} acc={st['acc']:.3f} (n={int(st['n'])})")
 
     # 5) 对齐诊断：matched 特征与自身类原型的余弦
     with torch.inference_mode():
@@ -240,7 +243,7 @@ def main() -> None:
     align: dict[str, float] = {}
     for cid in ship_ids:
         mask = y == cid
-        align[test.CLASS_NAMES[cid]] = float(self_cos[mask].mean()) if mask.sum() else 0.0
+        align[_DS.class_names[cid]] = float(self_cos[mask].mean()) if mask.sum() else 0.0
     report["self_proto_align_cos"] = align
     print("\n===== matched 特征与自身原型对齐余弦（投影空间）=====")
     for n, v in align.items():

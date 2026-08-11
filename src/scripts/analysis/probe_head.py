@@ -41,23 +41,26 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import nn
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 if str(SRC_DIR / "scripts") not in sys.path:
     sys.path.insert(0, str(SRC_DIR / "scripts"))
 
-import linear_probe  # noqa: E402
-import test  # noqa: E402
-
 from rfdetr import RFDETR  # noqa: E402
+from scripts import eval_lib  # noqa: E402
+from scripts.analysis import linear_probe  # noqa: E402
 from val.competition_metrics import (  # noqa: E402
     BoxRecord,
     EvalConfig,
     evaluate_competition_metrics,
     load_yolo_labels,
 )
+
+# SHWX 数据集配置与推理参数（与 test 模板一致）
+_DS = eval_lib.build_dataset_cfg("shwx")
+_INF = eval_lib.InferenceCfg()
 
 OUTPUT_ROOT = PROJECT_ROOT / "output" / "probe_head"
 
@@ -237,7 +240,7 @@ def _extract_train_matched(
 ) -> tuple[np.ndarray, np.ndarray]:
     """提取训练集 matched query 特征（船类）。"""
     image_paths, gt_records = linear_probe._load_train_images_and_gt()
-    size_map = test.build_image_size_map(image_paths)
+    size_map = eval_lib.build_image_size_map(image_paths)
     scaled = linear_probe._scale_boxes(gt_records, resolution, size_map)
     gt_map = linear_probe._build_gt_map(gt_records, scaled, set(linear_probe.SHIP_CLASS_IDS))
     img_paths = [p for p in image_paths if p.stem in gt_map]
@@ -255,7 +258,7 @@ def main() -> None:
     out_dir = OUTPUT_ROOT / exp_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    device = test.resolve_device(test.DEVICE)
+    device = eval_lib.resolve_device(_INF.device)
     means, stds = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
 
     # 1) 加载检测权重（best_total）
@@ -279,20 +282,20 @@ def main() -> None:
     print("[i] 探针头训练完成（均衡采样 cap=500）", flush=True)
 
     # 3) 测试集：原始预测（复用 yolo_preds）vs 探针头重分类
-    test_image_paths = test.read_test_image_paths(test.TEST_IMAGE_DIR)
-    test_size_map = test.build_image_size_map(test_image_paths)
-    gt = load_yolo_labels(test.LABEL_DIR, test_size_map)
+    test_image_paths = eval_lib.read_test_image_paths(_DS.test_image_dir)
+    test_size_map = eval_lib.build_image_size_map(test_image_paths)
+    gt = load_yolo_labels(_DS.label_dir, test_size_map)
     cfg = EvalConfig(
-        class_to_group=test.PER_CLASS_TO_GROUP,
-        group_iou_thresholds=test.PER_CLASS_IOU_THRESHOLDS,
+        class_to_group=_DS.per_class_to_group,
+        group_iou_thresholds=_DS.per_class_iou_thresholds,
         default_iou_threshold=0.50,
         class_aware=True,
     )
 
     def _eval(records: list[BoxRecord], tag: str) -> dict[str, Any]:
         per_class = evaluate_competition_metrics(gt, records, cfg)
-        group_macro = test.compute_group_macro_averages(per_class["groups"], test.CLASS_TO_GROUP, test.CLASS_NAMES)
-        total = test.compute_total_metrics(group_macro)
+        group_macro = eval_lib.compute_group_macro_averages(per_class["groups"], _DS.class_to_group, _DS.class_names)
+        total = eval_lib.compute_total_metrics(group_macro)
         print(f"  {tag:<12s} 预测框={len(records)} 总 R={total['recall']:.4f} FDR={total['fdr']:.4f}", flush=True)
         for g in ["ship", "vehicle"]:
             print(f"    {g:<8s} R={group_macro[g]['recall']:.4f} FDR={group_macro[g]['fdr']:.4f}", flush=True)
@@ -326,8 +329,8 @@ def main() -> None:
     print("\n===== 逐类对比（Recall / FDR）=====")
     per_orig = evaluate_competition_metrics(gt, orig, cfg)["groups"]
     per_new = evaluate_competition_metrics(gt, reclassified, cfg)["groups"]
-    for cid in sorted(test.CLASS_NAMES):
-        name = test.CLASS_NAMES[cid]
+    for cid in sorted(_DS.class_names):
+        name = _DS.class_names[cid]
         if cid not in (0, 1, 2, 3):
             continue
         a, b = per_orig[name], per_new[name]

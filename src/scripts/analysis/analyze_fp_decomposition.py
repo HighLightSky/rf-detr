@@ -28,17 +28,16 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 if str(SRC_DIR / "scripts") not in sys.path:
     sys.path.insert(0, str(SRC_DIR / "scripts"))
 
-# 复用 test.py 的推理管线与数据集配置（DATASET="shwx" 为默认值）
-import test  # noqa: E402
-
+# 复用 eval_lib 的推理管线与数据集配置（shwx 为默认数据集）
 from rfdetr import RFDETRMedium  # noqa: E402
+from scripts import eval_lib  # noqa: E402
 from val.competition_metrics import (  # noqa: E402
     BoxRecord,
     EvalConfig,
@@ -134,10 +133,10 @@ def main() -> None:
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"checkpoint 不存在: {checkpoint_path}")
 
-    cfg = test.DATASET_CONFIGS["shwx"]
+    cfg = eval_lib.DATASET_CONFIGS["shwx"]
     data_dir = Path(cfg["data_dir"])
-    test_image_paths = test.read_test_image_paths(data_dir / cfg["image_dir"])
-    image_size_map = test.build_image_size_map(test_image_paths)
+    test_image_paths = eval_lib.read_test_image_paths(data_dir / cfg["image_dir"])
+    image_size_map = eval_lib.build_image_size_map(test_image_paths)
     gt_records = load_yolo_labels(data_dir / cfg["label_dir"], image_size_map)
 
     class_to_group = {int(k): v for k, v in cfg["class_to_group"].items()}
@@ -148,12 +147,12 @@ def main() -> None:
         class_aware=True,
     )
 
-    device = test.resolve_device("cuda:0")
+    device = eval_lib.resolve_device("cuda:0")
     print(f"[i] 加载 {checkpoint_path} ...")
     model = RFDETRMedium.from_checkpoint(str(checkpoint_path))
     model.model.model = model.model.model.to(device)
     model.model.model.eval()
-    pred_records, _, _, _ = test.predict_batched_to_records(
+    pred_records, _, _, _ = eval_lib.predict_batched_to_records(
         model,
         test_image_paths,
         device,
