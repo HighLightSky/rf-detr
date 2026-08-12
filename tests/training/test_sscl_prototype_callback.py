@@ -123,7 +123,7 @@ class TestSSCLProjectionCallback:
         assert torch.isfinite(result["loss_sscl"])
         # 原型库建立在投影空间，维度 == projection_dim
         bank = module.sscl_loss.prototype_bank
-        assert bank.prototypes.shape[1] == 8
+        assert bank.prototypes.shape[-1] == 8
         # matched 类别 1/2/3 各建立一次原型
         num_updates = bank.num_updates
         assert int(num_updates[1].item()) >= 1
@@ -145,7 +145,7 @@ class TestSSCLProjectionCallback:
         result = module._sscl_loss_callback(outputs, targets, indices)
         assert "loss_sscl" in result
         assert torch.isfinite(result["loss_sscl"])
-        assert module.sscl_loss.prototype_bank.prototypes.shape[1] == 8
+        assert module.sscl_loss.prototype_bank.prototypes.shape[-1] == 8
 
     def test_callback_projection_instance_mode_no_bank(self) -> None:
         """投影 + 实例模式：无原型库，返回 loss_sscl 键。"""

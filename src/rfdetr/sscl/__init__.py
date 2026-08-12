@@ -40,7 +40,7 @@ from rfdetr.sscl.fsem import (
 from rfdetr.sscl.hard_neg_monitor import HardNegMonitor
 from rfdetr.sscl.hard_neg_selection import select_hard_negatives_for_image
 from rfdetr.sscl.projection import ProjectionHead
-from rfdetr.sscl.prototype_bank import PrototypeBank
+from rfdetr.sscl.prototype_bank import PrototypeBank, SlotPrototypeBank
 from rfdetr.sscl.semantic_head import SemanticResidual, attach_from_checkpoint
 from rfdetr.sscl.semantic_matrix import (
     build_semantic_similarity_matrix,
@@ -57,6 +57,7 @@ __all__ = [
     "SSCLLoss",
     "BaseClassDistillLoss",
     "PrototypeBank",
+    "SlotPrototypeBank",
     "ProjectionHead",
     "HardNegMonitor",
     "select_hard_negatives_for_image",

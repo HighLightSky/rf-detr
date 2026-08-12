@@ -1236,6 +1236,14 @@ class TrainConfig(BaseConfig):
     """原型模式下单次 batch 中某类样本数低于该阈值时跳过该类原型更新（防噪声）。 默认 1 使少样本场景首个样本即建立原型。"""
     sscl_prototype_sync_ddp: bool = False
     """是否在 DDP 多卡时先 ``all_gather`` 各 rank 特征再更新原型，保证各 rank 原型一致（``register_buffer`` 不会被 DDP 自动同步）。单卡无需，默认关闭。"""
+    sscl_prototype_max_slots: int = 1
+    """每类最多原型 slot 数。1=旧版单视觉原型；2 可用于 HM/LQS/QHS/MS 等多模态易混类。"""
+    sscl_prototype_multi_slot_classes: list[int] | None = None
+    """启用多 slot 的类别索引列表。列表外类别仅使用 slot 0，保持单原型。"""
+    sscl_prototype_group_pairs: list[list[int]] | None = None
+    """固定易混类别组。同组不同类 slot 在 SSCL 分母中作为 sibling 难负样本额外加权。"""
+    sscl_prototype_group_weight: float = 1.0
+    """同组 sibling 负样本权重放大系数。1.0=关闭组内额外加压；推荐从 1.5 起步。"""
     sscl_projection_enabled: bool = False
     """是否启用 SSCL 投影头：先把 matched features 投影到低维对比空间再施加 对比损失，缓解对比压力对共享特征（同时喂给 class_embed 与 bbox_embed）的
     直接冲击。开启后原型库也住在投影空间。"""
@@ -1558,6 +1566,32 @@ class TrainConfig(BaseConfig):
             )
         if self.sscl_hard_neg_topk < 1:
             raise ValueError(f"sscl_hard_neg_topk 必须 >= 1，收到 {self.sscl_hard_neg_topk}。")
+        return self
+
+    @model_validator(mode="after")
+    def validate_sscl_multislot_prototype(self) -> "TrainConfig":
+        """多 slot 原型字段的基础校验。"""
+        if self.sscl_prototype_max_slots < 1:
+            raise ValueError(f"sscl_prototype_max_slots 必须 >= 1，收到 {self.sscl_prototype_max_slots}。")
+        if self.sscl_prototype_group_weight < 1.0:
+            raise ValueError(
+                f"sscl_prototype_group_weight 必须 >= 1.0，收到 {self.sscl_prototype_group_weight}。"
+            )
+        if self.sscl_prototype_multi_slot_classes is not None:
+            invalid = [c for c in self.sscl_prototype_multi_slot_classes if c < 0]
+            if invalid:
+                raise ValueError(f"sscl_prototype_multi_slot_classes 含非法类别索引: {invalid}")
+        if self.sscl_prototype_group_pairs is not None:
+            seen: set[int] = set()
+            for group in self.sscl_prototype_group_pairs:
+                if len(group) < 2:
+                    raise ValueError("sscl_prototype_group_pairs 中每个组至少需要 2 个类别。")
+                for class_id in group:
+                    if class_id < 0:
+                        raise ValueError(f"sscl_prototype_group_pairs 含非法类别索引: {class_id}")
+                    if class_id in seen:
+                        raise ValueError(f"类别 {class_id} 被重复放入多个 sscl_prototype_group_pairs。")
+                    seen.add(class_id)
         return self
 
     @model_validator(mode="before")

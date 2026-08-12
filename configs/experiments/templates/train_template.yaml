@@ -84,6 +84,11 @@ train:
   sscl_prototype_enabled: true
   sscl_prototype_momentum: 0.99
   sscl_prototype_min_samples: 1
+  # --- 多 slot 原型（v1：只给 HM/LQS/QHS/MS 开 2 slot，同组 sibling 负样本额外加压）---
+  # sscl_prototype_max_slots: 2
+  # sscl_prototype_multi_slot_classes: [0, 1, 2, 3]
+  # sscl_prototype_group_pairs: [[0, 1], [2, 3]]
+  # sscl_prototype_group_weight: 1.5
   sscl_projection_enabled: true
   sscl_projection_dim: 128
   sscl_prototype_instance_pos: true   # 实例正样本锚定冷启动

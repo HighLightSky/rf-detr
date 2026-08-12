@@ -18,7 +18,7 @@ import io
 import pytest
 import torch
 
-from rfdetr.sscl import PrototypeBank, SSCLLoss
+from rfdetr.sscl import PrototypeBank, SSCLLoss, SlotPrototypeBank
 
 # 5 类测试用语义相似度矩阵（模拟舰船内部高相似、跨大类低相似）
 _SEMANTIC_MATRIX = torch.tensor(
@@ -60,17 +60,17 @@ class TestPrototypeBank:
         m1 = torch.randn(16)
         m2 = torch.randn(16)
         bank.update(torch.stack([m1, m1]), torch.tensor([0, 0]))
-        assert torch.allclose(bank.prototypes[0], m1)
+        assert torch.allclose(bank.prototypes[0, 0], m1)
         bank.update(torch.stack([m2, m2]), torch.tensor([0, 0]))
-        assert torch.allclose(bank.prototypes[0], 0.5 * m1 + 0.5 * m2)
+        assert torch.allclose(bank.prototypes[0, 0], 0.5 * m1 + 0.5 * m2)
         assert int(bank.num_updates[0]) == 2
 
     def test_lazy_dim_initialization(self) -> None:
         """不传 hidden_dim 时首次 update 惰性确定维度。"""
         bank = PrototypeBank(num_classes=5)
-        assert bank.prototypes.shape == (5, 0)
+        assert bank.prototypes.shape == (5, 1, 0)
         bank.update(torch.randn(4, 16), torch.tensor([0, 1, 2, 3]))
-        assert bank.prototypes.shape == (5, 16)
+        assert bank.prototypes.shape == (5, 1, 16)
 
     def test_hidden_dim_mismatch_raises(self) -> None:
         """已初始化后再遇到不同维度应抛出 ValueError。"""
@@ -119,6 +119,58 @@ class TestPrototypeBank:
         new_bank.load_state_dict(torch.load(buffer, map_location="cpu", weights_only=True))
         assert torch.allclose(new_bank.prototypes, bank.prototypes)
         assert torch.equal(new_bank.num_updates, bank.num_updates)
+
+    def test_multi_slot_update_and_class_aggregate(self) -> None:
+        """多 slot 类可建立多个 slot，旧聚合接口仍返回按类原型。"""
+        bank = SlotPrototypeBank(
+            num_classes=5,
+            hidden_dim=4,
+            momentum=0.5,
+            max_slots=2,
+            multi_slot_classes=[0, 1],
+        )
+        features = torch.tensor(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [-1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+            ]
+        )
+        bank.update(features, torch.tensor([0, 0, 2]))
+
+        slot_norm, slot_valid = bank.get_normalized_slot_prototypes()
+        assert slot_norm.shape == (5, 2, 4)
+        assert slot_valid[0, 0]
+        assert slot_valid[0, 1]
+        assert slot_valid[2, 0]
+        assert not slot_valid[2, 1]
+
+        class_norm, class_valid = bank.get_normalized_prototypes()
+        assert class_norm.shape == (5, 4)
+        assert class_valid[0]
+        assert class_valid[2]
+
+    def test_legacy_single_prototype_state_loads_into_multislot(self) -> None:
+        """旧版 [C,D] checkpoint 自动映射到新 bank 的 slot 0。"""
+        legacy = PrototypeBank(num_classes=5, hidden_dim=4, momentum=0.9)
+        legacy.update(torch.randn(6, 4), torch.tensor([0, 1, 2, 3, 4, 0]))
+        state = {
+            "prototypes": legacy.prototypes[:, 0, :].clone(),
+            "num_updates": legacy.num_updates.clone(),
+        }
+
+        bank = SlotPrototypeBank(
+            num_classes=5,
+            hidden_dim=4,
+            momentum=0.9,
+            max_slots=2,
+            multi_slot_classes=[0, 1],
+        )
+        bank.load_state_dict(state, strict=True)
+
+        assert torch.allclose(bank.prototypes[:, 0, :], state["prototypes"])
+        assert torch.equal(bank.slot_num_updates[:, 0], state["num_updates"])
+        assert int(bank.slot_num_updates[:, 1].sum().item()) == 0
 
 
 class TestSSCLPrototypeLoss:

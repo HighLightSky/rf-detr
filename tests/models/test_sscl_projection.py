@@ -108,9 +108,9 @@ class TestSSCLProjectionLoss:
     def test_prototype_bank_dim_equals_projection_dim(self) -> None:
         """原型模式 + 投影：原型库维度 == projection_dim（原型住投影空间）。"""
         loss_fn = _make_projection_loss(prototype_mode=True)
-        assert loss_fn.prototype_bank.prototypes.shape[1] == 8
+        assert loss_fn.prototype_bank.prototypes.shape[-1] == 8
         _warm_bank(loss_fn)
-        assert loss_fn.prototype_bank.prototypes.shape[1] == 8
+        assert loss_fn.prototype_bank.prototypes.shape[-1] == 8
 
     def test_update_prototypes_projects_before_update(self) -> None:
         """update_prototypes 在投影空间更新原型：预热后维度为 projection_dim 且就位。"""
@@ -118,7 +118,7 @@ class TestSSCLProjectionLoss:
         _warm_bank(loss_fn)
         num_updates = loss_fn.prototype_bank.num_updates
         assert int(num_updates[0].item()) >= 1
-        assert loss_fn.prototype_bank.prototypes.shape[1] == 8
+        assert loss_fn.prototype_bank.prototypes.shape[-1] == 8
         # 原型应归一化到投影空间（行模长有效）
         proto_norm, valid = loss_fn.prototype_bank.get_normalized_prototypes()
         assert valid.any()
@@ -162,7 +162,7 @@ class TestSSCLProjectionLoss:
         """projection_dim=None 时不创建投影头、原型维度 = hidden_dim（回归安全）。"""
         loss_fn = _make_projection_loss(prototype_mode=True, projection_dim=None)
         assert not hasattr(loss_fn, "projection_head")
-        assert loss_fn.prototype_bank.prototypes.shape[1] == 16
+        assert loss_fn.prototype_bank.prototypes.shape[-1] == 16
 
     def test_projection_with_hidden_dim_none_raises(self) -> None:
         """projection_dim 非 None 但 hidden_dim=None 时必须报错（投影头需输入维度）。"""

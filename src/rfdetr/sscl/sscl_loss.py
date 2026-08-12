@@ -30,6 +30,8 @@ ProjectionHead 映射到低维对比空间再计算损失，原型库同步建�
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F  # noqa: N812 -- 项目约定别名（见 AGENTS.md）
 from torch import Tensor, nn
@@ -65,6 +67,13 @@ class SSCLLoss(nn.Module):
             阈值时跳过该类原型更新（防噪声）。
         prototype_sync_ddp: 是否在 DDP 多卡时先 ``all_gather`` 各 rank 特征
             再更新原型，保证各 rank 原型一致（单卡无需，默认关闭）。
+        prototype_max_slots: 每类最多保留的原型 slot 数。为 ``1`` 时退化为
+            旧版单视觉原型。
+        prototype_multi_slot_classes: 启用多 slot 的类别列表；列表外类别仅使用
+            slot 0。
+        prototype_group_pairs: 固定的易混类别组。同组但不同类的 slot 作为
+            sibling 难负样本，额外乘 ``prototype_group_weight``。
+        prototype_group_weight: sibling 负样本权重放大系数，必须不小于 ``1``。
         hidden_dim: 原型特征维度。为 ``None`` 时首次更新惰性确定维度
             （生产环境建议传入，见 ``PrototypeBank``）。
         projection_dim: 投影头输出维度（对比空间维度）。为 ``None`` 时不启用
@@ -72,9 +81,10 @@ class SSCLLoss(nn.Module):
             计算损失，原型库维度也改为 ``projection_dim``，且要求 ``hidden_dim``
             非 None（作为投影头输入维度）。
         prototype_instance_pos: 原型模式下是否加入同类别实例正样本。开启时
-            正样本 = 本类原型 ∪ 同类别实例（对齐论文 Eq.9），用真实同类实例
-            锚定冷启动（投影头随机初始化时给投影学习提供稳定的正向引力），
-            负样本仍为全部有效原型（语义加权）。默认关闭保持原行为。
+            正样本 = 本类 slot 原型 ∪ 同类别实例（对齐论文 Eq.9），用真实
+            同类实例锚定冷启动（投影头随机初始化时给投影学习提供稳定的
+            正向引力），负样本仍为全部有效 class-slot 原型（语义加权）。
+            默认关闭保持原行为。
     """
 
     def __init__(
@@ -90,6 +100,10 @@ class SSCLLoss(nn.Module):
         prototype_momentum: float = 0.99,
         prototype_min_samples: int = 1,
         prototype_sync_ddp: bool = False,
+        prototype_max_slots: int = 1,
+        prototype_multi_slot_classes: list[int] | None = None,
+        prototype_group_pairs: list[list[int]] | None = None,
+        prototype_group_weight: float = 1.0,
         hidden_dim: int | None = None,
         projection_dim: int | None = None,
         prototype_instance_pos: bool = False,
@@ -114,17 +128,40 @@ class SSCLLoss(nn.Module):
         self.prototype_mode = prototype_mode
         # 实例正样本开关：开启时原型模式正样本 = 本类原型 ∪ 同类别实例
         self.prototype_instance_pos = prototype_instance_pos
+        self.prototype_group_weight = float(prototype_group_weight)
+        self.register_buffer(
+            "prototype_class_group_ids",
+            self._build_class_group_ids(semantic_matrix.shape[0], prototype_group_pairs),
+            persistent=False,
+        )
         if prototype_mode:
             # 延迟导入，避免与 prototype_bank 模块产生循环导入
-            from rfdetr.sscl.prototype_bank import PrototypeBank
+            from rfdetr.sscl.prototype_bank import SlotPrototypeBank
 
-            self.prototype_bank = PrototypeBank(
+            self.prototype_bank = SlotPrototypeBank(
                 num_classes=semantic_matrix.shape[0],
                 hidden_dim=projection_dim if projection_dim is not None else hidden_dim,
                 momentum=prototype_momentum,
                 min_samples=prototype_min_samples,
                 sync_distributed=prototype_sync_ddp,
+                max_slots=prototype_max_slots,
+                multi_slot_classes=prototype_multi_slot_classes,
             )
+
+    @staticmethod
+    def _build_class_group_ids(num_classes: int, groups: list[list[int]] | None) -> Tensor:
+        """把易混类别组转成每类 group id。"""
+        group_ids = torch.full((num_classes,), -1, dtype=torch.long)
+        if groups is None:
+            return group_ids
+        for group_idx, group in enumerate(groups):
+            for class_id in group:
+                if class_id < 0 or class_id >= num_classes:
+                    raise ValueError(f"prototype_group_pairs 含非法类别索引: {class_id}")
+                if int(group_ids[class_id].item()) != -1:
+                    raise ValueError(f"类别 {class_id} 被重复放入多个 prototype_group_pairs。")
+                group_ids[class_id] = group_idx
+        return group_ids
 
     def _project(self, features: Tensor) -> Tensor:
         """把特征投影到对比空间；未启用投影头时恒等返回。
@@ -259,9 +296,10 @@ class SSCLLoss(nn.Module):
     ) -> Tensor:
         """原型锚定模式下的 SSCL 损失。
 
-        正样本为 anchor 与本类原型的余弦相似度（本类原型有效则恒存在），
-        负样本为 anchor 与全部有效类别原型的余弦相似度（按语义权重加权），
-        从而每个 anchor 都有稳定的正负锚点，彻底摆脱 batch 内同类样本的构成。
+        正样本为 anchor 与本类有效 slot 原型的余弦相似度集合，本类任一
+        slot 有效则恒存在；负样本为 anchor 与全部有效 class-slot 原型的
+        余弦相似度（按语义权重加权），从而每个 anchor 都有稳定的正负
+        锚点，彻底摆脱 batch 内同类样本的构成。
         启用投影头时特征先投影到对比空间，原型库也建立在投影空间；
         启用实例正样本时正样本 = 本类原型 ∪ 同类别实例（对齐论文 Eq.9）；
         传入难例负样本时额外追加为分母列（权重 1.0），补齐"前景-背景边界"
@@ -284,11 +322,16 @@ class SSCLLoss(nn.Module):
         if num_fg == 0:
             return features.sum() * 0.0
 
-        # 获取归一化原型与有效掩码（本类原型无效的 anchor 不参与损失）
-        proto_norm, valid_proto = self.prototype_bank.get_normalized_prototypes()
-        if not valid_proto.any():
+        # 获取 slot 级归一化原型与有效掩码（本类所有 slot 无效的 anchor 不参与损失）
+        proto_slots, valid_slots = self.prototype_bank.get_normalized_slot_prototypes()
+        if not valid_slots.any():
             # 尚无任何有效原型，返回零损失并保持图连接（利于 DDP）
             return features.sum() * 0.0
+        num_classes, max_slots, proto_dim = proto_slots.shape
+        proto_flat = proto_slots.reshape(num_classes * max_slots, proto_dim)
+        valid_flat = valid_slots.reshape(num_classes * max_slots)
+        proto_class_ids = torch.arange(num_classes, device=labels.device).repeat_interleave(max_slots)
+        valid_proto = valid_slots.any(dim=-1)
 
         # anchor 过滤：anchor_classes 约束 ∩ 本类原型有效
         if self.anchor_classes is not None:
@@ -305,19 +348,19 @@ class SSCLLoss(nn.Module):
             # 无有效 anchor（anchor 类原型尚未建立），返回零损失并保持图连接
             return features.sum() * 0.0
 
-        # 归一化特征并计算与全部类别原型的余弦相似度（带温度）
+        # 归一化特征并计算与全部 class-slot 原型的余弦相似度（带温度）
         u = F.normalize(features, dim=-1)
-        sim = u @ proto_norm.T / self.tau  # [N, C]
+        sim = u @ proto_flat.T / self.tau  # [N, C*K]
 
         # 语义权重矩阵 w_ic = clamp(1 + rho * S[y_i, c], 1, omega_max)
-        # semantic_matrix[labels] 形状 [N, C]，即 S[y_i, c]
-        pair_sem = self.semantic_matrix[labels]
+        # semantic_matrix[labels][:, proto_class_ids] 形状 [N, C*K]，即 S[y_i, slot_class]
+        pair_sem = self.semantic_matrix[labels][:, proto_class_ids]
         weight = 1.0 + self.rho * pair_sem
 
         if self.confusing_classes is not None:
-            # 仅对易混类别的原型列施加语义放大，其余列保持权重 1.0
+            # 仅对易混类别的 slot 列施加语义放大，其余列保持权重 1.0
             confusing_col = torch.as_tensor(
-                [c in self.confusing_classes for c in range(proto_norm.shape[0])],
+                [int(c.item()) in self.confusing_classes for c in proto_class_ids],
                 dtype=torch.bool,
                 device=labels.device,
             )
@@ -327,25 +370,46 @@ class SSCLLoss(nn.Module):
                 torch.ones_like(weight),
             )
 
+        sibling_group: Tensor | None = None
+        if self.prototype_group_weight > 1.0:
+            # 固定易混组：同组不同类 slot 是 sibling 难负样本，在分母中额外加压。
+            anchor_group = self.prototype_class_group_ids[labels]
+            proto_group = self.prototype_class_group_ids[proto_class_ids]
+            sibling_group = (
+                (anchor_group.unsqueeze(1) >= 0)
+                & (proto_group.unsqueeze(0) >= 0)
+                & (anchor_group.unsqueeze(1) == proto_group.unsqueeze(0))
+                & (labels.unsqueeze(1) != proto_class_ids.unsqueeze(0))
+            )
+
         weight = weight.clamp(min=1.0, max=self.omega_max)
-        # 正样本（本类原型）列权重恒为 1，确保分母中的正项 = 分子，loss >= 0
-        pos_mask = F.one_hot(labels, num_classes=proto_norm.shape[0]).bool()
+        # 正样本（本类所有有效 slot）列权重恒为 1，确保分母中的正项 = 分子。
+        pos_mask = (proto_class_ids.unsqueeze(0) == labels.unsqueeze(1)) & valid_flat.unsqueeze(0)
         weight = torch.where(pos_mask, torch.ones_like(weight), weight)
+        logits = sim * weight
+        if sibling_group is not None:
+            # 组内 sibling 负样本以 log 质量放大，避免负余弦被乘大后反而降低分母。
+            logits = torch.where(
+                sibling_group,
+                logits + math.log(self.prototype_group_weight),
+                logits,
+            )
 
         # 数值稳定的 logsumexp：无效原型列置 -inf，不参与分母
         neg_inf = torch.finfo(sim.dtype).min
+        neg_inf_tensor = torch.tensor(neg_inf, device=sim.device, dtype=sim.dtype)
         denom_logits = torch.where(
-            valid_proto.unsqueeze(0),
-            sim * weight,
-            torch.tensor(neg_inf, device=sim.device),
+            valid_flat.unsqueeze(0),
+            logits,
+            neg_inf_tensor,
         )
-        # 本类原型相似度（正样本之一）
-        pos_logits = sim.gather(-1, labels.unsqueeze(-1)).squeeze(-1)  # [N]
+        # 本类 slot 相似度（正样本集合）
+        pos_logits = torch.where(pos_mask, sim, neg_inf_tensor)  # [N, C*K]
 
         # 难例负样本：追加为额外分母列（权重 1.0，无语义权重、无类别身份）。
         # 已 detach（难例方向不产生梯度，只推离 anchor）；K=0 时 no-op。
         # 在实例正样本分支之前追加，保证实例正样本也出现在难例路径的分母中；
-        # 分母列序变为 [C 原型, K 难例, N 实例正样本]。
+        # 分母列序变为 [C*K slot 原型, K_hn 难例, N 实例正样本]。
         if hard_neg_features is not None and hard_neg_features.shape[0] > 0:
             u_hn = F.normalize(self._project(hard_neg_features.detach()), dim=-1)  # [K, D]
             hn_sim = u @ u_hn.T / self.tau  # [N, K]
@@ -354,9 +418,9 @@ class SSCLLoss(nn.Module):
             hn_sim = torch.where(
                 finite.unsqueeze(0),
                 hn_sim,
-                torch.tensor(neg_inf, device=hn_sim.device),
+                torch.tensor(neg_inf, device=hn_sim.device, dtype=hn_sim.dtype),
             )
-            denom_logits = torch.cat([denom_logits, hn_sim], dim=-1)  # [N, C+K]
+            denom_logits = torch.cat([denom_logits, hn_sim], dim=-1)  # [N, C*K+K_hn]
 
         if self.prototype_instance_pos:
             # 同类别实例正样本：正样本 = 本类原型 ∪ 同类别实例（对齐论文 Eq.9）。
@@ -368,12 +432,12 @@ class SSCLLoss(nn.Module):
             pos_inst = sim_inst.masked_fill(~same_class, neg_inf)  # [N, N]
             # 分子 = logsumexp(本类原型, 同类别实例)；分母 = 原型项 + 实例正样本项。
             # 所有正项都在分母中（本类原型权重 1、实例正样本权重 1），保证 loss >= 0。
-            num_logits = torch.cat([pos_logits.unsqueeze(-1), pos_inst], dim=-1)  # [N, 1+N]
+            num_logits = torch.cat([pos_logits, pos_inst], dim=-1)  # [N, C*K+N]
             log_numerator = torch.logsumexp(num_logits, dim=-1)  # [N]
-            denom_logits = torch.cat([denom_logits, pos_inst], dim=-1)  # [N, C+N]
+            denom_logits = torch.cat([denom_logits, pos_inst], dim=-1)  # [N, C*K+K_hn+N]
             log_denominator = torch.logsumexp(denom_logits, dim=-1)  # [N]
         else:
-            log_numerator = pos_logits  # [N]
+            log_numerator = torch.logsumexp(pos_logits, dim=-1)  # [N]
             log_denominator = torch.logsumexp(denom_logits, dim=-1)  # [N]
 
         # 每个 anchor 的损失 = log(denom) - log(正样本) >= 0

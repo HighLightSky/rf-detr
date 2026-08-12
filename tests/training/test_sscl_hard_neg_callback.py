@@ -248,3 +248,39 @@ class TestHardNegConfigValidation:
         )
         assert cfg.sscl_hard_neg_topk == 5
         assert cfg.sscl_hard_neg_score_thresh == 0.5
+
+
+class TestMultiPrototypeConfigValidation:
+    """TrainConfig 多 slot 原型字段的校验规则。"""
+
+    def test_config_accepts_multislot_groups(self) -> None:
+        """合法的多 slot + sibling group 配置应通过校验。"""
+        cfg = TrainConfig(
+            dataset_dir="/tmp/dummy",
+            sscl_prototype_enabled=True,
+            sscl_prototype_max_slots=2,
+            sscl_prototype_multi_slot_classes=[0, 1, 2, 3],
+            sscl_prototype_group_pairs=[[0, 1], [2, 3]],
+            sscl_prototype_group_weight=1.5,
+        )
+
+        assert cfg.sscl_prototype_max_slots == 2
+        assert cfg.sscl_prototype_group_pairs == [[0, 1], [2, 3]]
+
+    def test_config_rejects_bad_slot_count(self) -> None:
+        """slot 数必须至少为 1。"""
+        with pytest.raises(ValueError, match="sscl_prototype_max_slots"):
+            TrainConfig(
+                dataset_dir="/tmp/dummy",
+                sscl_prototype_enabled=True,
+                sscl_prototype_max_slots=0,
+            )
+
+    def test_config_rejects_duplicate_group_class(self) -> None:
+        """同一类别不能重复出现在多个易混组。"""
+        with pytest.raises(ValueError, match="重复"):
+            TrainConfig(
+                dataset_dir="/tmp/dummy",
+                sscl_prototype_enabled=True,
+                sscl_prototype_group_pairs=[[0, 1], [1, 2]],
+            )

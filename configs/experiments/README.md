@@ -31,6 +31,7 @@ configs/experiments/
 ├── train_sscl_strong_A/B/C.yaml   # 等价旧 train_sscl_strong.py（强作用力/判别矩阵/组合）
 ├── train_sscl_hardneg_k3.yaml     # 等价旧 train_sscl_hardneg.py（k=5 用 --set）
 ├── train_sscl_class_balance_E1.yaml  # 等价旧 train_sscl_class_balance.py（P0/P1）
+├── train_sscl_multproto_v1.yaml   # 多 slot 原型 v1（HM/LQS/QHS/MS）
 ├── train_lora.yaml                # 等价旧 train_LoRA.py
 ├── test_shwx.yaml / test_dior.yaml
 └── predict_shwx.yaml
@@ -108,6 +109,7 @@ predict:                            # predict.py 消费
 | train_sscl_strong.py | train_sscl_strong_{A,B,C}.yaml | 原 env 变量改 yaml 字段 |
 | train_sscl_hardneg.py | train_sscl_hardneg_k3.yaml | k 用 --set 切换 |
 | train_sscl_class_balance.py | train_sscl_class_balance_E1.yaml | E2/E3 用 --set |
+| — | train_sscl_multproto_v1.yaml | 新增多 slot 原型 v1，统一入口直接运行 |
 | train_LoRA.py | train_lora.yaml | freeze_encoder+backbone_lora |
 | test.py | test_shwx.yaml / test_dior.yaml | 含推理侧 LA bias 配置 |
 

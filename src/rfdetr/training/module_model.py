@@ -541,6 +541,10 @@ class RFDETRModelModule(LightningModule):
             prototype_momentum=cfg.sscl_prototype_momentum,
             prototype_min_samples=cfg.sscl_prototype_min_samples,
             prototype_sync_ddp=cfg.sscl_prototype_sync_ddp,
+            prototype_max_slots=cfg.sscl_prototype_max_slots,
+            prototype_multi_slot_classes=cfg.sscl_prototype_multi_slot_classes,
+            prototype_group_pairs=cfg.sscl_prototype_group_pairs,
+            prototype_group_weight=cfg.sscl_prototype_group_weight,
             hidden_dim=self.model_config.hidden_dim,
             projection_dim=cfg.sscl_projection_dim if cfg.sscl_projection_enabled else None,
             prototype_instance_pos=cfg.sscl_prototype_instance_pos,
@@ -592,6 +596,10 @@ class RFDETRModelModule(LightningModule):
             f"start_epoch={cfg.sscl_start_epoch}, freeze={cfg.sscl_freeze_strategy}, "
             f"distill={cfg.sscl_distill_enabled}, "
             f"prototype={cfg.sscl_prototype_enabled}, "
+            f"prototype_slots={cfg.sscl_prototype_max_slots}, "
+            f"multi_slot_classes={cfg.sscl_prototype_multi_slot_classes}, "
+            f"prototype_groups={cfg.sscl_prototype_group_pairs}, "
+            f"group_weight={cfg.sscl_prototype_group_weight}, "
             f"projection={cfg.sscl_projection_enabled} (dim={cfg.sscl_projection_dim}), "
             f"instance_pos={cfg.sscl_prototype_instance_pos}, "
             f"hard_neg={cfg.sscl_hard_neg_enabled} "
