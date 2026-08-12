@@ -484,8 +484,15 @@ def _build_train_resize_config(
     Two branches are selected with equal probability:
 
     - **Option A** – direct resize to the target scale(s).
-    - **Option B** – resize to an intermediate scale (400/500/600 px), crop,
-      then resize to the target scale.
+    - **Option B** – resize to an intermediate scale (400/500/600 px), then
+      ``RandomSizedBBoxSafeCrop`` (crop + resize to the target scale). The crop
+      window always contains the union of all boxes (``erosion_rate=0.0``), so
+      no annotation is ever cut off — unlike the former ``RandomSizedCrop``,
+      which randomly truncated large objects and produced partial-object
+      training samples. Scale diversity now comes from the ``SmallestMaxSize``
+      zoom-out stage plus box-union-driven crop margins (small clustered boxes
+      keep strong zoom-in; large or spread-out boxes approach a full-image
+      crop).
 
     Divisibility padding (rounding ``H``/``W`` up to a multiple of ``patch_size * num_windows``) is handled by the batch
     collator via :func:`~rfdetr.utilities.tensors.make_collate_fn`, not here.
@@ -510,6 +517,11 @@ def _build_train_resize_config(
                 "transforms": [{"Resize": {"height": s, "width": s}} for s in scales],
             }
         }
+        # Option B 裁剪分支：用 ``RandomSizedBBoxSafeCrop`` 保证裁窗始终包含所有框的并集，任何随机种子下都不会把
+        # 目标框裁断（例如大目标被截断成"半艘航母"的样本，会导致模型对局部特征产生虚警）。裁剪 + 缩放成 (s, s)
+        # 两步合一，与原先 ``RandomSizedCrop`` 的契约一致；``erosion_rate`` 必须保持 0.0，>0 会允许切掉落在
+        # 并集边界的框。裁剪级的 zoom-in 多样性现在由框的并集决定（小目标聚拢的图保留甚至增强，大目标/分散的框
+        # 退化为近似整图裁剪），zoom-out 多样性仍由前面的 ``SmallestMaxSize`` 400/500/600 提供。
         option_b: dict[str, Any] = {
             "Sequential": {
                 "transforms": [
@@ -517,7 +529,13 @@ def _build_train_resize_config(
                     {
                         "OneOf": {
                             "transforms": [
-                                {"RandomSizedCrop": {"min_max_height": [384, 600], "height": s, "width": s}}
+                                {
+                                    "RandomSizedBBoxSafeCrop": {
+                                        "height": s,
+                                        "width": s,
+                                        "erosion_rate": 0.0,
+                                    }
+                                }
                                 for s in scales
                             ],
                         }
@@ -540,13 +558,11 @@ def _build_train_resize_config(
                 ]
             }
         }
-        # DETR-style crop branch: resize the short side to 400/500/600, then take a ``RandomSizedCrop`` that resizes
-        # the crop *directly* to the target scale (via a per-scale ``OneOf``, mirroring the square path). This removes
-        # the previous fixed 384x384 intermediate hop -- the crop was resampled to 384 and then resized again to the
-        # target, a wasteful downscale-then-upscale. ``min_max_height`` upper bound matches the maximum SmallestMaxSize
-        # value (600): when the sampled scale is smaller (e.g. 400), albumentations clamps the crop to the image height,
-        # effectively giving a full-image crop — this is the original DETR recipe behaviour and preserves training
-        # diversity (zoom-out variety) across the full SmallestMaxSize range.
+        # DETR 风格裁剪分支（与 square 路径一致）：短边先缩放到 400/500/600，再由 ``RandomSizedBBoxSafeCrop``
+        # 裁剪并直接缩放到目标 scale（按 scale 拆成 ``OneOf``）。替换掉原先的 ``RandomSizedCrop``（其随机裁剪会
+        # 切断大目标框，训练出"半截目标"样本，导致测试时对背景局部特征虚警）。``erosion_rate=0.0`` 保证裁窗
+        # 完整包含所有框；裁剪尺度多样性由框的并集驱动（详见 square 分支注释），zoom-out 多样性仍来自
+        # ``SmallestMaxSize`` 的 400/500/600。
         option_b = {
             "Sequential": {
                 "transforms": [
@@ -554,7 +570,13 @@ def _build_train_resize_config(
                     {
                         "OneOf": {
                             "transforms": [
-                                {"RandomSizedCrop": {"min_max_height": [384, 600], "height": s, "width": s}}
+                                {
+                                    "RandomSizedBBoxSafeCrop": {
+                                        "height": s,
+                                        "width": s,
+                                        "erosion_rate": 0.0,
+                                    }
+                                }
                                 for s in scales
                             ],
                         }
