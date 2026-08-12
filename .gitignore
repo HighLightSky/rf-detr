@@ -193,6 +193,7 @@ debugging/
 
 # AI assistant
 .claude/
+.agents/
 
 # Local docs development (versions.json is managed by mike on gh-pages in production)
 docs/versions.json

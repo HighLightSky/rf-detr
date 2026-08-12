@@ -1228,6 +1228,8 @@ class TrainConfig(BaseConfig):
     - ``"conservative"``: 冻结 backbone/encoder/bbox 头/decoder 前几层，仅解冻
       decoder 最后一层 + norm + class_embed（在已收敛 checkpoint 上微调时使用）。
     - ``"none"``: 不冻结任何参数，保持全量微调（从预训练直接开始训练时使用）。"""
+    sscl_unfreeze_decoder_layers: int = 1
+    """保守冻结策略下解冻 decoder 末尾层数。1=旧行为，仅解冻最后一层；2/3 可用于扩大 SSCL 微调容量。"""
     sscl_prototype_enabled: bool = False
     """是否启用类别原型库锚定的 SSCL（原型模式）。开启时正样本为本类原型、 负样本为全部类别原型，每个样本恒有正负锚点，摆脱 batch 内同类样本不足 导致的零损失问题。"""
     sscl_prototype_momentum: float = 0.99
@@ -1571,6 +1573,10 @@ class TrainConfig(BaseConfig):
     @model_validator(mode="after")
     def validate_sscl_multislot_prototype(self) -> "TrainConfig":
         """多 slot 原型字段的基础校验。"""
+        if self.sscl_unfreeze_decoder_layers < 1:
+            raise ValueError(
+                f"sscl_unfreeze_decoder_layers 必须 >= 1，收到 {self.sscl_unfreeze_decoder_layers}。"
+            )
         if self.sscl_prototype_max_slots < 1:
             raise ValueError(f"sscl_prototype_max_slots 必须 >= 1，收到 {self.sscl_prototype_max_slots}。")
         if self.sscl_prototype_group_weight < 1.0:

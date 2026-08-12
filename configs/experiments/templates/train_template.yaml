@@ -80,6 +80,7 @@ train:
   sscl_confusing_classes: [0, 1, 2, 3]  # 参与充当比较类别的类别；null=全部
   sscl_start_epoch: 0              # 微调从 0 启用；全量可设 30
   sscl_freeze_strategy: conservative  # conservative/none
+  sscl_unfreeze_decoder_layers: 1   # conservative 下解冻 decoder 末尾层数；1=旧行为
   # --- 原型库 + 投影头 ---
   sscl_prototype_enabled: true
   sscl_prototype_momentum: 0.99

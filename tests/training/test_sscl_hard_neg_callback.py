@@ -276,6 +276,14 @@ class TestMultiPrototypeConfigValidation:
                 sscl_prototype_max_slots=0,
             )
 
+    def test_config_rejects_bad_decoder_unfreeze_count(self) -> None:
+        """decoder 解冻层数必须至少为 1。"""
+        with pytest.raises(ValueError, match="sscl_unfreeze_decoder_layers"):
+            TrainConfig(
+                dataset_dir="/tmp/dummy",
+                sscl_unfreeze_decoder_layers=0,
+            )
+
     def test_config_rejects_duplicate_group_class(self) -> None:
         """同一类别不能重复出现在多个易混组。"""
         with pytest.raises(ValueError, match="重复"):

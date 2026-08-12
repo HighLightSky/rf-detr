@@ -610,7 +610,7 @@ class RFDETRModelModule(LightningModule):
         """应用 SSCL 保守冻结策略。
 
         冻结：backbone、encoder 主体、bbox 头、early decoder layers、 refpoint_embed、query_feat、enc_out_class_embed。 解冻：decoder
-        最后一层、decoder 最终 LayerNorm、分类头 class_embed、 语义头（SemHead）与 QNorm-Obj 附加模块参数（若装配）。
+        末尾若干层、decoder 最终 LayerNorm、分类头 class_embed、 语义头（SemHead）与 QNorm-Obj 附加模块参数（若装配）。
 
         该策略保证 SSCL 只通过 decoder 最后一层重塑 query 特征空间， 不扰动主干与目标定位能力。
         """
@@ -618,9 +618,12 @@ class RFDETRModelModule(LightningModule):
         # 先冻结全部参数
         for param in model.parameters():
             param.requires_grad = False
-        # 解冻 decoder 最后一层（产生 hs[-1] 的特征变换层）
-        for param in model.transformer.decoder.layers[-1].parameters():
-            param.requires_grad = True
+        decoder_layers = model.transformer.decoder.layers
+        num_decoder_layers = len(decoder_layers)
+        unfreeze_layers = min(int(self.train_config.sscl_unfreeze_decoder_layers), num_decoder_layers)
+        for layer in decoder_layers[-unfreeze_layers:]:
+            for param in layer.parameters():
+                param.requires_grad = True
         # 解冻 decoder 最终 LayerNorm（作用于最后一层输出，含可训练仿射参数）
         if getattr(model.transformer.decoder, "norm", None) is not None:
             for param in model.transformer.decoder.norm.parameters():
@@ -647,7 +650,11 @@ class RFDETRModelModule(LightningModule):
             for param in model.qnorm_obj.parameters():
                 param.requires_grad = True
             logger.info(f"[QNormObj] QNorm 参数可训练性恢复完成：{model.qnorm_obj.describe_freeze()}")
-        logger.info("[SSCL] 冻结策略已应用：仅 decoder 最后一层 + decoder norm + class_embed + 附加模块参数可训练")
+        logger.info(
+            "[SSCL] 冻结策略已应用：仅 decoder 末尾 %d/%d 层 + decoder norm + class_embed + 附加模块参数可训练",
+            unfreeze_layers,
+            num_decoder_layers,
+        )
 
     def _sscl_loss_callback(
         self,

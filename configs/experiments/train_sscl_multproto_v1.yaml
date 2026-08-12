@@ -10,8 +10,8 @@ model:
 train:
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-PAN-only
   dataset_file: yolo
-  output_dir: output/0812-SHWX-SSCL-MultiProto-v1-不使用灰度RGB增广-4slots
-  epochs: 6
+  output_dir: output/0812-SHWX-SSCL-MultiProto-v1-原始不切割-decoder2-e18
+  epochs: 18
   batch_size: 32
   grad_accum_steps: 2
   num_workers: 12
@@ -19,7 +19,7 @@ train:
   lr_encoder: 1e-5
   weight_decay: 1e-4
   clip_max_norm: 0.1
-  lr_drop: 6
+  lr_drop: 18
   warmup_epochs: 0.0
   tensorboard: true
   wandb: false
@@ -31,7 +31,7 @@ train:
   use_ema: true
   compute_val_loss: false
   aug_config: AERIAL
-  mosaic_p: 0.1
+  mosaic_p: 0.0
   multi_scale: false
 
   # --- 平方根重采样 ---
@@ -52,12 +52,13 @@ train:
   sscl_confusing_classes: [0, 1, 2, 3]
   sscl_start_epoch: 0
   sscl_freeze_strategy: conservative
+  sscl_unfreeze_decoder_layers: 2
 
   # --- 多 slot 原型 v1 ---
   sscl_prototype_enabled: true
   sscl_prototype_momentum: 0.99
   sscl_prototype_min_samples: 1
-  sscl_prototype_max_slots: 4
+  sscl_prototype_max_slots: 2
   sscl_prototype_multi_slot_classes: [0, 1, 2, 3]
   sscl_prototype_group_pairs: [[0, 1], [2, 3]]
   sscl_prototype_group_weight: 1.5
@@ -80,9 +81,9 @@ train:
   logit_adjustment_enabled: false
 test:
   dataset: shwx
-  checkpoint: output/0812-SHWX-SSCL-MultiProto-v1-不使用灰度RGB增广-4slots/checkpoint_best_total.pth
-  output_dir: output/0812-SHWX-SSCL-MultiProto-v1-不使用灰度RGB增广-4slots
-  conf_threshold: 0.25                 # 全局置信度阈值
+  checkpoint: output/0812-SHWX-SSCL-MultiProto-v1-原始不切割-decoder2-e18/checkpoint_best_total.pth
+  output_dir: output/0812-SHWX-SSCL-MultiProto-v1-原始不切割-decoder2-e18
+  conf_threshold: 0.28                 # 全局置信度阈值
   class_conf_thresholds: {}            # 逐类阈值 {类别id: 阈值}；可整段贴入 calibrate_thresholds 产物
   device: cuda:0                       # 无 CUDA 时自动回退 CPU
   batch_size: 32                       # GPU 单次前向图像数
