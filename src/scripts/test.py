@@ -28,6 +28,7 @@
       batch_size: 32
       num_workers: 12
       use_fp16: false
+      output_dir: output/xxx-eval       # 测试输出目录；省略=数据集内置 exp_output_dir
       la_bias:                          # 推理侧 LA bias；省略=关闭
         counts_path: output/xxx/class_counts.json
         k: 1.0
@@ -88,8 +89,10 @@ def main() -> None:
     cfg = expcfg.apply_overrides(cfg, args.set)
     test_cfg = expcfg.build_test_kwargs(cfg)
 
-    # 数据集配置（内置名 shwx/dior）
-    dataset = eval_lib.build_dataset_cfg(test_cfg["dataset"])
+    # 数据集配置（内置名 shwx/dior）；yaml 提供 test.output_dir 时覆盖输出目录
+    dataset = eval_lib.build_dataset_cfg(test_cfg["dataset"], output_dir=test_cfg.get("output_dir"))
+    if test_cfg.get("output_dir"):
+        print(f"[i] 测试输出目录覆盖为: {dataset.exp_output_dir}")
 
     # checkpoint：命令行 > yaml > 数据集默认（exp_output_dir / checkpoint_file）
     checkpoint_path = Path(test_cfg.get("checkpoint") or dataset.exp_output_dir / dataset.checkpoint_file)

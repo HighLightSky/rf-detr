@@ -165,12 +165,20 @@ class DatasetCfg:
     per_class_iou_thresholds: dict[str, float]
 
 
-def build_dataset_cfg(name: str = "shwx", root: Path | None = None) -> DatasetCfg:
+def build_dataset_cfg(
+    name: str = "shwx",
+    root: Path | None = None,
+    output_dir: str | Path | None = None,
+) -> DatasetCfg:
     """按名称构建数据集配置（相对路径以项目根解析）。
 
     Args:
         name: ``DATASET_CONFIGS`` 中的数据集名（``"shwx"`` / ``"dior"``）。
         root: 相对路径解析基准，默认项目根。
+        output_dir: 可选：覆盖 ``exp_output_dir``（测试报告/可视化输出目录）。
+            传相对路径时以 *root* 为基准解析；``None`` 用 ``DATASET_CONFIGS``
+            内置值。各测试实验通过 yaml 的 ``test.output_dir`` 传此参数，避免
+            多次评估互相覆盖输出。
 
     Returns:
         解析后的 DatasetCfg。
@@ -185,6 +193,13 @@ def build_dataset_cfg(name: str = "shwx", root: Path | None = None) -> DatasetCf
     annotation_file = data_dir / cfg["annotation_file"] if cfg.get("annotation_file") else None
     class_names = cfg["class_names"]
     class_to_group = cfg["class_to_group"]
+    # 相对路径（无 / 前缀）以 root 为基准解析，绝对路径原样——与 expcfg.resolve_paths 规则一致
+    if output_dir is not None:
+        exp_output_dir = Path(output_dir)
+        if not str(output_dir).startswith("/"):
+            exp_output_dir = root / exp_output_dir
+    else:
+        exp_output_dir = root / cfg["exp_output_dir"]
     return DatasetCfg(
         name=name,
         data_dir=data_dir,
@@ -192,7 +207,7 @@ def build_dataset_cfg(name: str = "shwx", root: Path | None = None) -> DatasetCf
         label_format=cfg["label_format"],
         label_dir=label_dir,
         annotation_file=annotation_file,
-        exp_output_dir=root / cfg["exp_output_dir"],
+        exp_output_dir=exp_output_dir,
         checkpoint_file=cfg["checkpoint_file"],
         num_classes=cfg["num_classes"],
         vehicle_class_ids=frozenset(cfg["vehicle_class_ids"]),

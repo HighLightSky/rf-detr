@@ -65,6 +65,7 @@ test:                               # test.py 消费
   device: cuda:0
   batch_size: 32
   num_workers: 12
+  output_dir: output/xxx-eval       # 测试输出目录（报告/混淆矩阵/FP·FN）；省略=数据集内置 exp_output_dir
   la_bias:                          # 推理侧 Logit Adjustment；省略=关闭
     counts_path: output/xxx/class_counts.json
     k: 1.0

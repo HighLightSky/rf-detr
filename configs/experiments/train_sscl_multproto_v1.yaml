@@ -8,9 +8,9 @@ model:
   pretrain_weights: output/0805-SHWX-data-expand-rfdetr-baseline/checkpoint_best_total.pth
 
 train:
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-PAN-only
   dataset_file: yolo
-  output_dir: output/0812-SHWX-SSCL-MultiProto-v1
+  output_dir: output/0812-SHWX-SSCL-MultiProto-v1-不使用灰度RGB增广-4slots
   epochs: 6
   batch_size: 32
   grad_accum_steps: 2
@@ -31,8 +31,14 @@ train:
   use_ema: true
   compute_val_loss: false
   aug_config: AERIAL
-  mosaic_p: 0.0
+  mosaic_p: 0.1
   multi_scale: false
+
+  # --- 平方根重采样 ---
+  class_balanced_sampling: true       # 平方根频率过采样
+  class_balanced_threshold: null      # 缺省自动推导 t = 4 × max(freq(目标类集))
+  class_balanced_class_ids: [0, 1]    # 白名单：HM/LQS
+
 
   # --- SSCL 基础配置：沿用 0807 量级，不引入分类均衡与 LA ---
   sscl_enabled: true
@@ -51,7 +57,7 @@ train:
   sscl_prototype_enabled: true
   sscl_prototype_momentum: 0.99
   sscl_prototype_min_samples: 1
-  sscl_prototype_max_slots: 2
+  sscl_prototype_max_slots: 4
   sscl_prototype_multi_slot_classes: [0, 1, 2, 3]
   sscl_prototype_group_pairs: [[0, 1], [2, 3]]
   sscl_prototype_group_weight: 1.5
@@ -74,7 +80,8 @@ train:
   logit_adjustment_enabled: false
 test:
   dataset: shwx
-  checkpoint: output/0812-SHWX-SSCL-MultiProto-v1/checkpoint_best_total.pth
+  checkpoint: output/0812-SHWX-SSCL-MultiProto-v1-不使用灰度RGB增广-4slots/checkpoint_best_total.pth
+  output_dir: output/0812-SHWX-SSCL-MultiProto-v1-不使用灰度RGB增广-4slots
   conf_threshold: 0.25                 # 全局置信度阈值
   class_conf_thresholds: {}            # 逐类阈值 {类别id: 阈值}；可整段贴入 calibrate_thresholds 产物
   device: cuda:0                       # 无 CUDA 时自动回退 CPU
