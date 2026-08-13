@@ -1,0 +1,63 @@
+# 0813 正交消融 A：1024 检测损失微调控制组
+# 目的：排除“从强基线继续训练 18 轮 + 1024 分辨率”本身带来的影响。
+# 用法: python src/scripts/train.py -c configs/experiments/train_ablate_0813_control_1024.yaml
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 1024
+  gradient_checkpointing: true
+  pretrain_weights: output/0813-SHWX-rfdetr-medium-baseline-精细标注/checkpoint_best_total.pth
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_file: yolo
+  output_dir: output/0813-强基线-多原型/ablate-A-control-1024-det-only
+  epochs: 18
+  batch_size: 16
+  grad_accum_steps: 4
+  num_workers: 6
+  lr: 1e-5
+  lr_encoder: 1e-5
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  lr_drop: 18
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 1
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+
+  # 保持与 SSCL 组一致的采样策略，只关闭新增损失。
+  class_balanced_sampling: true
+  class_balanced_threshold: null
+  class_balanced_class_ids: [0, 1]
+
+  sscl_enabled: false
+  sscl_distill_enabled: false
+  class_balance_enabled: false
+  logit_adjustment_enabled: false
+
+test:
+  dataset: shwx
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  resolution: 1024
+  checkpoint: output/0813-强基线-多原型/ablate-A-control-1024-det-only/checkpoint_best_total.pth
+  output_dir: output/0813-强基线-多原型/ablate-A-control-1024-det-only
+  conf_threshold: 0.25
+  class_conf_thresholds: {}
+  device: cuda:0
+  batch_size: 32
+  num_workers: 12
+  prefetch_factor: 3
+  gpu_util_sample_interval: 0.5
+  use_fp16: false
+  save_fp_fn: true
+  save_yolo_preds: false

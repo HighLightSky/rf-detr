@@ -1,5 +1,6 @@
-# SSCL 多 slot 原型 + 难负样本直接抑制 v1：用高分未匹配 query 直接压虚警
-# 用法: python src/scripts/train.py -c configs/experiments/train_sscl_multproto_hardneg_suppress_v1.yaml
+# 0813 正交消融 D：SSCL + 多原型 + 难负样本抑制合用
+# 目的：验证正样本拉开与未匹配 query 抑制是否互补、抵消或一方主导。
+# 用法: python src/scripts/train.py -c configs/experiments/train_ablate_0813_sscl_multproto_hardneg_1024.yaml
 model:
   variant: medium
   num_classes: 25
@@ -10,11 +11,11 @@ model:
 train:
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
   dataset_file: yolo
-  output_dir: output/0813-强基线-多原型/0813-SHWX-SSCL-MultiProto-HardNegSuppress-v5-强基线-1024-强SSCL
+  output_dir: output/0813-强基线-多原型/ablate-D-sscl-multproto-hardneg-1024
   epochs: 18
-  batch_size: 32
-  grad_accum_steps: 2
-  num_workers: 12
+  batch_size: 16
+  grad_accum_steps: 4
+  num_workers: 6
   lr: 1e-5
   lr_encoder: 1e-5
   weight_decay: 1e-4
@@ -34,12 +35,12 @@ train:
   mosaic_p: 0.0
   multi_scale: false
 
-  # --- 平方根重采样 ---
+  # 保持与其他消融组一致。
   class_balanced_sampling: true
   class_balanced_threshold: null
   class_balanced_class_ids: [0, 1]
 
-  # --- SSCL 基础配置 ---
+  # SSCL + 多原型：沿用当前强 SSCL 设定。
   sscl_enabled: true
   sscl_semantic_matrix_path: data/semantic_matrix_shwx.pt
   sscl_matrix_normalize: minmax
@@ -53,7 +54,6 @@ train:
   sscl_freeze_strategy: conservative
   sscl_unfreeze_decoder_layers: 2
 
-  # --- 多 slot 原型 v1 ---
   sscl_prototype_enabled: true
   sscl_prototype_momentum: 0.99
   sscl_prototype_min_samples: 1
@@ -65,7 +65,7 @@ train:
   sscl_projection_dim: 128
   sscl_prototype_instance_pos: true
 
-  # --- 难负样本直接抑制 v1 ---
+  # MS=3 不参与抑制；该组与 B/C 形成 2×2 正交对照。
   sscl_hard_neg_enabled: true
   sscl_hard_neg_topk: 5
   sscl_hard_neg_score_thresh: -0.7
@@ -80,7 +80,6 @@ train:
   sscl_hard_neg_proto_margin: 0.1
   sscl_hard_neg_proto_temperature: 0.1
 
-  # --- 明确关闭本轮不做的机制 ---
   sscl_distill_enabled: false
   sscl_distill_lambda: 0.5
   sscl_distill_temperature: 2.0
@@ -89,12 +88,13 @@ train:
   sscl_protected_classes: null
   class_balance_enabled: false
   logit_adjustment_enabled: false
+
 test:
   dataset: shwx
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo   # 与训练侧一致
-  resolution: 1024                # 推理分辨率须与训练一致（medium 640 训练）
-  checkpoint: output/0813-强基线-多原型/0813-SHWX-SSCL-MultiProto-HardNegSuppress-v5-强基线-1024-强SSCL/checkpoint_best_total.pth
-  output_dir: output/0813-强基线-多原型/0813-SHWX-SSCL-MultiProto-HardNegSuppress-v5-强基线-1024-强SSCL
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  resolution: 1024
+  checkpoint: output/0813-强基线-多原型/ablate-D-sscl-multproto-hardneg-1024/checkpoint_best_total.pth
+  output_dir: output/0813-强基线-多原型/ablate-D-sscl-multproto-hardneg-1024
   conf_threshold: 0.25
   class_conf_thresholds: {}
   device: cuda:0

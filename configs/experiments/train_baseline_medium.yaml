@@ -47,8 +47,8 @@ train:
   dataset_cache_rebuild: false
 test:
   dataset: shwx
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo   # 与训练侧一致
-  resolution: 640                # 推理分辨率须与训练一致（medium 640 训练）
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  resolution: 640                # 推理分辨率（medium 640 训练）
   checkpoint: output/0813-SHWX-rfdetr-medium-baseline-精细标注/checkpoint_best_total.pth
   output_dir: output/0813-SHWX-rfdetr-medium-baseline-精细标注
   conf_threshold: 0.25
