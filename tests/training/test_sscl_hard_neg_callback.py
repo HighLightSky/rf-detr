@@ -305,7 +305,7 @@ class TestMultiPrototypeConfigValidation:
         assert cfg.sscl_prototype_group_pairs == [[0, 1], [2, 3]]
 
     def test_config_rejects_bad_slot_count(self) -> None:
-        """slot 数必须至少为 1。"""
+        """Slot 数必须至少为 1。"""
         with pytest.raises(ValueError, match="sscl_prototype_max_slots"):
             TrainConfig(
                 dataset_dir="/tmp/dummy",
@@ -314,7 +314,7 @@ class TestMultiPrototypeConfigValidation:
             )
 
     def test_config_rejects_bad_decoder_unfreeze_count(self) -> None:
-        """decoder 解冻层数必须至少为 1。"""
+        """Decoder 解冻层数必须至少为 1。"""
         with pytest.raises(ValueError, match="sscl_unfreeze_decoder_layers"):
             TrainConfig(
                 dataset_dir="/tmp/dummy",

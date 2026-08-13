@@ -18,7 +18,7 @@ import io
 import pytest
 import torch
 
-from rfdetr.sscl import PrototypeBank, SSCLLoss, SlotPrototypeBank
+from rfdetr.sscl import PrototypeBank, SlotPrototypeBank, SSCLLoss
 
 # 5 类测试用语义相似度矩阵（模拟舰船内部高相似、跨大类低相似）
 _SEMANTIC_MATRIX = torch.tensor(

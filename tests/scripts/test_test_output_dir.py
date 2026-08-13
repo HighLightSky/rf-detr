@@ -5,8 +5,7 @@
 # ------------------------------------------------------------------------
 """``test.output_dir`` 配置测试：测试评估输出目录可被 yaml 配置覆盖。
 
-改动前测试输出固定写到 ``DATASET_CONFIGS`` 内置的 ``exp_output_dir``（每次评估互相覆盖）。
-改动后 ``test.py`` 从 yaml 的 ``test.output_dir`` 读取目录并传给
+改动前测试输出固定写到 ``DATASET_CONFIGS`` 内置的 ``exp_output_dir``（每次评估互相覆盖）。 改动后 ``test.py`` 从 yaml 的 ``test.output_dir`` 读取目录并传给
 ``eval_lib.build_dataset_cfg(output_dir=...)`` 覆盖，报告/混淆矩阵/FP·FN 全部落到新目录。
 """
 
@@ -42,7 +41,7 @@ class TestBuildDatasetCfgOutputDir:
 
 
 class TestTestYamlOutputDirParsing:
-    """yaml ``test.output_dir`` 经 ``expcfg`` 解析后为绝对路径（test.py 直接消费）。"""
+    """Yaml ``test.output_dir`` 经 ``expcfg`` 解析后为绝对路径（test.py 直接消费）。"""
 
     def test_relative_output_dir_resolved_to_absolute(self, tmp_path):
         """``output_dir: output/xxx`` 在 ``build_test_kwargs`` 阶段即解析为项目根下的绝对路径。"""
