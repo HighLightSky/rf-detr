@@ -25,13 +25,15 @@ configs/experiments/
 │   ├── train_template.yaml
 │   ├── test_template.yaml
 │   └── predict_template.yaml
-├── train_baseline.yaml            # 等价旧 train.py（nano 基线）
+├── train_baseline.yaml            # nano 基线（0813 重标注版，分辨率 704 防漏检小目标）
+├── train_baseline_medium.yaml     # medium 基线（与 nano 其余配置一致，分辨率 640）
 ├── train_sscl_0807.yaml           # 等价旧 train_sscl.py（0807 纯原型）
 ├── train_sscl_all.yaml            # 等价旧 train_sscl_all.py（全类别）
 ├── train_sscl_strong_A/B/C.yaml   # 等价旧 train_sscl_strong.py（强作用力/判别矩阵/组合）
 ├── train_sscl_hardneg_k3.yaml     # 等价旧 train_sscl_hardneg.py（k=5 用 --set）
 ├── train_sscl_class_balance_E1.yaml  # 等价旧 train_sscl_class_balance.py（P0/P1）
 ├── train_sscl_multproto_v1.yaml   # 多 slot 原型 v1（HM/LQS/QHS/MS）
+├── train_sscl_multproto_hardneg_suppress_v1.yaml  # 多 slot + 难负样本直接抑制
 ├── train_lora.yaml                # 等价旧 train_LoRA.py
 ├── test_shwx.yaml / test_dior.yaml
 └── predict_shwx.yaml
@@ -98,6 +100,8 @@ predict:                            # predict.py 消费
    # hardneg k=5
    python src/scripts/train.py -c configs/experiments/train_sscl_hardneg_k3.yaml \
      --set train.sscl_hard_neg_topk=5 --set train.output_dir=output/xxxx-HardNeg-k5-iou03
+   # 多 slot + 难负样本直接抑制
+   python src/scripts/train.py -c configs/experiments/train_sscl_multproto_hardneg_suppress_v1.yaml
    ```
 
 ## 旧脚本 → yaml 迁移映射表

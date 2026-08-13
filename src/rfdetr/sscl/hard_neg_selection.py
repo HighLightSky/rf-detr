@@ -12,13 +12,11 @@
    带（下界 0.0 纳入纯背景/低 IoU 区域——对准"纯背景虚警"靶点；上界 0.3
    剔除真实目标的重复检测——DETR 的 1-to-1 匹配会让部分真实目标成为
    未匹配 query，绝不能把它们当负样本）；
-3. 分数 = 最大前景 logit ``pred_logits[:, :-1].max(-1)``，过滤
-   ``>= score_thresh``；
-4. 按分数降序（stable）取 top-k，索引映射回 decoder hidden states。
+3. 分数 = 目标前景类别集合内最大 logit，过滤 ``>= score_thresh``；
+4. 按分数降序（stable）取 top-k，返回 query 索引。
 
-选择出的难例特征已 ``detach``，不参与反向传播；逐 batch 动态生成、用完即弃，
-不 EMA、不入类别原型库。同时返回等量的**随机未匹配**特征作为硬度对照基线，
-供诊断脚本与训练监控评估"难例是否真的比随机未匹配更贴近类别原型"。
+选择器只返回索引，不截断梯度；训练侧用这些索引直接监督高置信未匹配
+query 降低前景分数，从而对虚警本身反传。
 
 纯函数、无 module/训练框架依赖，训练回调与离线诊断脚本共用同一实现。
 """
@@ -30,10 +28,7 @@ from torch import Tensor
 
 from rfdetr.utilities.box_ops import box_cxcywh_to_xyxy, box_iou
 
-# 难例 IoU 带：与任一 GT 的最大 IoU 落在此区间内才视为难例。
-# [0.1, 0.5] 偏"贴目标的次优框"（原默认）；实验改为 [0.0, 0.3] 对准
-# "纯背景虚警"（analyze_fp_decomposition 显示其占舰船 FP 的 56%），
-# 上界 0.3 仍排除真实目标的重复检测（召回保护）。
+# 默认难例 IoU 带：对准纯背景/低 IoU 虚警，上界 0.3 保护重复检测不被误标负样本。
 IOU_BAND_LOW = 0.0
 IOU_BAND_HIGH = 0.3
 
@@ -41,36 +36,38 @@ IOU_BAND_HIGH = 0.3
 def select_hard_negatives_for_image(
     pred_logits: Tensor,
     pred_boxes: Tensor,
-    hs: Tensor,
     gt_boxes: Tensor,
     matched_src: Tensor,
     top_k: int = 3,
     score_thresh: float = 0.0,
-    seed: int | None = None,
-) -> tuple[Tensor, Tensor, dict[str, float]]:
+    target_classes: list[int] | Tensor | None = None,
+    iou_low: float = IOU_BAND_LOW,
+    iou_high: float = IOU_BAND_HIGH,
+) -> tuple[Tensor, dict[str, float]]:
     """单图难例负样本选择（纯函数，无梯度副作用）。
 
     Args:
         pred_logits: 该图全部 query 的分类 logits ``[Q, C+1]``（末位为
             background）。
         pred_boxes: 该图全部 query 的预测框 ``[Q, 4]``（cxcywh 归一化）。
-        hs: 该图全部 query 的 decoder 最后一层 hidden states ``[Q, D]``。
         gt_boxes: 该图 GT 框 ``[M, 4]``（cxcywh 归一化，可能为空）。
         matched_src: 该图 Hungarian matching 匹配到的 query 索引 ``[N_m]``
             （被排除，绝不能成为难例）。
         top_k: 每图最多选取的难例数量（按最大前景 logit 降序，stable）。
         score_thresh: 最大前景 logit 下限，低于该值不选。
-        seed: 随机对照特征采样的随机种子（仅测试传参，训练时传 ``None``）。
+        target_classes: 参与挖掘的前景类别索引。为 ``None`` 时使用全部前景类。
+        iou_low: 难例 IoU 带下界。
+        iou_high: 难例 IoU 带上界。
 
     Returns:
-        ``(hn_features, random_features, stats)`` 元组：
-        - hn_features: ``[k, D]`` 已 detach 的难例特征（k 可能 < top_k 甚至为 0）。
-        - random_features: ``[k', D]`` 已 detach 的随机未匹配 query 特征
-          （硬度对照基线，无 IoU/分数约束；k' = min(top_k, 未匹配数)）。
-        - stats: ``{"n_selected", "n_band", "n_unmatched"}`` CPU 标量。
+        ``(hn_indices, stats)`` 元组：
+        - hn_indices: ``[k]`` 难例 query 索引（k 可能 < top_k 甚至为 0）。
+        - stats: ``{"n_selected", "n_band", "n_unmatched", "score_mean",
+          "iou_mean"}`` CPU 标量。
     """
     device = pred_logits.device
     num_q = pred_logits.shape[0]
+    num_foreground = max(0, pred_logits.shape[-1] - 1)
 
     # 1. 排除 matched query（补集 = 未匹配 query）
     unmatched = torch.ones(num_q, dtype=torch.bool, device=device)
@@ -80,6 +77,8 @@ def select_hard_negatives_for_image(
         "n_selected": 0.0,
         "n_band": 0.0,
         "n_unmatched": float(unmatched.sum().item()),
+        "score_mean": 0.0,
+        "iou_mean": 0.0,
     }
 
     # 2. IoU 带过滤（空 GT 时退化：无候选，max_iou 全 0）
@@ -88,32 +87,26 @@ def select_hard_negatives_for_image(
         max_iou = iou.max(dim=1).values  # [Q]
     else:
         max_iou = torch.zeros(num_q, device=device)
-    in_band = (max_iou >= IOU_BAND_LOW) & (max_iou <= IOU_BAND_HIGH) & unmatched
+    in_band = (max_iou >= iou_low) & (max_iou <= iou_high) & unmatched
     stats["n_band"] = float(in_band.sum().item())
 
     # 3+4. 分数过滤 + stable 降序 top-k（并列时取索引更小的 query）
-    scores = pred_logits[:, :-1].max(dim=-1).values  # [Q]
+    if target_classes is None:
+        class_idx = torch.arange(num_foreground, device=device)
+    else:
+        class_idx = torch.as_tensor(target_classes, dtype=torch.long, device=device)
+        class_idx = class_idx[(class_idx >= 0) & (class_idx < num_foreground)]
+    if class_idx.numel() == 0:
+        return torch.empty(0, dtype=torch.long, device=device), stats
+    scores = pred_logits[:, class_idx].max(dim=-1).values  # [Q]
     candidates = in_band & (scores >= score_thresh)
     selected = torch.empty(0, dtype=torch.long, device=device)
     if candidates.any():
         cand_idx = candidates.nonzero(as_tuple=False).flatten()
         order = torch.argsort(scores[cand_idx], descending=True, stable=True)[:top_k]
         selected = cand_idx[order]
-    hn_features = hs[selected].detach()
     stats["n_selected"] = float(selected.shape[0])
-
-    # 随机未匹配对照特征（与难例等量，便于硬度对比；训练时可确定性传 seed）。
-    # 注意：必须在未匹配 query 的"索引集合"内采样——若先对全量 query 置乱再
-    # 用布尔掩码取位置，会混入 matched query（掩码选的是排列的位置而非值）。
-    rand_idx = torch.empty(0, dtype=torch.long, device=device)
-    if unmatched.any():
-        unmatched_idx = unmatched.nonzero(as_tuple=False).flatten()  # [U]
-        k = min(top_k, unmatched_idx.shape[0])
-        generator = torch.Generator(device=device) if seed is not None else None
-        if generator is not None:
-            generator.manual_seed(seed)
-        perm = torch.randperm(unmatched_idx.shape[0], generator=generator, device=device)
-        rand_idx = unmatched_idx[perm[:k]]
-    random_features = hs[rand_idx].detach()
-
-    return hn_features, random_features, stats
+    if selected.numel() > 0:
+        stats["score_mean"] = float(scores[selected].mean().detach().item())
+        stats["iou_mean"] = float(max_iou[selected].mean().detach().item())
+    return selected, stats

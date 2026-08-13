@@ -12,11 +12,10 @@ CPU 标量统计，epoch 末统一输出到 ``train/sscl/*`` 前缀后清空（�
 指标：
 - ``hn_count`` / ``hn_fill_rate``：每图平均难例数、IoU 带内未匹配候选占比
   （填充率过低说明难例不常见，需要放宽采样规则）；
-- ``hn_proto_cos`` / ``random_proto_cos`` / ``matched_proto_cos``：难例 /
-  随机未匹配 / matched 三组特征与类别原型的平均余弦（"难例是否硬"的直接
-  证据）；
-- ``hn_vs_random_gap`` / ``hn_vs_matched_gap``：难例相对随机未匹配与
-  matched 的余弦差距（> 0 表示难例更贴类中心，即"硬"成立）。
+- ``hn_score_mean`` / ``hn_iou_mean``：被选中难负样本的目标类最高 logit
+  均值和最大 IoU 均值；
+- ``hn_logit_loss`` / ``hn_proto_loss``：直接前景 logit 抑制与原型排斥损失
+  的未加外部权重数值。
 """
 
 from __future__ import annotations

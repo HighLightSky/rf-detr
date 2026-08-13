@@ -181,7 +181,6 @@ class SSCLLoss(nn.Module):
         self,
         features: Tensor,
         labels: Tensor,
-        hard_neg_features: Tensor | None = None,
     ) -> Tensor:
         """计算 SSCL 损失。
 
@@ -190,10 +189,6 @@ class SSCLLoss(nn.Module):
                 即 decoder 最后一层输出中与 GT 匹配的 query 特征。启用投影头时
                 内部会先投影到对比空间再计算损失。
             labels: 每个 query 匹配到的 GT 类别标签 ``[N_fg]``。
-            hard_neg_features: 已 detach 的难例负样本特征 ``[K, hidden_dim]``
-                （仅原型模式生效，实例模式忽略）。内部投影到同一对比空间后
-                作为额外分母列追加（权重 1.0、无类别身份、无语义加权）。
-
         Returns:
             标量 SSCL 损失。当没有有效 anchor（如 batch 内正样本不足）时
             返回 0 损失的张量，不产生梯度。
@@ -208,7 +203,7 @@ class SSCLLoss(nn.Module):
         # 原型模式下"每类仅 1 个样本"恰恰是要规避 batch 影响的核心场景，
         # 不能被提前拦截为零损失。原型模式在 _prototype_forward 内部自行投影。
         if self.prototype_mode:
-            return self._prototype_forward(features, labels, hard_neg_features=hard_neg_features)
+            return self._prototype_forward(features, labels)
         # 实例模式：先投影到对比空间（未启用投影头时 _project 恒等）
         features = self._project(features)
         if num_fg < 2:
@@ -292,7 +287,6 @@ class SSCLLoss(nn.Module):
         self,
         features: Tensor,
         labels: Tensor,
-        hard_neg_features: Tensor | None = None,
     ) -> Tensor:
         """原型锚定模式下的 SSCL 损失。
 
@@ -302,15 +296,9 @@ class SSCLLoss(nn.Module):
         锚点，彻底摆脱 batch 内同类样本的构成。
         启用投影头时特征先投影到对比空间，原型库也建立在投影空间；
         启用实例正样本时正样本 = 本类原型 ∪ 同类别实例（对齐论文 Eq.9）；
-        传入难例负样本时额外追加为分母列（权重 1.0），补齐"前景-背景边界"
-        负样本维度。分子不变，故 ``loss >= 0`` 且 ``loss(含难例) >= loss(不含)``
-        恒成立（分母单调增）。
-
         Args:
             features: matched foreground query features ``[N_fg, hidden_dim]``。
             labels: 每个 query 匹配到的 GT 类别标签 ``[N_fg]``。
-            hard_neg_features: 已 detach 的难例负样本特征 ``[K, hidden_dim]``，
-                为 ``None`` 或 K=0 时不追加（与基线行为完全一致）。
 
         Returns:
             标量 SSCL 损失。无有效原型或无有效 anchor 时返回零损失张量。
@@ -406,22 +394,6 @@ class SSCLLoss(nn.Module):
         # 本类 slot 相似度（正样本集合）
         pos_logits = torch.where(pos_mask, sim, neg_inf_tensor)  # [N, C*K]
 
-        # 难例负样本：追加为额外分母列（权重 1.0，无语义权重、无类别身份）。
-        # 已 detach（难例方向不产生梯度，只推离 anchor）；K=0 时 no-op。
-        # 在实例正样本分支之前追加，保证实例正样本也出现在难例路径的分母中；
-        # 分母列序变为 [C*K slot 原型, K_hn 难例, N 实例正样本]。
-        if hard_neg_features is not None and hard_neg_features.shape[0] > 0:
-            u_hn = F.normalize(self._project(hard_neg_features.detach()), dim=-1)  # [K, D]
-            hn_sim = u @ u_hn.T / self.tau  # [N, K]
-            # 数值安全：非有限（NaN/Inf）列置 -inf，等价于不参与分母 logsumexp
-            finite = torch.isfinite(hn_sim).all(dim=0)  # [K]
-            hn_sim = torch.where(
-                finite.unsqueeze(0),
-                hn_sim,
-                torch.tensor(neg_inf, device=hn_sim.device, dtype=hn_sim.dtype),
-            )
-            denom_logits = torch.cat([denom_logits, hn_sim], dim=-1)  # [N, C*K+K_hn]
-
         if self.prototype_instance_pos:
             # 同类别实例正样本：正样本 = 本类原型 ∪ 同类别实例（对齐论文 Eq.9）。
             # 真实同类实例从第一步提供"ground-truth"引力，锚定随机初始化投影头
@@ -434,7 +406,7 @@ class SSCLLoss(nn.Module):
             # 所有正项都在分母中（本类原型权重 1、实例正样本权重 1），保证 loss >= 0。
             num_logits = torch.cat([pos_logits, pos_inst], dim=-1)  # [N, C*K+N]
             log_numerator = torch.logsumexp(num_logits, dim=-1)  # [N]
-            denom_logits = torch.cat([denom_logits, pos_inst], dim=-1)  # [N, C*K+K_hn+N]
+            denom_logits = torch.cat([denom_logits, pos_inst], dim=-1)  # [N, C*K+N]
             log_denominator = torch.logsumexp(denom_logits, dim=-1)  # [N]
         else:
             log_numerator = torch.logsumexp(pos_logits, dim=-1)  # [N]

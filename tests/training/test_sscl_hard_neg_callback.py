@@ -6,11 +6,10 @@
 """难例负样本 SSCL 回调的单元测试。
 
 不依赖 GPU 与网络，验证 RFDETRModelModule 中难例负样本的接线：
-- 训练态启用时：难例被选择进分母、监控被喂入、原型库只收 matched 特征。
+- 训练态启用时：难例产生独立抑制损失、监控被喂入、原型库只收 matched 特征。
 - 禁用/验证态：难例不选择、监控不喂入、行为与基线一致。
 - 监控节流（global_step % interval）。
-- TrainConfig 校验（难例依赖原型模式、top-k >= 1）。
-- 实例模式忽略难例（无原型库、监控不喂入）。
+- TrainConfig 校验（top-k、IoU 区间、损失权重）。
 """
 
 from __future__ import annotations
@@ -68,6 +67,14 @@ def _make_config(**overrides: object) -> SimpleNamespace:
         "sscl_hard_neg_topk": 3,
         "sscl_hard_neg_score_thresh": 0.0,
         "sscl_hard_neg_log_interval": 100,
+        "sscl_hard_neg_target_classes": [0, 1, 2],
+        "sscl_hard_neg_iou_low": 0.0,
+        "sscl_hard_neg_iou_high": 0.3,
+        "sscl_hard_neg_logit_margin": -1.5,
+        "sscl_hard_neg_logit_temperature": 1.0,
+        "sscl_hard_neg_proto_lambda": 0.1,
+        "sscl_hard_neg_proto_margin": 0.1,
+        "sscl_hard_neg_proto_temperature": 0.1,
     }
     kwargs.update(overrides)
     return SimpleNamespace(**kwargs)
@@ -110,10 +117,15 @@ def _build_module(
 def _make_outputs() -> dict[str, torch.Tensor]:
     """构造模型输出：q3 为带内难例候选（IoU 0.25）且前景分最高。"""
     generator = torch.Generator().manual_seed(0)
-    hs = torch.randn(1, 6, 16, generator=generator)
-    pred_logits = torch.full((1, 6, 3), 0.1)
-    pred_logits[0, 3, 0] = 5.0  # q3 前景分最高
-    pred_logits[:, :, -1] = 9.0  # background 列高分（必须被忽略）
+    hs = torch.randn(1, 6, 16, generator=generator).requires_grad_()
+    base = hs[:, :, :2].mean(dim=-1, keepdim=True).expand(-1, -1, 2)
+    bg = torch.full((1, 6, 1), 9.0)
+    pred_logits = torch.cat([base, bg], dim=-1)
+    pred_logits = pred_logits + torch.zeros_like(pred_logits).index_put(
+        (torch.tensor([0]), torch.tensor([3]), torch.tensor([0])),
+        torch.tensor(5.0),
+    )
+    pred_logits.retain_grad()
     return {
         "hs": hs,
         "pred_logits": pred_logits,
@@ -130,8 +142,8 @@ def _warm_bank_for_matched(module: RFDETRModelModule) -> None:
 class TestSSCLHardNegCallback:
     """难例负样本回调的接线行为。"""
 
-    def test_callback_selects_and_appends(self) -> None:
-        """训练态 + 启用：难例被选择进分母、监控被喂入、原型库只收 matched。"""
+    def test_callback_selects_and_suppresses(self) -> None:
+        """训练态 + 启用：难例产生独立损失，梯度打到虚警 query。"""
         module = _build_module(training=True, hard_neg_enabled=True, global_step=0)
         _warm_bank_for_matched(module)
         outputs = _make_outputs()
@@ -140,14 +152,22 @@ class TestSSCLHardNegCallback:
         before = module.sscl_loss.prototype_bank.num_updates.clone()
 
         result = module._sscl_loss_callback(outputs, targets, indices)
-        # 返回字典只含 loss_sscl（不污染 loss_dict）
-        assert set(result) == {"loss_sscl"}
+        assert set(result) == {"loss_sscl", "loss_sscl_hard_neg"}
         assert torch.isfinite(result["loss_sscl"])
+        assert torch.isfinite(result["loss_sscl_hard_neg"])
+        assert result["loss_sscl_hard_neg"].item() > 0.0
+        result["loss_sscl_hard_neg"].backward(retain_graph=True)
+        assert outputs["pred_logits"].grad is not None
+        assert outputs["pred_logits"].grad[0, 3, 0].abs().item() > 0.0
+        assert outputs["hs"].grad is not None
+        assert outputs["hs"].grad[0, 3].abs().sum().item() > 0.0
         # 监控被喂入（global_step=0 命中 interval=100），含难例统计键
         monitor = module._hard_neg_monitor
         assert monitor._step_count == 1
         assert "hn_count" in monitor._acc
-        assert "hn_proto_cos" in monitor._acc
+        assert "hn_score_mean" in monitor._acc
+        assert "hn_logit_loss" in monitor._acc
+        assert "hn_proto_loss" in monitor._acc
         # 原型库只收 matched 类别：仅类 2 更新一次，其他类别（含难例）绝无更新
         num_updates = module.sscl_loss.prototype_bank.num_updates
         assert int(num_updates[2].item()) == int(before[2].item()) + 1
@@ -198,34 +218,27 @@ class TestSSCLHardNegCallback:
         assert module._hard_neg_monitor._step_count == 0  # 50 % 100 != 0
 
         module._trainer.global_step = 100
-        module._sscl_loss_callback(outputs, targets, indices)
+        result = module._sscl_loss_callback(outputs, targets, indices)
+        assert set(result) == {"loss_sscl", "loss_sscl_hard_neg"}
         assert module._hard_neg_monitor._step_count == 1  # 100 % 100 == 0
 
-    def test_callback_instance_mode_no_bank_no_hn(self) -> None:
-        """实例模式 + 启用难例：不崩溃、无原型库、监控不喂入（hardness_stats 为空）。"""
+    def test_callback_instance_mode_still_suppresses_logits(self) -> None:
+        """实例模式 + 启用难例：仍可用 logit 抑制，原型排斥自动为 0。"""
         module = _build_module(training=True, prototype_mode=False, hard_neg_enabled=True, global_step=0)
         outputs = _make_outputs()
         targets = [{"labels": torch.tensor([2]), "boxes": _GT_BOXES}]
         indices = [(torch.tensor([0]), torch.tensor([0]))]
 
         result = module._sscl_loss_callback(outputs, targets, indices)
-        assert set(result) == {"loss_sscl"}
+        assert set(result) == {"loss_sscl", "loss_sscl_hard_neg"}
         assert torch.isfinite(result["loss_sscl"])
+        assert result["loss_sscl_hard_neg"].item() > 0.0
         assert not hasattr(module.sscl_loss, "prototype_bank")
-        assert module._hard_neg_monitor._step_count == 0
+        assert module._hard_neg_monitor._step_count == 1
 
 
 class TestHardNegConfigValidation:
     """TrainConfig 难例字段的校验规则。"""
-
-    def test_config_requires_prototype_mode(self) -> None:
-        """未启用原型模式时启用难例应报错。"""
-        with pytest.raises(ValueError, match="sscl_prototype_enabled"):
-            TrainConfig(
-                dataset_dir="/tmp/dummy",
-                sscl_hard_neg_enabled=True,
-                sscl_prototype_enabled=False,
-            )
 
     def test_config_topk_must_be_positive(self) -> None:
         """Topk < 1 应报错。"""
@@ -242,12 +255,36 @@ class TestHardNegConfigValidation:
         cfg = TrainConfig(
             dataset_dir="/tmp/dummy",
             sscl_hard_neg_enabled=True,
-            sscl_prototype_enabled=True,
             sscl_hard_neg_topk=5,
             sscl_hard_neg_score_thresh=0.5,
+            sscl_hard_neg_target_classes=[0, 1, 24],
+            sscl_hard_neg_iou_low=0.0,
+            sscl_hard_neg_iou_high=0.3,
+            sscl_hard_neg_loss_lambda=0.3,
+            sscl_hard_neg_logit_temperature=1.0,
         )
         assert cfg.sscl_hard_neg_topk == 5
         assert cfg.sscl_hard_neg_score_thresh == 0.5
+        assert cfg.sscl_hard_neg_target_classes == [0, 1, 24]
+
+    def test_config_rejects_bad_iou_band(self) -> None:
+        """IoU 区间必须合法。"""
+        with pytest.raises(ValueError, match="sscl_hard_neg_iou"):
+            TrainConfig(
+                dataset_dir="/tmp/dummy",
+                sscl_hard_neg_enabled=True,
+                sscl_hard_neg_iou_low=0.4,
+                sscl_hard_neg_iou_high=0.3,
+            )
+
+    def test_config_rejects_bad_lambda(self) -> None:
+        """损失权重不能为负。"""
+        with pytest.raises(ValueError, match="sscl_hard_neg_loss_lambda"):
+            TrainConfig(
+                dataset_dir="/tmp/dummy",
+                sscl_hard_neg_enabled=True,
+                sscl_hard_neg_loss_lambda=-0.1,
+            )
 
 
 class TestMultiPrototypeConfigValidation:

@@ -1,0 +1,63 @@
+# nano 基线全量微调（0813 重新标注版：小目标/小船重新标注、框更精确）
+# 用法: python src/scripts/train.py -c configs/experiments/train_baseline.yaml
+# 说明:
+#   - 分辨率 384 -> 704：nano 上探官方检测家族最大分辨率（large=704），避免漏检重新标注的小目标
+#     （704 是 patch_size(16) × num_windows(2) 的倍数，PE 自动同步为 44，加载官方权重时 bicubic 插值）
+#   - 安全裁切已是默认路径（RandomSizedBBoxSafeCrop，erosion_rate=0.0，裁窗始终包含所有框的并集，
+#     航母/两栖舰等大目标不会被切断），mosaic 维持 0.5 以保留尺度多样性
+#   - 显存预算：5090 32GB 下 batch 16 + accum 4（有效 batch=64，与旧基线一致），
+#     多尺度峰值约 832px（704+128），峰值显存较旧基线(384@b32)高约 30%，OOM 则降 batch 到 8/accum 8
+model:
+  variant: nano                 # nano/small/medium/large/large_deprecated
+  num_classes: 25
+  resolution: 704               # 提高分辨率找小目标（nano 默认 384）
+  gradient_checkpointing: true
+  freeze_encoder: false         # 0805 对比实验证明全量微调更优（ship Recall 0.42 -> 0.80）
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_file: yolo
+  output_dir: output/0813-SHWX-rfdetr-nano-baseline-精细标注
+  epochs: 120
+  batch_size: 16               # 704 分辨率下调 batch 保持有效 batch=64（384@b32 -> 704@b16）
+  grad_accum_steps: 4          # 有效 batch = 64（与旧基线一致）
+  num_workers: 6
+  lr: 1e-4
+  lr_encoder: 1.5e-4
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  multi_scale: true             # 与旧基线一致（TrainConfig 默认 true，此处显式声明）
+  lr_drop: 70
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 5
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL             # 预设名：AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/none
+  mosaic_p: 0.1
+  # 平方根频率过采样（注意与 P0 class_balance_* 区分，两套机制不同）
+  class_balanced_sampling: true
+  class_balanced_threshold: null
+  class_balanced_class_ids: [0, 1]   # 0=HM 航母, 1=LQS 两栖舰；空=全部类别
+  dataset_cache_mode: raw
+  dataset_cache_dir: null        # null=使用 output_dir/dataset_cache
+  dataset_cache_rebuild: false
+test:
+  dataset: shwx
+  checkpoint: output/0813-SHWX-rfdetr-nano-baseline-精细标注/checkpoint_best_total.pth
+  output_dir: output/0813-SHWX-rfdetr-nano-baseline-精细标注
+  conf_threshold: 0.25
+  class_conf_thresholds: {}
+  device: cuda:0
+  batch_size: 32
+  num_workers: 12
+  prefetch_factor: 3
+  gpu_util_sample_interval: 0.5
+  use_fp16: false
+  save_fp_fn: true
+  save_yolo_preds: false

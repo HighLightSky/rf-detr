@@ -55,6 +55,7 @@ _TRAIN_PROGRESS_LOSS_ALIASES: dict[str, str] = {
     "loss_keypoints_findable": "kp_find",
     "loss_keypoints_visible": "kp_vis",
     "loss_keypoints_nll": "kp_nll",
+    "loss_sscl_hard_neg": "hn",
 }
 
 
@@ -569,6 +570,8 @@ class RFDETRModelModule(LightningModule):
         # 将 SSCL 损失权重注入 criterion 的 weight_dict，使现有训练循环
         # 的 loss 聚合逻辑自动包含 SSCL 项
         self.criterion.weight_dict["loss_sscl"] = cfg.sscl_lambda
+        if cfg.sscl_hard_neg_enabled:
+            self.criterion.weight_dict["loss_sscl_hard_neg"] = cfg.sscl_hard_neg_loss_lambda
 
         # 注册 SSCL 回调：在 criterion forward() 内复用 Hungarian matching
         # 的 indices，避免重复匹配。若同时启用语义头，把监控回调与 SSCL 回调
@@ -603,7 +606,9 @@ class RFDETRModelModule(LightningModule):
             f"projection={cfg.sscl_projection_enabled} (dim={cfg.sscl_projection_dim}), "
             f"instance_pos={cfg.sscl_prototype_instance_pos}, "
             f"hard_neg={cfg.sscl_hard_neg_enabled} "
-            f"(topk={cfg.sscl_hard_neg_topk}, thresh={cfg.sscl_hard_neg_score_thresh})"
+            f"(topk={cfg.sscl_hard_neg_topk}, thresh={cfg.sscl_hard_neg_score_thresh}, "
+            f"target_classes={cfg.sscl_hard_neg_target_classes}, "
+            f"lambda={cfg.sscl_hard_neg_loss_lambda})"
         )
 
     def _apply_sscl_freeze(self) -> None:
@@ -678,27 +683,26 @@ class RFDETRModelModule(LightningModule):
         if "hs" not in outputs:
             return {}
         features, labels = self._extract_matched_query_features(outputs["hs"], indices, targets)
-        hard_neg_features = None
-        # [SSCL-HN] 难例负样本：仅训练阶段选择（验证阶段不选、不喂监控）；
-        # 只进 SSCL 分母，绝不更新原型库（难例是背景/干扰分布，非类别中心）。
+        # [SSCL-HN] 难负样本：仅训练阶段选择（验证阶段不选、不喂监控）。
+        # 新机制直接监督未匹配高分 query 降低前景分数，并可选远离前景原型。
         # 以 _hard_neg_monitor 是否存在作为门控（_setup_sscl 中按配置创建），
         # 与 _semantic_monitor 的判空模式一致。
+        hn_result: dict[str, Tensor] = {}
         if self.training and getattr(self, "_hard_neg_monitor", None) is not None:
-            hard_neg_features, hn_stats = self._select_hard_negatives(outputs, targets, indices)
-            # 诊断监控：节流采样，只喂 CPU 标量（监控不产生损失、不污染 loss_dict）
+            hn_batch_idx, hn_query_idx, hn_stats = self._select_hard_negatives(outputs, targets, indices)
+            hn_result, hn_loss_stats = self._hard_negative_suppression_loss(outputs, hn_batch_idx, hn_query_idx)
+            # 诊断监控：节流采样，只喂 CPU 标量。
             monitor = self._hard_neg_monitor
             interval = int(self.train_config.sscl_hard_neg_log_interval)
-            if self.global_step % interval == 0 and hard_neg_features is not None and hard_neg_features.shape[0] > 0:
-                stats = self.sscl_loss.hardness_stats(features.detach(), hard_neg_features)
-                if stats:  # 有效原型存在时才更新
-                    monitor.update({**hn_stats, **stats})
-        loss = self.sscl_loss(features, labels, hard_neg_features=hard_neg_features)
+            if self.global_step % interval == 0:
+                monitor.update({**hn_stats, **hn_loss_stats})
+        loss = self.sscl_loss(features, labels)
         # [SSCL] 原型模式：训练阶段用 detach 特征更新类别原型库（无梯度）。
         # 不做 start_epoch 门控——sscl_start_epoch 前 loss 权重为 0，原型更新
         # 作为预热让锚点在 SSCL 生效前就绪；验证阶段 self.training 为 False 天然门控。
         if self.training and getattr(self.sscl_loss, "prototype_mode", False):
             self.sscl_loss.update_prototypes(features.detach(), labels)
-        return {"loss_sscl": loss}
+        return {"loss_sscl": loss, **hn_result}
 
     def _extract_matched_query_features(
         self,
@@ -728,12 +732,12 @@ class RFDETRModelModule(LightningModule):
         outputs: dict[str, Any],
         targets: list[dict[str, Tensor]],
         indices: list[tuple[Tensor, Tensor]],
-    ) -> tuple[Tensor | None, dict[str, float]]:
-        """按 batch 选择难例负样本（每图 top-k），返回 ``(hn_features, stats)``。
+    ) -> tuple[Tensor, Tensor, dict[str, float]]:
+        """按 batch 选择难负样本（每图 top-k），返回 batch/query 索引与统计。
 
         逐图调用 ``select_hard_negatives_for_image``：排除 Hungarian matching
-        匹配到的 query，IoU 带 [0.1, 0.5] 过滤，按最大前景 logit 取 top-k；
-        特征已 detach。同时聚合 batch 级统计供 HardNegMonitor 使用。
+        匹配到的 query，IoU 带过滤，按目标类最大前景 logit 取 top-k。
+        返回索引用于后续 gather logits/hs，保留梯度。
 
         Args:
             outputs: 模型输出字典（须含 ``"pred_logits"``、``"pred_boxes"``、
@@ -742,45 +746,122 @@ class RFDETRModelModule(LightningModule):
             indices: Hungarian matching 结果（每图 ``(src_idx, tgt_idx)``）。
 
         Returns:
-            ``(hn_features, stats)`` 元组：
-            - hn_features: ``[K_total, D]`` 已 detach 的难例特征
-              （K_total=0 时返回 ``None``）。
+            ``(batch_idx, query_idx, stats)`` 元组：
+            - batch_idx/query_idx: ``[K_total]`` 难例位置索引。
             - stats: 喂给 HardNegMonitor 的 CPU 标量（``hn_count`` 每图平均
               难例数、``hn_fill_rate`` IoU 带填充率、``n_unmatched_avg``
-              每图平均未匹配数）。
+              每图平均未匹配数、``hn_score_mean`` 与 ``hn_iou_mean``）。
         """
         from rfdetr.sscl.hard_neg_selection import select_hard_negatives_for_image
 
         cfg = self.train_config
-        hn_parts: list[Tensor] = []
+        batch_parts: list[Tensor] = []
+        query_parts: list[Tensor] = []
         n_selected = n_band = n_unmatched = 0
+        score_sum = iou_sum = 0.0
         for b in range(len(indices)):
-            hn_f, _, stats = select_hard_negatives_for_image(
+            hn_idx, stats = select_hard_negatives_for_image(
                 pred_logits=outputs["pred_logits"][b],
                 pred_boxes=outputs["pred_boxes"][b],
-                hs=outputs["hs"][b],
                 gt_boxes=targets[b]["boxes"],
                 matched_src=indices[b][0],
                 top_k=cfg.sscl_hard_neg_topk,
                 score_thresh=cfg.sscl_hard_neg_score_thresh,
+                target_classes=cfg.sscl_hard_neg_target_classes,
+                iou_low=cfg.sscl_hard_neg_iou_low,
+                iou_high=cfg.sscl_hard_neg_iou_high,
             )
-            if hn_f.shape[0] > 0:
-                hn_parts.append(hn_f)
+            if hn_idx.shape[0] > 0:
+                query_parts.append(hn_idx)
+                batch_parts.append(torch.full_like(hn_idx, b))
+                score_sum += float(stats["score_mean"]) * hn_idx.shape[0]
+                iou_sum += float(stats["iou_mean"]) * hn_idx.shape[0]
             n_selected += int(stats["n_selected"])
             n_band += int(stats["n_band"])
             n_unmatched += int(stats["n_unmatched"])
-        if not hn_parts:
-            return None, {
+        if not query_parts:
+            empty = torch.empty(0, dtype=torch.long, device=outputs["pred_logits"].device)
+            return empty, empty, {
                 "hn_count": 0.0,
                 "hn_fill_rate": 0.0,
                 "n_unmatched_avg": float(n_unmatched) / max(1, len(indices)),
+                "hn_score_mean": 0.0,
+                "hn_iou_mean": 0.0,
             }
         batch_stats = {
             "hn_count": float(n_selected) / len(indices),
             "hn_fill_rate": float(n_band) / max(1, n_unmatched),
             "n_unmatched_avg": float(n_unmatched) / max(1, len(indices)),
+            "hn_score_mean": score_sum / max(1, n_selected),
+            "hn_iou_mean": iou_sum / max(1, n_selected),
         }
-        return torch.cat(hn_parts, dim=0), batch_stats
+        return torch.cat(batch_parts, dim=0), torch.cat(query_parts, dim=0), batch_stats
+
+    def _hard_negative_suppression_loss(
+        self,
+        outputs: dict[str, Any],
+        batch_idx: Tensor,
+        query_idx: Tensor,
+    ) -> tuple[dict[str, Tensor], dict[str, float]]:
+        """计算难负样本直接抑制损失。
+
+        Args:
+            outputs: 模型输出字典，包含 ``pred_logits`` 与 ``hs``。
+            batch_idx: 难负样本 batch 索引 ``[K]``。
+            query_idx: 难负样本 query 索引 ``[K]``。
+
+        Returns:
+            ``(loss_dict, stats)``：loss_dict 含 ``loss_sscl_hard_neg``；
+            stats 为训练监控 CPU 标量。
+        """
+        logits = outputs["pred_logits"]
+        zero = logits.sum() * 0.0
+        if batch_idx.numel() == 0:
+            return {"loss_sscl_hard_neg": zero}, {"hn_logit_loss": 0.0, "hn_proto_loss": 0.0}
+
+        cfg = self.train_config
+        num_foreground = logits.shape[-1] - 1
+        if cfg.sscl_hard_neg_target_classes is None:
+            class_idx = torch.arange(num_foreground, device=logits.device)
+        else:
+            class_idx = torch.as_tensor(cfg.sscl_hard_neg_target_classes, dtype=torch.long, device=logits.device)
+            class_idx = class_idx[(class_idx >= 0) & (class_idx < num_foreground)]
+        if class_idx.numel() == 0:
+            return {"loss_sscl_hard_neg": zero}, {"hn_logit_loss": 0.0, "hn_proto_loss": 0.0}
+
+        hn_logits = logits[batch_idx, query_idx][:, class_idx]
+        hardest_logit = hn_logits.max(dim=-1).values
+        logit_temp = float(cfg.sscl_hard_neg_logit_temperature)
+        logit_loss = F.softplus((hardest_logit - float(cfg.sscl_hard_neg_logit_margin)) / logit_temp).mean() * logit_temp
+
+        proto_loss = logit_loss.new_zeros(())
+        if (
+            float(cfg.sscl_hard_neg_proto_lambda) > 0.0
+            and "hs" in outputs
+            and getattr(self.sscl_loss, "prototype_mode", False)
+        ):
+            proto_slots, valid_slots = self.sscl_loss.prototype_bank.get_normalized_slot_prototypes()
+            valid_class = torch.zeros(valid_slots.shape[0], dtype=torch.bool, device=valid_slots.device)
+            valid_class[class_idx.to(valid_slots.device)] = True
+            valid_flat = (valid_slots & valid_class.unsqueeze(1)).reshape(-1)
+            if valid_flat.any():
+                proto_flat = proto_slots.reshape(-1, proto_slots.shape[-1])[valid_flat]
+                hn_features = self.sscl_loss._project(outputs["hs"][batch_idx, query_idx])
+                hn_norm = F.normalize(hn_features, dim=-1)
+                sim = hn_norm @ proto_flat.T
+                proto_temp = float(cfg.sscl_hard_neg_proto_temperature)
+                proto_loss = (
+                    F.softplus((sim.max(dim=-1).values - float(cfg.sscl_hard_neg_proto_margin)) / proto_temp).mean()
+                    * proto_temp
+                    * float(cfg.sscl_hard_neg_proto_lambda)
+                )
+
+        loss = logit_loss + proto_loss
+        stats = {
+            "hn_logit_loss": float(logit_loss.detach().item()),
+            "hn_proto_loss": float(proto_loss.detach().item()),
+        }
+        return {"loss_sscl_hard_neg": loss}, stats
 
     def _setup_semantic_head(self) -> None:
         """装配语义分类头（SemanticResidual）与训练监控。
@@ -1096,13 +1177,16 @@ class RFDETRModelModule(LightningModule):
                 teacher_logits,
             )
         weight_dict = self.criterion.weight_dict
-        # [SSCL] 起始 epoch 门控：在 sscl_start_epoch 之前将 loss_sscl 权重置 0，
+        # [SSCL] 起始 epoch 门控：在 sscl_start_epoch 之前将 SSCL 相关权重置 0，
         # 让常规检测损失先训练若干 epoch 收敛基类，再按策略从指定 epoch 开始
         # 施加语义对比约束。使用副本而非修改 self.criterion.weight_dict，
-        # 避免污染后续 step 的权重。非 SSCL 训练（weight_dict 中无 loss_sscl）
-        # 不进入此分支。
+        # 避免污染后续 step 的权重。难负样本抑制挂在 SSCL 配置域下，同步门控。
         if "loss_sscl" in weight_dict and self.current_epoch < self.train_config.sscl_start_epoch:
-            weight_dict = {**weight_dict, "loss_sscl": 0.0}
+            weight_dict = {
+                **weight_dict,
+                "loss_sscl": 0.0,
+                "loss_sscl_hard_neg": 0.0,
+            }
         loss: Tensor = torch.stack([loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict]).sum()
         # Automatic optimization path: divide by accumulate_grad_batches so the accumulated
         # gradient matches a single large batch, matching the legacy engine.  PTL accumulates
@@ -1188,6 +1272,12 @@ class RFDETRModelModule(LightningModule):
             A tuple of normalized loss dictionary, unnormalized weighted loss numerator, and box normalizer.
         """
         weight_dict = self.criterion.weight_dict
+        if "loss_sscl" in weight_dict and self.current_epoch < self.train_config.sscl_start_epoch:
+            weight_dict = {
+                **weight_dict,
+                "loss_sscl": 0.0,
+                "loss_sscl_hard_neg": 0.0,
+            }
         if not getattr(self.criterion, "supports_loss_normalizer_override", False):
             raise ValueError(
                 f"{type(self.criterion).__name__}.supports_loss_normalizer_override is False; "

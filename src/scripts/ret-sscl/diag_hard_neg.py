@@ -223,19 +223,22 @@ def main() -> None:
                     iou, _ = box_iou(box_cxcywh_to_xyxy(pred_boxes[b]), box_cxcywh_to_xyxy(gt_boxes))
                     matched_src = (iou >= MATCH_IOU_THRESHOLD).any(dim=-1).nonzero(as_tuple=False).flatten()
 
-                hn_f, rand_f, stats = select_hard_negatives_for_image(
+                hn_idx, stats = select_hard_negatives_for_image(
                     pred_logits=pred_logits[b],
                     pred_boxes=pred_boxes[b],
-                    hs=hs[b],
                     gt_boxes=gt_boxes,
                     matched_src=matched_src,
                     top_k=3,
                     score_thresh=SCORE_THRESH,
                 )
-                if hn_f.shape[0] > 0:
-                    hn_parts.append(hn_f.cpu())
-                if rand_f.shape[0] > 0:
-                    random_parts.append(rand_f.cpu())
+                if hn_idx.shape[0] > 0:
+                    hn_parts.append(hs[b][hn_idx].detach().cpu())
+                unmatched = torch.ones(hs.shape[1], dtype=torch.bool, device=DEVICE)
+                if matched_src.shape[0] > 0:
+                    unmatched[matched_src] = False
+                if unmatched.any():
+                    rand_idx = unmatched.nonzero(as_tuple=False).flatten()[: min(3, int(unmatched.sum().item()))]
+                    random_parts.append(hs[b][rand_idx].detach().cpu())
                 if matched_src.shape[0] > 0:
                     matched_parts.append(hs[b][matched_src].cpu())
                 total_band += int(stats["n_band"])

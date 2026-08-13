@@ -8,9 +8,9 @@
 不依赖 GPU 与网络，用合成单图数据（Q=10、D=4、C=2）验证：
 - IoU 带 [0.0, 0.3] 过滤（纯背景与低 IoU 候选入选，高 IoU/重复检测排除）。
 - Hungarian matched query 永不入选（即使是难例带内的最高分）。
-- top-k 按最大前景 logit 降序、忽略 background 列、stable 并列取小索引。
+- top-k 按目标类别集合内最大 logit 降序、忽略 background 列、stable 并列取小索引。
 - score_thresh 下限过滤、空 GT 不崩溃、全 matched 无候选。
-- 随机对照特征数量、排除 matched、seed 确定性。
+- 返回 query 索引而非 detached 特征，供训练侧直接对虚警 query 反传。
 """
 
 from __future__ import annotations
@@ -56,12 +56,6 @@ def _logits(scores: list[float], num_q: int = 10, num_cls: int = 2) -> torch.Ten
     return logits
 
 
-def _hs() -> torch.Tensor:
-    """确定性 hidden states [Q, D]。"""
-    generator = torch.Generator().manual_seed(42)
-    return torch.randn(10, 4, generator=generator)
-
-
 def _assert_iou_band(iou: float) -> None:
     """断言已知 IoU 值确实落在设计好的带内/带外（防止测试自身假设错误）。"""
     if iou != 0.0 and iou != 1.0:
@@ -73,7 +67,6 @@ class TestHardNegSelection:
 
     def test_iou_band_filtering(self) -> None:
         """带内（IoU 0.0 纯背景与 0.25）候选入选，重复检测（1.0）排除。"""
-        hs = _hs()
         # q0/q1 带内且分数高 → 入选；q2 分数最高（6.0）但 IoU 1.0 必须被带挡住
         scores = [5.0, 4.0, 6.0] + [-5.0] * 7
         logits = _logits(scores)
@@ -83,28 +76,27 @@ class TestHardNegSelection:
         assert 0.0 <= iou[1, 0].item() <= 0.3
         assert iou[2, 0].item() == 1.0
 
-        hn, _, stats = select_hard_negatives_for_image(
-            logits, _QUERY_BOXES, hs, _GT_BOX, torch.tensor([], dtype=torch.long), top_k=3
+        hn_idx, stats = select_hard_negatives_for_image(
+            logits, _QUERY_BOXES, _GT_BOX, torch.tensor([], dtype=torch.long), top_k=3
         )
-        assert hn.shape[0] == 2  # q0（纯背景，分数 5.0）与 q1（分数 4.0）
-        assert torch.equal(hn, hs[[0, 1]])
+        assert torch.equal(hn_idx, torch.tensor([0, 1]))
         assert stats["n_selected"] == 2.0
         assert stats["n_band"] == 9.0  # 带内：q0、q1、q3-q9（IoU 0.0），q2 排除
         assert stats["n_unmatched"] == 10.0
+        assert stats["score_mean"] == 4.5
+        assert 0.0 <= stats["iou_mean"] <= 0.3
 
     def test_matched_excluded(self) -> None:
         """Matched query 即使带内且最高分也永不入选。"""
-        hs = _hs()
         # q1 最高分（9.0）且带内但 matched；其余候选分数全部 < score_thresh（-1.0）被过滤
         scores = [-1.0, 9.0, -1.0] + [-1.0] * 7
         logits = _logits(scores)
-        hn, _, stats = select_hard_negatives_for_image(logits, _QUERY_BOXES, hs, _GT_BOX, torch.tensor([1]), top_k=3)
-        assert hn.shape[0] == 0  # q1 被 matched 排除后无其他候选
+        hn_idx, stats = select_hard_negatives_for_image(logits, _QUERY_BOXES, _GT_BOX, torch.tensor([1]), top_k=3)
+        assert hn_idx.shape[0] == 0  # q1 被 matched 排除后无其他候选
         assert stats["n_selected"] == 0.0
 
     def test_topk_order_ignores_background_and_stable(self) -> None:
         """Top-k 按最大前景 logit 降序（忽略 background 列），并列时取小索引。"""
-        hs = _hs()
         # 构造两个带内候选：q1 前景分 4.0，q3 前景分 5.0（q3 框与 GT 部分
         # 重叠，IoU = 0.25 落在 [0.0, 0.3] 带内）
         boxes = _QUERY_BOXES.clone()
@@ -114,92 +106,60 @@ class TestHardNegSelection:
         # q1 前景 4.0、q3 前景 5.0；两者 background 列均为 9.0（必须被忽略）
         scores = [0.0, 4.0, 0.0, 5.0] + [0.0] * 6
         logits = _logits(scores)
-        hn, _, _ = select_hard_negatives_for_image(
-            logits, boxes, hs, _GT_BOX, torch.tensor([], dtype=torch.long), top_k=1
+        hn_idx, _ = select_hard_negatives_for_image(
+            logits, boxes, _GT_BOX, torch.tensor([], dtype=torch.long), top_k=1
         )
-        assert hn.shape[0] == 1
-        assert torch.equal(hn, hs[3:4])  # 分数更高者入选，background 9.0 未干扰
+        assert torch.equal(hn_idx, torch.tensor([3]))  # 分数更高者入选，background 9.0 未干扰
+
+    def test_target_classes_score_only(self) -> None:
+        """只按 target_classes 中的类别分数排序，非目标类别高分不应入选优先级。"""
+        logits = torch.full((10, 4), -5.0)
+        logits[:, -1] = 9.0
+        logits[0, 2] = 8.0
+        logits[1, 0] = 4.0
+        logits[3, 1] = 5.0
+        hn_idx, _ = select_hard_negatives_for_image(
+            logits,
+            _QUERY_BOXES,
+            _GT_BOX,
+            torch.tensor([], dtype=torch.long),
+            top_k=2,
+            target_classes=[0, 1],
+        )
+        assert torch.equal(hn_idx, torch.tensor([3, 1]))
 
     def test_score_thresh(self) -> None:
         """低于 score_thresh 的候选不选。"""
-        hs = _hs()
         scores = [0.0, 0.5, 0.0] + [0.0] * 7  # q1 前景分 0.5
         logits = _logits(scores)
-        hn, _, stats = select_hard_negatives_for_image(
-            logits, _QUERY_BOXES, hs, _GT_BOX, torch.tensor([], dtype=torch.long), top_k=3, score_thresh=1.0
+        hn_idx, stats = select_hard_negatives_for_image(
+            logits, _QUERY_BOXES, _GT_BOX, torch.tensor([], dtype=torch.long), top_k=3, score_thresh=1.0
         )
-        assert hn.shape[0] == 0
+        assert hn_idx.shape[0] == 0
         assert stats["n_selected"] == 0.0
 
     def test_empty_gt_no_crash(self) -> None:
         """空 GT 框：无候选、不崩溃、统计为 0。"""
-        hs = _hs()
-        hn, _, stats = select_hard_negatives_for_image(
+        hn_idx, stats = select_hard_negatives_for_image(
             _logits([-1.0] * 10),
             _QUERY_BOXES,
-            hs,
             torch.zeros(0, 4),
             torch.tensor([], dtype=torch.long),
             top_k=3,
         )
-        assert hn.shape[0] == 0
+        assert hn_idx.shape[0] == 0
         # 带下界 0.0：空 GT 时 max_iou 全为 0，10 个 query 都算带内；
         # 难例数仍为 0（分数全部 < score_thresh）
         assert stats["n_band"] == 10.0
 
     def test_all_matched_no_candidates(self) -> None:
         """全部 query 都被 matched → 无难例。"""
-        hs = _hs()
-        hn, _, stats = select_hard_negatives_for_image(
+        hn_idx, stats = select_hard_negatives_for_image(
             _logits([4.0] * 10),
             _QUERY_BOXES,
-            hs,
             _GT_BOX,
             torch.arange(10),
             top_k=3,
         )
-        assert hn.shape[0] == 0
+        assert hn_idx.shape[0] == 0
         assert stats["n_unmatched"] == 0.0
-
-    def test_random_features_exclude_matched_and_deterministic(self) -> None:
-        """随机对照特征：数量 = min(top_k, 未匹配数)、排除 matched、seed 确定性。"""
-        hs = _hs()
-        matched = torch.tensor([1, 2])
-        # 难例分数全设负值 → 无候选（本测试只验证随机对照特征，不混入难例）
-        hn, rand1, stats = select_hard_negatives_for_image(
-            _logits([-1.0] * 10),
-            _QUERY_BOXES,
-            hs,
-            _GT_BOX,
-            matched,
-            top_k=3,
-            seed=7,
-        )
-        assert hn.shape[0] == 0
-        assert rand1.shape[0] == 3  # min(3, 8)
-        assert stats["n_unmatched"] == 8.0
-        # 随机对照排除 matched（按行精确相等判断，非元素级）
-        same_row = (rand1.unsqueeze(1) == hs[matched].unsqueeze(0)).all(dim=-1)  # [3, 2]
-        assert not same_row.any()
-        # seed 确定性：同 seed 两次调用结果一致
-        _, rand2, _ = select_hard_negatives_for_image(
-            _logits([-1.0] * 10),
-            _QUERY_BOXES,
-            hs,
-            _GT_BOX,
-            matched,
-            top_k=3,
-            seed=7,
-        )
-        assert torch.equal(rand1, rand2)
-        # 不同 seed 结果不同
-        _, rand3, _ = select_hard_negatives_for_image(
-            _logits([-1.0] * 10),
-            _QUERY_BOXES,
-            hs,
-            _GT_BOX,
-            matched,
-            top_k=3,
-            seed=8,
-        )
-        assert not torch.equal(rand1, rand3)

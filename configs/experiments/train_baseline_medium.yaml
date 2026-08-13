@@ -1,0 +1,61 @@
+# medium 基线全量微调（0813 重新标注版：小目标/小船重新标注、框更精确）
+# 与 train_baseline.yaml（nano）保持一致，仅模型变体/分辨率/有效 batch 不同
+# 用法: python src/scripts/train.py -c configs/experiments/train_baseline_medium.yaml
+# 说明:
+#   - 分辨率 640：与既往 medium 实验（0802 SSCL-all / 0810 HardNeg 等）一致（medium 默认 576）
+#   - 安全裁切已是默认路径（RandomSizedBBoxSafeCrop，erosion_rate=0.0），大目标不会被裁断
+#   - 有效 batch=32 与既往 medium 实验一致（batch 8 + accum 4），nano 基线为 64
+model:
+  variant: medium               # nano/small/medium/large/large_deprecated
+  num_classes: 25
+  resolution: 640               # 与既往 medium 实验一致（medium 默认 576，旧脚本显式 640）
+  gradient_checkpointing: true
+  freeze_encoder: false         # 0805 对比实验证明全量微调更优（ship Recall 0.42 -> 0.80）
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict
+  dataset_file: yolo
+  output_dir: output/0813-SHWX-rfdetr-medium-baseline-精细标注
+  epochs: 120
+  batch_size: 16
+  grad_accum_steps: 4            # 有效 batch = 64（与既往 medium 实验一致）
+  num_workers: 6
+  lr: 1e-4
+  lr_encoder: 1.5e-4
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  multi_scale: true             # 与 nano 基线一致（TrainConfig 默认 true，此处显式声明）
+  lr_drop: 70
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 5
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL             # 预设名：AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/none
+  mosaic_p: 0.1
+  # 平方根频率过采样（注意与 P0 class_balance_* 区分，两套机制不同）
+  class_balanced_sampling: true
+  class_balanced_threshold: null
+  class_balanced_class_ids: [0, 1]   # 0=HM 航母, 1=LQS 两栖舰；空=全部类别
+  dataset_cache_mode: raw
+  dataset_cache_dir: null        # null=使用 output_dir/dataset_cache
+  dataset_cache_rebuild: false
+test:
+  dataset: shwx
+  checkpoint: output/0813-SHWX-rfdetr-medium-baseline-精细标注/checkpoint_best_total.pth
+  output_dir: output/0813-SHWX-rfdetr-medium-baseline-精细标注
+  conf_threshold: 0.25
+  class_conf_thresholds: {}
+  device: cuda:0
+  batch_size: 32
+  num_workers: 12
+  prefetch_factor: 3
+  gpu_util_sample_interval: 0.5
+  use_fp16: false
+  save_fp_fn: true
+  save_yolo_preds: false
