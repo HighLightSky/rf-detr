@@ -4,7 +4,7 @@
 model:
   variant: medium
   num_classes: 25
-  resolution: 640                # 旧脚本显式 640（registry 默认 576）
+  resolution: 640 # 旧脚本显式 640（registry 默认 576）
   gradient_checkpointing: true
   pretrain_weights: output/0805-SHWX-data-expand-rfdetr-baseline/checkpoint_best_total.pth
   # 相对项目根路径；不写 = 使用官方发布权重
@@ -15,13 +15,13 @@ train:
   output_dir: output/0807-SHWX-SSCL-Proj-纯原型
   epochs: 6
   batch_size: 32
-  grad_accum_steps: 2            # 有效 batch = 64
+  grad_accum_steps: 2 # 有效 batch = 64
   num_workers: 12
-  lr: 1e-5                       # 低学习率，保护已有权重
+  lr: 1e-5 # 低学习率，保护已有权重
   lr_encoder: 1e-5
   weight_decay: 1e-4
   clip_max_norm: 0.1
-  lr_drop: 6                     # 短训练不打步长（旧脚本 max(1, EPOCHS)）
+  lr_drop: 6 # 短训练不打步长（旧脚本 max(1, EPOCHS)）
   warmup_epochs: 0.0
   tensorboard: true
   wandb: false
@@ -33,8 +33,8 @@ train:
   use_ema: true
   compute_val_loss: false
   aug_config: AERIAL
-  mosaic_p: 0.0                  # SSCL 微调关闭 Mosaic
-  multi_scale: false             # 关闭多尺度，保证 batch 内特征稳定
+  mosaic_p: 0.0 # SSCL 微调关闭 Mosaic
+  multi_scale: false # 关闭多尺度，保证 batch 内特征稳定
   # --- SSCL 配置（0807 纯原型：实例正样本关闭）---
   sscl_enabled: true
   sscl_semantic_matrix_path: data/semantic_matrix_shwx.pt
@@ -43,7 +43,7 @@ train:
   sscl_tau: 0.1
   sscl_rho: 0.3
   sscl_omega_max: 2.0
-  sscl_anchor_classes: [0, 1, 2, 3]        # 舰船四类；null=全部类别
+  sscl_anchor_classes: [0, 1, 2, 3] # 舰船四类；null=全部类别
   sscl_confusing_classes: [0, 1, 2, 3]
   sscl_start_epoch: 0
   sscl_freeze_strategy: conservative
@@ -52,10 +52,10 @@ train:
   sscl_prototype_min_samples: 1
   sscl_projection_enabled: true
   sscl_projection_dim: 128
-  sscl_prototype_instance_pos: false       # 0807 纯原型：无实例正样本
+  sscl_prototype_instance_pos: false # 0807 纯原型：无实例正样本
   sscl_distill_enabled: false
   sscl_distill_lambda: 0.5
   sscl_distill_temperature: 2.0
   sscl_distill_mode: mse
-  sscl_teacher_checkpoint: null            # 蒸馏关闭时传 null（旧脚本同）
+  sscl_teacher_checkpoint: null # 蒸馏关闭时传 null（旧脚本同）
   sscl_protected_classes: null

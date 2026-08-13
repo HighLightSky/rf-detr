@@ -36,7 +36,7 @@ train:
   multi_scale: false
   # --- SSCL（判别性矩阵，超参保持 0807 原值）---
   sscl_enabled: true
-  sscl_semantic_matrix_path: data/semantic_matrix_shwx_disc.pt   # ← 判别矩阵
+  sscl_semantic_matrix_path: data/semantic_matrix_shwx_disc.pt # ← 判别矩阵
   sscl_matrix_normalize: minmax
   sscl_lambda: 0.02
   sscl_tau: 0.1
