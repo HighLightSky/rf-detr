@@ -169,6 +169,7 @@ def build_dataset_cfg(
     name: str = "shwx",
     root: Path | None = None,
     output_dir: str | Path | None = None,
+    data_dir: str | Path | None = None,
 ) -> DatasetCfg:
     """按名称构建数据集配置（相对路径以项目根解析）。
 
@@ -179,6 +180,11 @@ def build_dataset_cfg(
             传相对路径时以 *root* 为基准解析；``None`` 用 ``DATASET_CONFIGS``
             内置值。各测试实验通过 yaml 的 ``test.output_dir`` 传此参数，避免
             多次评估互相覆盖输出。
+        data_dir: 可选：覆盖内置 ``data_dir``（数据集根目录）。与训练侧
+            ``dataset_dir`` 配置模式对应——测试集跟随训练数据集的目录，
+            例如重新标注后的数据集路径通过 yaml 的 ``test.dataset_dir`` 传入；
+            ``None`` 用 ``DATASET_CONFIGS`` 内置值。类别语义（类名/大类分组/
+            IoU 阈值）仍由 *name* 指定的内置配置提供。
 
     Returns:
         解析后的 DatasetCfg。
@@ -188,7 +194,7 @@ def build_dataset_cfg(
     """
     root = root or PROJECT_ROOT
     cfg = DATASET_CONFIGS[name]
-    data_dir = Path(cfg["data_dir"])
+    data_dir = Path(data_dir) if data_dir is not None else Path(cfg["data_dir"])
     label_dir = data_dir / cfg["label_dir"] if cfg.get("label_dir") else None
     annotation_file = data_dir / cfg["annotation_file"] if cfg.get("annotation_file") else None
     class_names = cfg["class_names"]
@@ -1001,6 +1007,7 @@ def run_evaluation(
     save_fp_fn: bool = True,
     save_yolo_preds: bool = False,
     la_bias: LaBiasCfg | None = None,
+    resolution: int | None = None,
 ) -> None:
     """按比赛口径在测试集上完整评估一个 checkpoint。
 
@@ -1015,6 +1022,9 @@ def run_evaluation(
         save_fp_fn: 是否保存 FP/FN 可视化。
         save_yolo_preds: 是否输出 YOLO 格式预测框（每图一个 txt，供归因脚本使用）。
         la_bias: 推理侧 LA bias 配置（``None`` 表示不生效）。
+        resolution: 可选：推理输入分辨率。构造参数优先于 checkpoint 记录的
+            ``model_config``（例如 nano 以 704 训练时强制 704 推理）；
+            ``None`` 用 checkpoint 记录的分辨率。
     """
     os.chdir(PROJECT_ROOT)
 
@@ -1041,7 +1051,11 @@ def run_evaluation(
     # 无需手动指定模型类。
     device = resolve_device(infer.device)
     print(f"[i] 正在从 {checkpoint_path} 加载 RF-DETR 模型...")
-    model = RFDETR.from_checkpoint(str(checkpoint_path))
+    ckpt_kwargs: dict[str, int] = {}
+    if resolution is not None:
+        ckpt_kwargs["resolution"] = resolution
+        print(f"[i] 推理分辨率覆盖为: {resolution}")
+    model = RFDETR.from_checkpoint(str(checkpoint_path), **ckpt_kwargs)
     print(f"[i] 已加载模型: {type(model).__name__} | 分辨率: {int(model.model.resolution)}")
     # [SemHead] 若 checkpoint 含语义头权重（语义分类头实验），重建语义残差模块，
     # 保证离线推理与训练前向一致（from_checkpoint 不经过 module_model 的装配逻辑）。

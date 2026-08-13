@@ -49,6 +49,8 @@ train:
   dataset_cache_rebuild: false
 test:
   dataset: shwx
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo   # 与训练侧一致（重新标注版）
+  resolution: 704                # 推理分辨率须与训练一致（nano 704 训练）
   checkpoint: output/0813-SHWX-rfdetr-nano-baseline-精细标注/checkpoint_best_total.pth
   output_dir: output/0813-SHWX-rfdetr-nano-baseline-精细标注
   conf_threshold: 0.25

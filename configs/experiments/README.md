@@ -60,7 +60,11 @@ train:                              # ★ 100% 透传为 model.train(**kwargs)�
   ...                               # 全部 TrainConfig 字段（src/rfdetr/config.py）
 
 test:                               # test.py 消费
-  dataset: shwx                     # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
+  dataset: shwx                     # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）；省略默认 shwx
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict   # 数据集根目录（同训练侧 dataset_dir 模式）
+                                    # 省略=内置默认；重新标注后数据路径变化时在此覆盖，类别语义仍由 dataset 提供
+  resolution: 704                   # 推理输入分辨率（须与训练分辨率一致，如 nano 704 训练时填 704）；
+                                    # 省略=使用 checkpoint 记录的分辨率
   checkpoint: output/xxx/checkpoint_best_total.pth
   conf_threshold: 0.25
   class_conf_thresholds: {}         # 可整段贴入 calibrate_thresholds 产物

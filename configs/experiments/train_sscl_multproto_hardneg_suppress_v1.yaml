@@ -5,12 +5,12 @@ model:
   num_classes: 25
   resolution: 640
   gradient_checkpointing: true
-  pretrain_weights: output/0805-SHWX-data-expand-rfdetr-baseline/checkpoint_best_total.pth
+  pretrain_weights: output/0813-SHWX-rfdetr-medium-baseline-精细标注/checkpoint_best_total.pth
 
 train:
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
   dataset_file: yolo
-  output_dir: output/0812-SHWX-SSCL-MultiProto-HardNegSuppress-v4使用RGB灰度增广图
+  output_dir: output/0813-强基线-多原型/0813-SHWX-SSCL-MultiProto-HardNegSuppress-v5-精细标注强基线
   epochs: 18
   batch_size: 32
   grad_accum_steps: 2
@@ -91,8 +91,8 @@ train:
   logit_adjustment_enabled: false
 test:
   dataset: shwx
-  checkpoint: ../checkpoint_best_total.pth
-  output_dir: output/0812-fyh-nano-proto
+  checkpoint: output/0813-强基线-多原型/0813-SHWX-SSCL-MultiProto-HardNegSuppress-v5-精细标注强基线/checkpoint_best_total.pth
+  output_dir: output/0813-强基线-多原型/0813-SHWX-SSCL-MultiProto-HardNegSuppress-v5-精细标注强基线
   conf_threshold: 0.25
   class_conf_thresholds: {}
   device: cuda:0

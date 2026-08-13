@@ -89,8 +89,16 @@ def main() -> None:
     cfg = expcfg.apply_overrides(cfg, args.set)
     test_cfg = expcfg.build_test_kwargs(cfg)
 
-    # 数据集配置（内置名 shwx/dior）；yaml 提供 test.output_dir 时覆盖输出目录
-    dataset = eval_lib.build_dataset_cfg(test_cfg["dataset"], output_dir=test_cfg.get("output_dir"))
+    # 数据集配置：dataset 为内置名（shwx/dior，省略默认 shwx），类别语义来自内置配置；
+    # yaml 提供 test.dataset_dir 时覆盖数据集根目录（与训练侧 dataset_dir 同一目录模式），
+    # test.output_dir 覆盖输出目录
+    dataset = eval_lib.build_dataset_cfg(
+        test_cfg.get("dataset") or "shwx",
+        output_dir=test_cfg.get("output_dir"),
+        data_dir=test_cfg.get("dataset_dir"),
+    )
+    if test_cfg.get("dataset_dir"):
+        print(f"[i] 数据集根目录覆盖为: {dataset.data_dir}")
     if test_cfg.get("output_dir"):
         print(f"[i] 测试输出目录覆盖为: {dataset.exp_output_dir}")
 
@@ -113,6 +121,8 @@ def main() -> None:
         la_fields = {f.name for f in dataclasses.fields(eval_lib.LaBiasCfg)}
         la_bias_cfg = eval_lib.LaBiasCfg(**{k: v for k, v in la_bias_section.items() if k in la_fields})
 
+    # test.resolution 可选：显式指定推理输入分辨率（须与训练分辨率一致，
+    # 例如 nano 704 训练时填 704），省略则用 checkpoint 记录的分辨率
     eval_lib.run_evaluation(
         dataset,
         infer,
@@ -120,6 +130,7 @@ def main() -> None:
         save_fp_fn=bool(test_cfg.get("save_fp_fn", True)),
         save_yolo_preds=bool(test_cfg.get("save_yolo_preds", False)),
         la_bias=la_bias_cfg,
+        resolution=int(test_cfg["resolution"]) if test_cfg.get("resolution") else None,
     )
 
 
