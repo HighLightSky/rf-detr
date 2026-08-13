@@ -550,6 +550,15 @@ class RFDETRModelModule(LightningModule):
             projection_dim=cfg.sscl_projection_dim if cfg.sscl_projection_enabled else None,
             prototype_instance_pos=cfg.sscl_prototype_instance_pos,
         )
+        model_for_prototype = getattr(self.model, "_orig_mod", self.model)
+        calibrator = getattr(model_for_prototype, "prototype_logit_calibrator", None)
+        if calibrator is not None:
+            if not cfg.sscl_prototype_enabled:
+                raise ValueError("启用原型 logit 校准时必须启用 SSCL 原型库")
+            if cfg.sscl_projection_enabled:
+                raise ValueError("原型 logit 校准要求关闭 SSCL 投影层")
+            if calibrator.max_slots != cfg.sscl_prototype_max_slots:
+                raise ValueError("原型 logit 校准与 SSCL 原型库的槽位数必须一致")
 
         # 难例负样本监控累加器（仅启用时创建；epoch 末输出 train/sscl/* 指标）
         if cfg.sscl_hard_neg_enabled:
@@ -702,6 +711,10 @@ class RFDETRModelModule(LightningModule):
         # 作为预热让锚点在 SSCL 生效前就绪；验证阶段 self.training 为 False 天然门控。
         if self.training and getattr(self.sscl_loss, "prototype_mode", False):
             self.sscl_loss.update_prototypes(features.detach(), labels)
+            model_for_prototype = getattr(self.model, "_orig_mod", self.model)
+            calibrator = getattr(model_for_prototype, "prototype_logit_calibrator", None)
+            if calibrator is not None:
+                calibrator.sync_from_bank(self.sscl_loss.prototype_bank)
         return {"loss_sscl": loss, **hn_result}
 
     def _extract_matched_query_features(

@@ -507,6 +507,24 @@ class ModelConfig(BaseConfig):
     resolution: int
     group_detr: int = 13
     gradient_checkpointing: bool = False
+    prototype_logit_enabled: bool = False
+    """是否在推理分类 logit 中启用视觉原型相对证据校准。"""
+
+    prototype_logit_target_classes: list[int] = Field(default_factory=list)
+    """参与视觉原型 logit 校准的小样本类别索引。"""
+
+    prototype_logit_max_slots: int = Field(default=2, ge=1)
+    """视觉原型 logit 校准使用的每类最大 slot 数。"""
+
+    prototype_logit_alpha: float = Field(default=0.1, ge=0.0)
+    """视觉原型相对证据转换为 logit residual 的增益。"""
+
+    prototype_logit_margin: float = 0.05
+    """目标类原型相对其他类原型的余弦间隔阈值。"""
+
+    prototype_logit_temperature: float = Field(default=0.1, gt=0.0)
+    """视觉原型相对证据的平滑温度。"""
+
     compile: bool = False
     fused_optimizer: bool = True
     positional_encoding_size: int

@@ -134,6 +134,12 @@ class LWDETR(nn.Module):
         use_grouppose_keypoints: bool = False,
         num_keypoints_per_class: list[int] | None = None,
         grouppose_keypoint_dim_downscale: int = 1,
+        prototype_logit_enabled: bool = False,
+        prototype_logit_target_classes: list[int] | None = None,
+        prototype_logit_max_slots: int = 2,
+        prototype_logit_alpha: float = 0.1,
+        prototype_logit_margin: float = 0.05,
+        prototype_logit_temperature: float = 0.1,
     ) -> None:
         """Initializes the model.
 
@@ -162,6 +168,19 @@ class LWDETR(nn.Module):
         # module_model._setup_qnorm_obj 在训练前装配（默认 None = 原版行为）。
         # 与语义头同级挂载，在 semantic_residual 叠加之后统一校准 logits。
         self.qnorm_obj: "QNormObjectness | None" = None
+        self.prototype_logit_calibrator: nn.Module | None = None
+        if prototype_logit_enabled:
+            from rfdetr.sscl.prototype_logit import PrototypeLogitCalibrator
+
+            self.prototype_logit_calibrator = PrototypeLogitCalibrator(
+                num_classes=num_classes - 1,
+                hidden_dim=hidden_dim,
+                max_slots=prototype_logit_max_slots,
+                target_classes=prototype_logit_target_classes,
+                alpha=prototype_logit_alpha,
+                margin=prototype_logit_margin,
+                temperature=prototype_logit_temperature,
+            )
         query_dim = 4
         self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
         self.query_feat = nn.Embedding(num_queries * group_detr, hidden_dim)
@@ -557,6 +576,9 @@ class LWDETR(nn.Module):
                 outputs_class, qnorm_stats = self.qnorm_obj(
                     hs, outputs_class, self.class_embed.weight, self.class_embed.bias
                 )
+            if self.prototype_logit_calibrator is not None and not self.training:
+                prototype_delta = self.prototype_logit_calibrator(hs)
+                outputs_class = outputs_class + torch.nn.functional.pad(prototype_delta, (0, 1))
             outputs_keypoints = None
 
             if self.use_grouppose_keypoints and self.keypoint_embed is not None:
@@ -686,6 +708,9 @@ class LWDETR(nn.Module):
             else:
                 outputs_coord = (self.bbox_embed(hs) + ref_unsigmoid).sigmoid()
             outputs_class = self.class_embed(hs)
+            if self.prototype_logit_calibrator is not None and not self.training:
+                prototype_delta = self.prototype_logit_calibrator(hs)
+                outputs_class = outputs_class + torch.nn.functional.pad(prototype_delta, (0, 1))
             if self.use_grouppose_keypoints and self.keypoint_embed is not None:
                 if keypoint_hs is None:
                     raise ValueError("use_grouppose_keypoints=True requires keypoint_hs from transformer outputs.")
@@ -880,6 +905,12 @@ def build_model(args: "BuilderArgs") -> LWDETR | tuple[Any, None, None]:
         use_grouppose_keypoints=getattr(args, "use_grouppose_keypoints", False),
         num_keypoints_per_class=getattr(args, "num_keypoints_per_class", []),
         grouppose_keypoint_dim_downscale=getattr(args, "grouppose_keypoint_dim_downscale", 1),
+        prototype_logit_enabled=getattr(args, "prototype_logit_enabled", False),
+        prototype_logit_target_classes=getattr(args, "prototype_logit_target_classes", []),
+        prototype_logit_max_slots=getattr(args, "prototype_logit_max_slots", 2),
+        prototype_logit_alpha=getattr(args, "prototype_logit_alpha", 0.1),
+        prototype_logit_margin=getattr(args, "prototype_logit_margin", 0.05),
+        prototype_logit_temperature=getattr(args, "prototype_logit_temperature", 0.1),
     )
     return model
 
