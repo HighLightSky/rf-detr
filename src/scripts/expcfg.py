@@ -104,8 +104,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
 def _parse_scalar(raw: str) -> int | float | str:
     """解析标量字符串：先试数值（int/float），失败保持字符串。
 
-    PyYAML 会把 ``1e-5``（无小数点）解析为字符串而非 float，这里补上数值
-    转换，保证 yaml 里写 ``lr: 1e-5`` 也能得到 0.00001。
+    PyYAML 会把 ``1e-5``（无小数点）解析为字符串而非 float，这里补上数值 转换，保证 yaml 里写 ``lr: 1e-5`` 也能得到 0.00001。
     """
     lowered = raw.lower()
     if lowered in ("inf", "+inf", "-inf", "nan"):
@@ -210,9 +209,7 @@ def build_model_kwargs(model_section: dict[str, Any] | None) -> tuple[dict[str, 
     section = dict(model_section or {})
     variant = section.pop("variant", "medium")
     if variant not in MODEL_REGISTRY:
-        raise ConfigError(
-            f"未知模型变体: {variant}（可选: {', '.join(MODEL_REGISTRY)}）"
-        )
+        raise ConfigError(f"未知模型变体: {variant}（可选: {', '.join(MODEL_REGISTRY)}）")
     return section, variant
 
 
@@ -241,9 +238,7 @@ def build_train_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
     train_kwargs = resolve_paths(PROJECT_ROOT, train_kwargs)
     if aug_name is not None:
         if aug_name not in AUG_PRESETS:
-            raise ConfigError(
-                f"aug_config 只支持预设名: {', '.join(AUG_PRESETS)}（得到: {aug_name}）"
-            )
+            raise ConfigError(f"aug_config 只支持预设名: {', '.join(AUG_PRESETS)}（得到: {aug_name}）")
         train_kwargs["aug_config"] = AUG_PRESETS[aug_name]
     return train_kwargs
 

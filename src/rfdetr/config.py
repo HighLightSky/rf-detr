@@ -1609,21 +1609,13 @@ class TrainConfig(BaseConfig):
                 f"收到 {self.sscl_hard_neg_iou_low} > {self.sscl_hard_neg_iou_high}。"
             )
         if self.sscl_hard_neg_loss_lambda < 0.0:
-            raise ValueError(
-                f"sscl_hard_neg_loss_lambda 必须 >= 0，收到 {self.sscl_hard_neg_loss_lambda}。"
-            )
+            raise ValueError(f"sscl_hard_neg_loss_lambda 必须 >= 0，收到 {self.sscl_hard_neg_loss_lambda}。")
         if self.sscl_hard_neg_logit_temperature <= 0.0:
-            raise ValueError(
-                "sscl_hard_neg_logit_temperature 必须 > 0，"
-                f"收到 {self.sscl_hard_neg_logit_temperature}。"
-            )
+            raise ValueError(f"sscl_hard_neg_logit_temperature 必须 > 0，收到 {self.sscl_hard_neg_logit_temperature}。")
         if self.sscl_hard_neg_proto_lambda < 0.0:
             raise ValueError(f"sscl_hard_neg_proto_lambda 必须 >= 0，收到 {self.sscl_hard_neg_proto_lambda}。")
         if self.sscl_hard_neg_proto_temperature <= 0.0:
-            raise ValueError(
-                "sscl_hard_neg_proto_temperature 必须 > 0，"
-                f"收到 {self.sscl_hard_neg_proto_temperature}。"
-            )
+            raise ValueError(f"sscl_hard_neg_proto_temperature 必须 > 0，收到 {self.sscl_hard_neg_proto_temperature}。")
         if self.sscl_hard_neg_target_classes is not None:
             invalid = [c for c in self.sscl_hard_neg_target_classes if c < 0]
             if invalid:
@@ -1634,15 +1626,11 @@ class TrainConfig(BaseConfig):
     def validate_sscl_multislot_prototype(self) -> "TrainConfig":
         """多 slot 原型字段的基础校验。"""
         if self.sscl_unfreeze_decoder_layers < 1:
-            raise ValueError(
-                f"sscl_unfreeze_decoder_layers 必须 >= 1，收到 {self.sscl_unfreeze_decoder_layers}。"
-            )
+            raise ValueError(f"sscl_unfreeze_decoder_layers 必须 >= 1，收到 {self.sscl_unfreeze_decoder_layers}。")
         if self.sscl_prototype_max_slots < 1:
             raise ValueError(f"sscl_prototype_max_slots 必须 >= 1，收到 {self.sscl_prototype_max_slots}。")
         if self.sscl_prototype_group_weight < 1.0:
-            raise ValueError(
-                f"sscl_prototype_group_weight 必须 >= 1.0，收到 {self.sscl_prototype_group_weight}。"
-            )
+            raise ValueError(f"sscl_prototype_group_weight 必须 >= 1.0，收到 {self.sscl_prototype_group_weight}。")
         if self.sscl_prototype_multi_slot_classes is not None:
             invalid = [c for c in self.sscl_prototype_multi_slot_classes if c < 0]
             if invalid:

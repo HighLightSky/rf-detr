@@ -794,13 +794,17 @@ class RFDETRModelModule(LightningModule):
             n_unmatched += int(stats["n_unmatched"])
         if not query_parts:
             empty = torch.empty(0, dtype=torch.long, device=outputs["pred_logits"].device)
-            return empty, empty, {
-                "hn_count": 0.0,
-                "hn_fill_rate": 0.0,
-                "n_unmatched_avg": float(n_unmatched) / max(1, len(indices)),
-                "hn_score_mean": 0.0,
-                "hn_iou_mean": 0.0,
-            }
+            return (
+                empty,
+                empty,
+                {
+                    "hn_count": 0.0,
+                    "hn_fill_rate": 0.0,
+                    "n_unmatched_avg": float(n_unmatched) / max(1, len(indices)),
+                    "hn_score_mean": 0.0,
+                    "hn_iou_mean": 0.0,
+                },
+            )
         batch_stats = {
             "hn_count": float(n_selected) / len(indices),
             "hn_fill_rate": float(n_band) / max(1, n_unmatched),
@@ -845,7 +849,9 @@ class RFDETRModelModule(LightningModule):
         hn_logits = logits[batch_idx, query_idx][:, class_idx]
         hardest_logit = hn_logits.max(dim=-1).values
         logit_temp = float(cfg.sscl_hard_neg_logit_temperature)
-        logit_loss = F.softplus((hardest_logit - float(cfg.sscl_hard_neg_logit_margin)) / logit_temp).mean() * logit_temp
+        logit_loss = (
+            F.softplus((hardest_logit - float(cfg.sscl_hard_neg_logit_margin)) / logit_temp).mean() * logit_temp
+        )
 
         proto_loss = logit_loss.new_zeros(())
         if (
