@@ -1,0 +1,25 @@
+# SHWX-large 数据集测试评估配置（672 张小图 + 100 张 concat 拼接大图）
+# 里程碑 1：朴素滑窗切分 + 按类别 NMS 去重基线
+# 用法: python src/scripts/test.py -c configs/experiments/test_shwx_large.yaml
+# 回归对照: --set test.tile_overlap=0 关闭切分，100 张大图走旧整图缩放路径
+test:
+  dataset: shwx # eval_lib.DATASET_CONFIGS 内置名（类别语义沿用 shwx）
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-large # 仅换数据集根目录
+  checkpoint: output/0813-强基线-多原型/0813-SHWX-SSCL-MultiProto-HardNegSuppress-v5-强基线-1024-强SSCL-MS不负样本抑制/checkpoint_best_total.pth
+  output_dir: output/0813-强基线-多原型/0813-SHWX-SSCL-MultiProto-HardNegSuppress-v5-强基线-1024-强SSCL-MS不负样本抑制-eval-large
+  resolution: 1024 # 推理输入分辨率（checkpoint 记录为 576，评测口径为大分辨率 1024）
+  conf_threshold: 0.25 # 全局置信度阈值
+  class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}
+  device: cuda:0 # 无 CUDA 时自动回退 CPU
+  batch_size: 32 # 小图整图路径的 GPU 单次前向图像数
+  num_workers: 12 # CPU 预取 worker 数（仅整图路径使用）
+  prefetch_factor: 3
+  gpu_util_sample_interval: 0.5
+  use_fp16: false
+  # la_bias 不配置：该 checkpoint 训练时 logit_adjustment_enabled=false，推理侧应与训练一致
+  tile_overlap: 256 # 滑窗重叠像素；0 = 关闭切分（大图走整图缩放路径）
+  tile_nms_iou: 0.5 # 切分合并后按类别 NMS 的 IoU 阈值
+  tile_batch_size: 16 # 切分路径 tile 批量；省略 = 沿用 batch_size
+  save_fp_fn: true # 保存 FP/FN 可视化
+  save_yolo_preds: true # 输出 YOLO 格式预测框（供两路字节级比对/归因）
+  viz_large_count: 3 # 随机可视化 N 张大图的切割结果（左 GT / 右 Predict，固定种子可复现）；0=关闭

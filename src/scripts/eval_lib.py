@@ -223,8 +223,7 @@ def build_dataset_cfg(
         # 细粒度类别分组映射：每个类独立成组，用于输出逐类指标
         per_class_to_group={class_id: name_ for class_id, name_ in class_names.items()},
         per_class_iou_thresholds={
-            name_: 0.35 if class_id in cfg["vehicle_class_ids"] else 0.50
-            for class_id, name_ in class_names.items()
+            name_: 0.35 if class_id in cfg["vehicle_class_ids"] else 0.50 for class_id, name_ in class_names.items()
         },
     )
 
@@ -243,6 +242,10 @@ class InferenceCfg:
         prefetch_factor: 每个 worker 在内存中预取的数据批数。
         gpu_util_sample_interval: 后台采样 GPU 利用率的时间间隔（秒）。
         use_fp16: 用 FP16 张量核加速推理（RTX 30 系约 2.5 倍提速）。
+        tile_overlap: 滑窗切分重叠像素数；``0`` = 关闭切分（大图仍走整图缩放
+            路径），``> 0`` = 超分辨率大图切块推理。
+        tile_nms_iou: 切分合并后按类别 NMS 的 IoU 阈值。
+        tile_batch_size: 切分路径的 tile 批量大小；``None`` = 沿用 ``batch_size``。
     """
 
     device: str = "cuda:0"
@@ -253,6 +256,9 @@ class InferenceCfg:
     prefetch_factor: int = 3
     gpu_util_sample_interval: float = 0.5
     use_fp16: bool = False
+    tile_overlap: int = 0
+    tile_nms_iou: float = 0.5
+    tile_batch_size: int | None = None
 
 
 @dataclass
@@ -315,9 +321,7 @@ class LaBiasCfg:
         # 补齐到分类头输出通道数（pred_logits 最后一维 = num_classes + 1，
         # 含背景槽位；counts 只覆盖真实类别），背景槽位 bias 补 0。
         if la_bias.numel() < num_logit_classes:
-            la_bias = torch.cat(
-                [la_bias, torch.zeros(num_logit_classes - la_bias.numel(), dtype=la_bias.dtype)]
-            )
+            la_bias = torch.cat([la_bias, torch.zeros(num_logit_classes - la_bias.numel(), dtype=la_bias.dtype)])
         return la_bias.to(device)
 
 
@@ -639,8 +643,7 @@ def build_test_report(
                 if infer.class_conf_thresholds
                 else ""
             ),
-            "IoU 阈值: "
-            + "，".join(f"{key}={value:.2f}" for key, value in dataset.group_iou_thresholds.items()),
+            "IoU 阈值: " + "，".join(f"{key}={value:.2f}" for key, value in dataset.group_iou_thresholds.items()),
             sep,
         ]
     )
@@ -814,6 +817,46 @@ class _GpuUtilMonitor:
         return sum(self._samples) / len(self._samples)
 
 
+def filter_postprocess_results(
+    results: list[dict[str, torch.Tensor]],
+    conf_threshold: float,
+    class_conf_thresholds: Mapping[int, float] | None = None,
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """对 postprocess 输出逐图做置信度阈值过滤，返回 ``(boxes, labels, scores)`` 张量。
+
+    阈值语义与原整图路径内联实现完全一致：命中 ``class_conf_thresholds`` 的类别
+    用类阈值，未命中（或未配置逐类阈值）回退到 ``conf_threshold``；比较为严格
+    大于（``>``）。返回张量保持在原设备，供整图路径直接转 BoxRecord、切分路径
+    偏移坐标后再做 NMS（两路径共用同一阈值配方，保证口径一致）。
+
+    Args:
+        results: postprocess 输出，每图一个 dict（keys: boxes/labels/scores）。
+        conf_threshold: 全局置信度阈值。
+        class_conf_thresholds: 逐类置信度阈值 ``{类别id: 阈值}``；``None`` 或
+            空字典时所有类别统一使用 ``conf_threshold``。
+
+    Returns:
+        ``[(boxes, labels, scores), ...]`` 列表，长度与 ``results`` 一致；
+        均为已过滤（保留 ``scores > thr`` 的行）且未转移设备的张量。
+    """
+    filtered: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    for result in results:
+        # 逐类阈值：命中 class_conf_thresholds 的类用类阈值，否则回退全局阈值
+        if class_conf_thresholds:
+            per_class_thr = torch.tensor(
+                [
+                    class_conf_thresholds.get(int(label), conf_threshold)
+                    for label in result["labels"].tolist()
+                ],
+                device=result["scores"].device,
+            )
+        else:
+            per_class_thr = conf_threshold
+        keep = result["scores"] > per_class_thr
+        filtered.append((result["boxes"][keep], result["labels"][keep], result["scores"][keep]))
+    return filtered
+
+
 def predict_batched_to_records(
     model: RFDETR,
     image_paths: list[Path],
@@ -952,20 +995,10 @@ def predict_batched_to_records(
             results = model.model.postprocess(predictions, target_sizes=target_sizes)
 
             # 收集预测框（每张测试图只推理一遍，全部收集）
-            for stem, result in zip(stems, results):
-                # 逐类阈值：命中 class_conf_thresholds 的类用类阈值，否则回退全局阈值
-                if class_conf_thresholds:
-                    per_class_thr = torch.tensor(
-                        [class_conf_thresholds.get(int(l), conf_threshold) for l in result["labels"].tolist()],
-                        device=result["scores"].device,
-                    )
-                else:
-                    per_class_thr = conf_threshold
-                keep = result["scores"] > per_class_thr
-                boxes = result["boxes"][keep].cpu().numpy()
-                class_ids = result["labels"][keep].cpu().numpy()
-                scores = result["scores"][keep].cpu().numpy()
-                for xyxy, class_id, score in zip(boxes, class_ids, scores):
+            for stem, (boxes, class_ids, scores) in zip(
+                stems, filter_postprocess_results(results, conf_threshold, class_conf_thresholds)
+            ):
+                for xyxy, class_id, score in zip(boxes.cpu().numpy(), class_ids.cpu().numpy(), scores.cpu().numpy()):
                     pred_records.append(
                         BoxRecord(
                             image_id=stem,
@@ -1008,6 +1041,7 @@ def run_evaluation(
     save_yolo_preds: bool = False,
     la_bias: LaBiasCfg | None = None,
     resolution: int | None = None,
+    viz_large_count: int = 0,
 ) -> None:
     """按比赛口径在测试集上完整评估一个 checkpoint。
 
@@ -1025,6 +1059,9 @@ def run_evaluation(
         resolution: 可选：推理输入分辨率。构造参数优先于 checkpoint 记录的
             ``model_config``（例如 nano 以 704 训练时强制 704 推理）；
             ``None`` 用 checkpoint 记录的分辨率。
+        viz_large_count: 随机可视化大图数量（切分路径启用时有效）：从大图中
+            固定种子抽选 ``viz_large_count`` 张，保存左 GT / 右 Predict 的对比图
+            到 ``exp_output_dir/large_viz/``；``0`` = 关闭。
     """
     os.chdir(PROJECT_ROOT)
 
@@ -1064,9 +1101,32 @@ def run_evaluation(
     _ckpt_sd = torch.load(str(checkpoint_path), map_location="cpu", weights_only=True)
     attach_from_checkpoint(model.model.model, _ckpt_sd.get("model", _ckpt_sd))
     del _ckpt_sd
+
+    # ── 大图滑窗切分推理（tile_overlap > 0 时启用）────────────────────────
+    # 小图（max(w,h) <= 分辨率）走整图批量路径；大图逐张切块推理，两路结果
+    # 合并后由下游统一评估。切分关闭时所有图走整图缩放路径（行为与旧版一致，
+    # 用于回归对照）。
+    tile_mode = infer.tile_overlap > 0
+    small_paths = test_image_paths
+    large_paths: list[Path] = []
+    # 推理分辨率（model 释放后仍供大图对比可视化绘制滑窗网格线使用）
+    tile_resolution = int(model.model.resolution)
+    if tile_mode:
+        # 惰性 import：避免 eval_lib ↔ tiling 模块循环依赖
+        from scripts.tiling import split_image_paths, tile_predict_records
+
+        # COCO 格式未预计算尺寸映射（label_format != "yolo"），切分路径需要时补算
+        if image_size_map is None:
+            image_size_map = build_image_size_map(test_image_paths)
+        small_paths, large_paths = split_image_paths(test_image_paths, image_size_map, tile_resolution)
+        print(
+            f"[i] 滑窗切分推理: 小图 {len(small_paths)} 张走整图路径; "
+            f"大图 {len(large_paths)} 张走切分路径(overlap={infer.tile_overlap}, "
+            f"NMS IoU={infer.tile_nms_iou})"
+        )
     pred_records, throughput, gpu_util, timed_images = predict_batched_to_records(
         model,
-        test_image_paths,
+        small_paths,
         device,
         conf_threshold=infer.conf_threshold,
         class_conf_thresholds=infer.class_conf_thresholds,
@@ -1078,6 +1138,36 @@ def run_evaluation(
         gpu_util_sample_interval=infer.gpu_util_sample_interval,
         use_fp16=infer.use_fp16,
     )
+    if large_paths:
+        # LA bias 只构建一次 Tensor 传给切分路径（tiling 不依赖 LaBiasCfg 类型）
+        if la_bias is not None:
+            bias_tensor = la_bias.build_bias_tensor(dataset.num_classes + 1, device)
+            bias_k = la_bias.k
+        else:
+            bias_tensor, bias_k = None, 1.0
+        tile_records, tile_throughput, tile_gpu_util, tile_timed = tile_predict_records(
+            model,
+            large_paths,
+            image_size_map,
+            device,
+            resolution=int(model.model.resolution),
+            overlap=infer.tile_overlap,
+            nms_iou=infer.tile_nms_iou,
+            conf_threshold=infer.conf_threshold,
+            batch_size=infer.tile_batch_size or infer.batch_size,
+            num_workers=infer.num_workers,
+            class_conf_thresholds=infer.class_conf_thresholds,
+            la_bias=bias_tensor,
+            la_bias_k=bias_k,
+            prefetch_factor=infer.prefetch_factor,
+            use_fp16=infer.use_fp16,
+            gpu_util_sample_interval=infer.gpu_util_sample_interval,
+        )
+        pred_records += tile_records
+        print(
+            f"[i] 切分推理吞吐: {tile_throughput:.1f} img/s  "
+            f"（{tile_timed} 张大图 / {tile_timed / tile_throughput:.1f}s）"
+        )
     del model
     release_cuda_cache(device)
 
@@ -1085,11 +1175,31 @@ def run_evaluation(
     if save_yolo_preds:
         save_yolo_predictions(pred_records, dataset.exp_output_dir / "yolo_preds", image_size_map)
 
+    # ── 大图切割结果对比可视化（随机抽选 N 张大图，左 GT / 右 Predict）───
+    if viz_large_count > 0 and large_paths:
+        from visualization.detection import save_large_image_visualizations
+
+        save_large_image_visualizations(
+            [p.stem for p in large_paths],
+            gt_records,
+            pred_records,
+            test_image_paths,
+            dataset.class_names,
+            dataset.exp_output_dir / "large_viz",
+            viz_large_count,
+            tile_size=tile_resolution,
+            tile_overlap=infer.tile_overlap,
+        )
+
     # ── 推理测速结果 ─────────────────────────────────────────────────
     print("=" * 80)
     print("推理测速结果")
     print(f"GPU 批量大小: {infer.batch_size}  |  CPU 预取 worker 数: {infer.num_workers}")
-    print(f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {timed_images / throughput:.1f}s）")
+    # timed_images=0（如全部图像走切分路径）时 throughput 为 0，避免除零
+    if throughput > 0:
+        print(f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {timed_images / throughput:.1f}s）")
+    else:
+        print(f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张，耗时统计见切分路径）")
     if gpu_util is not None:
         print(f"推理期间 GPU 平均利用率: {gpu_util:.1f}%")
     print("=" * 80)

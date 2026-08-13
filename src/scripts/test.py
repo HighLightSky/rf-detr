@@ -131,6 +131,7 @@ def main() -> None:
         save_yolo_preds=bool(test_cfg.get("save_yolo_preds", False)),
         la_bias=la_bias_cfg,
         resolution=int(test_cfg["resolution"]) if test_cfg.get("resolution") else None,
+        viz_large_count=int(test_cfg.get("viz_large_count", 0)),
     )
 
 
