@@ -22,6 +22,7 @@ from scripts.tiling import (
     _check_tile_strategy,
     _TileDataset,
     _fragment_rescue_sides,
+    _restore_tile_boxes,
     _rescue_accept,
     _rescue_crop_bounds,
     _select_rescue_candidate,
@@ -144,12 +145,31 @@ class TestTileDatasetSeamBounds:
         )
 
         assert len(dataset) == 1
-        stem, x0, y0, tile_w, tile_h, core, tile = dataset[0]
+        stem, x0, y0, tile_w, tile_h, resized, proc_w, proc_h, core, tile = dataset[0]
         assert stem == "seam"
         assert (x0, y0) == (0, 0)
         assert (tile_w, tile_h) == (1100, 700)
+        assert resized is True
+        assert (proc_w, proc_h) == (1024, 652)
         assert core == (0, 0, 1100, 700)
         assert tile.shape == (3, 1024, 1024)
+
+    def test_letterbox_restore_maps_boxes_back_to_tile_space(self):
+        """等比缩放后的 postprocess 坐标应能还原到原始 tile 内容坐标。"""
+        boxes = torch.tensor([[0.0, 0.0, 1024.0, 652.0], [512.0, 326.0, 768.0, 489.0]])
+
+        restored = _restore_tile_boxes(boxes, (1100, 700), (652, 1024), True)
+
+        assert torch.allclose(restored[0], torch.tensor([0.0, 0.0, 1100.0, 700.0]))
+        assert torch.allclose(restored[1], torch.tensor([550.0, 350.0, 825.0, 525.0]))
+
+    def test_padding_only_restore_keeps_content_coordinates(self):
+        """仅 padding 的小图块不应被额外缩放。"""
+        boxes = torch.tensor([[100.0, 120.0, 300.0, 280.0]])
+
+        restored = _restore_tile_boxes(boxes, (800, 700), (700, 800), False)
+
+        assert torch.allclose(restored[0], boxes[0])
 
 
 class TestApplyNms:

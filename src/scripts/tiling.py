@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Mapping
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as NF
 import torchvision
 import torchvision.transforms.functional as F  # noqa: N812
 from torch.utils.data import DataLoader, Dataset
@@ -204,6 +205,88 @@ def _check_tile_strategy(strategy: str) -> None:
     """
     if strategy not in TILE_STRATEGIES:
         raise ValueError(f"tile_strategy 必须是 {'/'.join(TILE_STRATEGIES)}，实际为 {strategy!r}")
+
+
+def _prepare_tile_tensor(
+    tensor: torch.Tensor,
+    content_size: tuple[int, int],
+    resolution: int,
+) -> tuple[torch.Tensor, tuple[int, int], bool]:
+    """把 tile 张量变成模型输入方图，并返回 postprocess 使用的真实内容尺寸。
+
+    对未超过分辨率的块保留原像素尺度，只使用右/下边缘复制补齐；对超限块使用
+    等比缩放，使长边落到 ``resolution``，再右/下 padding 到方图。这样非方块
+    tile 不再被硬拉伸成正方形。
+
+    Args:
+        tensor: ``(C, H, W)`` 浮点张量，值域已归一化到 ``[0, 1]``。
+        content_size: 原始 tile 内容尺寸 ``(宽, 高)``。
+        resolution: 模型输入方图边长。
+
+    Returns:
+        ``(prepared, proc_size, resized)``：prepared 为 ``(C, resolution, resolution)``
+        输入张量；proc_size 为内容在输入方图中的有效尺寸 ``(高, 宽)``；resized
+        表示是否做了等比缩放。
+    """
+    content_w, content_h = content_size
+    if content_w <= 0 or content_h <= 0:
+        raise ValueError("tile 内容宽高必须为正数")
+    if content_w <= resolution and content_h <= resolution:
+        # 小块保持原像素尺度，仅做右/下边缘 padding；主数据集层通常已经补齐，
+        # rescue 临时裁块则在这里补齐。
+        pad_w = resolution - tensor.shape[-1]
+        pad_h = resolution - tensor.shape[-2]
+        if pad_w > 0 or pad_h > 0:
+            tensor = NF.pad(tensor, (0, pad_w, 0, pad_h), mode="replicate")
+        return tensor, (content_h, content_w), False
+
+    scale = resolution / max(content_w, content_h)
+    proc_w = max(1, int(round(content_w * scale)))
+    proc_h = max(1, int(round(content_h * scale)))
+    prepared = F.resize(tensor, (proc_h, proc_w), antialias=False)
+    if proc_w != resolution or proc_h != resolution:
+        prepared = NF.pad(
+            prepared,
+            (0, resolution - proc_w, 0, resolution - proc_h),
+            mode="replicate",
+        )
+    return prepared, (proc_h, proc_w), True
+
+
+def _restore_tile_boxes(
+    boxes: torch.Tensor,
+    content_size: tuple[int, int],
+    proc_size: tuple[int, int],
+    resized: bool,
+) -> torch.Tensor:
+    """把 postprocess 的输入方图坐标还原回原始 tile 内容坐标。
+
+    Args:
+        boxes: ``(N, 4)`` xyxy，坐标空间为模型输入方图。
+        content_size: 原始 tile 内容尺寸 ``(宽, 高)``。
+        proc_size: ``_prepare_tile_tensor`` 返回的内容有效尺寸 ``(高, 宽)``。
+        resized: 是否做过等比缩放。
+
+    Returns:
+        坐标空间为原始 tile 内容的 ``boxes``。
+    """
+    if boxes.numel() == 0:
+        return boxes
+    content_w, content_h = content_size
+    proc_h, proc_w = proc_size
+    if not resized:
+        restored = boxes.clone()
+        restored[:, [0, 2]] = restored[:, [0, 2]].clamp(0.0, float(content_w))
+        restored[:, [1, 3]] = restored[:, [1, 3]].clamp(0.0, float(content_h))
+        return restored
+    if proc_w == content_w and proc_h == content_h:
+        return boxes
+    restored = boxes.clone()
+    restored[:, [0, 2]] *= content_w / proc_w
+    restored[:, [1, 3]] *= content_h / proc_h
+    restored[:, [0, 2]] = restored[:, [0, 2]].clamp(0.0, float(content_w))
+    restored[:, [1, 3]] = restored[:, [1, 3]].clamp(0.0, float(content_h))
+    return restored
 
 
 def _axis_core_bounds(dim: int, origin: int, resolution: int, halo: int) -> tuple[int, int]:
@@ -583,13 +666,17 @@ class _TileDataset(Dataset):
         """返回 tile 总数。"""
         return len(self._items)
 
-    def __getitem__(self, index: int) -> tuple[str, int, int, int, int, tuple[int, int, int, int], torch.Tensor]:
+    def __getitem__(
+        self,
+        index: int,
+    ) -> tuple[str, int, int, int, int, bool, int, int, tuple[int, int, int, int], torch.Tensor]:
         """解码并切片第 *index* 个 tile。
 
         Returns:
-            ``(stem, x0, y0, tile_w, tile_h, core, tile_tensor)``：core 为全图
-            坐标核心区 ``(x_lo, y_lo, x_hi, y_hi)``；tile_tensor 为
-            ``(C, tile_h, tile_w)`` uint8（零拷贝的连续视图）。
+            ``(stem, x0, y0, tile_w, tile_h, resized, proc_w, proc_h, core, tile_tensor)``：
+            core 为全图坐标核心区 ``(x_lo, y_lo, x_hi, y_hi)``；resized 表示是否
+            做过等比缩放；proc_w/proc_h 为内容在输入方图中的有效尺寸；tile_tensor 为
+            ``(C, resolution, resolution)`` uint8。
         """
         stem, image_path, x0, y0, tile_w, tile_h, core = self._items[index]
         image = self._cache.get(stem)
@@ -601,8 +688,10 @@ class _TileDataset(Dataset):
                 raise FileNotFoundError(f"无法读取图像: {image_path}")
             self._cache[stem] = image
         tile = image[y0 : y0 + tile_h, x0 : x0 + tile_w]
+        proc_w, proc_h = tile_w, tile_h
+        resized = False
         # 短边不足 resolution 的块用边缘复制补齐；若真实块大于 resolution，
-        # 先保留完整内容再缩放到 R×R，避免 seam 模式悄悄截断源小图。
+        # 先等比缩放到长边为 R，再右/下 padding，避免非方块源图被硬拉伸。
         if tile_h <= self._resolution and tile_w <= self._resolution:
             if tile_h != self._resolution or tile_w != self._resolution:
                 tile = np.pad(
@@ -611,16 +700,26 @@ class _TileDataset(Dataset):
                     mode="edge",
                 )
         else:
-            tile = cv2.resize(tile, (self._resolution, self._resolution), interpolation=cv2.INTER_LINEAR)
+            resized = True
+            scale = self._resolution / max(tile_w, tile_h)
+            proc_w = max(1, int(round(tile_w * scale)))
+            proc_h = max(1, int(round(tile_h * scale)))
+            tile = cv2.resize(tile, (proc_w, proc_h), interpolation=cv2.INTER_LINEAR)
+            if proc_h != self._resolution or proc_w != self._resolution:
+                tile = np.pad(
+                    tile,
+                    ((0, self._resolution - proc_h), (0, self._resolution - proc_w), (0, 0)),
+                    mode="edge",
+                )
         # ascontiguousarray：numpy 切片是视图，转 torch 需要连续内存（3MB 拷贝可忽略）
         tile = np.ascontiguousarray(tile)
-        return stem, x0, y0, tile_w, tile_h, core, torch.from_numpy(tile).permute(2, 0, 1)
+        return stem, x0, y0, tile_w, tile_h, resized, proc_w, proc_h, core, torch.from_numpy(tile).permute(2, 0, 1)
 
 
 def _tile_collate(
-    batch: list[tuple[str, int, int, int, int, tuple[int, int, int, int], torch.Tensor]],
-) -> tuple[list[str], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """把 tile 样本批化为 ``(stems, origins, sizes, cores, tensors)``。
+    batch: list[tuple[str, int, int, int, int, bool, int, int, tuple[int, int, int, int], torch.Tensor]],
+) -> tuple[list[str], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """把 tile 样本批化为 ``(stems, origins, sizes, resized, proc_sizes, cores, tensors)``。
 
     Args:
         batch: ``_TileDataset.__getitem__`` 的样本列表。
@@ -629,14 +728,18 @@ def _tile_collate(
         ``stems`` 为图像名列表；``origins`` 为 ``(N, 2)`` tile 原点 ``(x0, y0)``；
         ``sizes`` 为 ``(N, 2)`` 内容尺寸 ``(tile_w, tile_h)``；``cores`` 为
         ``(N, 4)`` 全图坐标核心区 ``(x_lo, y_lo, x_hi, y_hi)``（center 策略用）；
+        ``resized`` 为 ``(N,)`` 是否做过等比缩放；``proc_sizes`` 为 ``(N, 2)``
+        内容在输入方图中的有效尺寸 ``(proc_h, proc_w)``；
         ``tensors`` 为 ``(N, 3, R, R)`` uint8 张量。
     """
     stems = [item[0] for item in batch]
     origins = torch.tensor([[item[1], item[2]] for item in batch], dtype=torch.int64)
     sizes = torch.tensor([[item[3], item[4]] for item in batch], dtype=torch.int64)
-    cores = torch.tensor([item[5] for item in batch], dtype=torch.int64)
-    tensors = torch.stack([item[6] for item in batch])
-    return stems, origins, sizes, cores, tensors
+    resized = torch.tensor([item[5] for item in batch], dtype=torch.bool)
+    proc_sizes = torch.tensor([[item[7], item[6]] for item in batch], dtype=torch.int64)
+    cores = torch.tensor([item[8] for item in batch], dtype=torch.int64)
+    tensors = torch.stack([item[9] for item in batch])
+    return stems, origins, sizes, resized, proc_sizes, cores, tensors
 
 
 def tile_predict_records(
@@ -673,9 +776,10 @@ def tile_predict_records(
       框（重复预测在源头消除），再用 ``merge_center_duplicates`` 跨 tile 极严格
       安全合并兜预测噪声。
 
-    与整图路径的数值一致性：tile 预处理走完全相同的 ``F.resize(antialias=False)
-    + F.normalize(means, stds)`` 代码路径，坐标经 ``postprocess(target_sizes=块
-    内容尺寸)`` 映射回块坐标再平移。
+    与整图路径的数值一致性：tile 预处理仍走 ``F.resize(antialias=False)
+    + F.normalize(means, stds)``；但非方块超限 tile 使用等比缩放 + 右/下
+    padding，坐标先经 ``postprocess(target_sizes=1024 方图)``，再反算回原 tile
+    内容坐标。
 
     Args:
         model: 已加载的 RFDETR 实例（内部同整图路径：直连 ``model.model.model``）。
@@ -757,27 +861,23 @@ def tile_predict_records(
     bench_start = time.perf_counter()
 
     with torch.inference_mode():
-        for stems, origins, sizes, cores, tensors in loader:
-            # 预处理与整图路径逐位一致：uint8(C,H,W) → GPU → 除 255 → 缩放到
-            # (resolution, resolution)。seam 图块在 worker 侧已经保留完整边界，
-            # 这里不再把 1024 之外的内容裁掉。
-            gpu_images = [
-                F.resize(
-                    tensor.to(device, non_blocking=True).to(model_dtype).div_(255.0),
-                    (resolution, resolution),
-                    antialias=False,
-                )
-                for tensor in tensors
-            ]
-            batch_tensor = F.normalize(torch.stack(gpu_images), means, stds)
+        for stems, origins, sizes, resized, proc_sizes, cores, tensors in loader:
+            # tile_tensor 已在 dataset 层处理成 R×R：小块仅 padding，超限非方块
+            # 等比缩放后 padding。这里仅搬到 GPU 并归一化。
+            batch_tensor = F.normalize(
+                tensors.to(device, non_blocking=True).to(model_dtype).div_(255.0),
+                means,
+                stds,
+            )
             predictions = model.model.model(batch_tensor)
             if la_bias is not None:
                 adjusted_logits = predictions["pred_logits"] - la_bias_k * la_bias.to(
                     dtype=predictions["pred_logits"].dtype
                 )
                 predictions = {**predictions, "pred_logits": adjusted_logits}
-            # target_sizes 按每块内容尺寸 (高, 宽)
-            target_sizes = torch.stack([sizes[:, 1], sizes[:, 0]], dim=1).to(device)
+            # target_sizes 必须对应模型输入的方图尺寸；真实内容尺寸的反算在
+            # _restore_tile_boxes 里完成。
+            target_sizes = torch.full((len(stems), 2), resolution, device=device, dtype=torch.int64)
             results = model.model.postprocess(predictions, target_sizes=target_sizes)
             offsets = torch.cat([origins.to(device), origins.to(device)], dim=1)
             for i, (stem, (boxes, labels, scores)) in enumerate(
@@ -786,6 +886,9 @@ def tile_predict_records(
                     filter_postprocess_results(results, conf_threshold, class_conf_thresholds),
                 )
             ):
+                content_size = (int(sizes[i, 0]), int(sizes[i, 1]))
+                proc_size = (int(proc_sizes[i, 0]), int(proc_sizes[i, 1]))
+                boxes = _restore_tile_boxes(boxes, content_size, proc_size, bool(resized[i]))
                 # 偏移到全图坐标（GPU 上完成，合并后再统一转 CPU）
                 offset_boxes = boxes + offsets[i]
                 # center_rescue：center 过滤**之前**收集触边残框（过滤后才知
@@ -882,13 +985,6 @@ def tile_predict_records(
                     resolution,
                 )
                 crop = image[y0 : y0 + h, x0 : x0 + w]
-                # 短轴不足 R 时与主循环相同的 np.pad(edge) 补到 R×R
-                if h != resolution or w != resolution:
-                    crop = np.pad(
-                        crop,
-                        ((0, resolution - h), (0, resolution - w), (0, 0)),
-                        mode="edge",
-                    )
                 crop_items.append(
                     (
                         stem,
@@ -907,14 +1003,18 @@ def tile_predict_records(
         with torch.inference_mode():
             for start in range(0, len(crop_items), batch_size):
                 batch = crop_items[start : start + batch_size]
-                gpu_images = [
-                    F.resize(
+                gpu_images: list[torch.Tensor] = []
+                proc_sizes: list[tuple[int, int]] = []
+                resized_flags: list[bool] = []
+                for _, _, _, _, w, h, tensor in batch:
+                    prepared, proc_size, was_resized = _prepare_tile_tensor(
                         tensor.to(device, non_blocking=True).to(model_dtype).div_(255.0),
-                        (resolution, resolution),
-                        antialias=False,
+                        (w, h),
+                        resolution,
                     )
-                    for _, _, _, _, _, _, tensor in batch
-                ]
+                    gpu_images.append(prepared)
+                    proc_sizes.append(proc_size)
+                    resized_flags.append(was_resized)
                 batch_tensor = F.normalize(torch.stack(gpu_images), means, stds)
                 predictions = model.model.model(batch_tensor)
                 if la_bias is not None:
@@ -922,13 +1022,14 @@ def tile_predict_records(
                         dtype=predictions["pred_logits"].dtype
                     )
                     predictions = {**predictions, "pred_logits": adjusted_logits}
-                target_sizes = torch.tensor([[h, w] for _, _, _, _, w, h, _ in batch], device=device)
+                target_sizes = torch.full((len(batch), 2), resolution, device=device, dtype=torch.int64)
                 results = model.model.postprocess(predictions, target_sizes=target_sizes)
-                for k, (stem, fi, cx0, cy0, _, _, _) in enumerate(batch):
+                for k, (stem, fi, cx0, cy0, w, h, _) in enumerate(batch):
                     # 阶段 D：候选选择（同类别 + 完整包含残框 + 向缺口方向延伸）
                     cand_boxes, cand_labels, cand_scores = filter_postprocess_results(
                         [results[k]], conf_threshold, class_conf_thresholds
                     )[0]
+                    cand_boxes = _restore_tile_boxes(cand_boxes, (w, h), proc_sizes[k], resized_flags[k])
                     offset = torch.tensor([cx0, cy0, cx0, cy0], device=cand_boxes.device)
                     cand_full = cand_boxes + offset
                     frag = fragments[stem][fi]

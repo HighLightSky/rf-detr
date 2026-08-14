@@ -19,8 +19,10 @@ import pytest
 from scripts.seam_cut import (
     SEAM_MIN_SPACING,
     _axis_seams,
+    _trim_black_border_rect,
     _jump_profile,
     detect_seams,
+    optimize_seams_for_tiles,
     seam_tiles,
 )
 
@@ -138,6 +140,17 @@ class TestDetectSeams:
         assert seam_ys == []
         assert all(xs == [] for xs in xs_per_band)
 
+    def test_ragged_bottom_boundary_does_not_become_global_horizontal_seam(self):
+        """左侧短图底边不应被拉成整幅图的水平切线。"""
+        gray = np.zeros((700, 1100), dtype=np.uint8)
+        gray[:300, :500] = 120
+        gray[:700, 500:] = 130
+
+        seam_ys, xs_per_band = detect_seams(gray)
+
+        assert seam_ys == []
+        assert len(xs_per_band) == 1
+
 
 class TestSeamTiles:
     """seam_tiles 图块组合与兜底。"""
@@ -174,3 +187,44 @@ class TestSeamTiles:
         image_size = (1000, 500)
         tiles = seam_tiles(image_size, [300], [[400], []], resolution=1024, overlap=256)
         assert tiles == [(0, 0, 400, 300, 0), (400, 0, 1000, 300, 0), (0, 300, 1000, 500, 0)]
+
+    def test_black_border_trim_before_fallback(self):
+        """黑边先裁掉再判断超限，避免把空黑边送入模型或触发滑窗兜底。"""
+        gray = np.zeros((1000, 1400), dtype=np.uint8)
+        gray[100:900, 150:1250] = 120
+
+        tiles = seam_tiles(
+            (1400, 1000),
+            [],
+            [[]],
+            resolution=1024,
+            overlap=256,
+            max_tile_side=1200,
+            gray=gray,
+        )
+
+        assert tiles == [(150, 100, 1250, 900, 0)]
+
+
+class TestSeamOptimization:
+    """全局边界优化：只在超限区间补弱缝。"""
+
+    def test_trim_black_border_rect(self):
+        """外圈黑边被裁掉，内部内容坐标保持全图坐标语义。"""
+        gray = np.zeros((300, 400), dtype=np.uint8)
+        gray[40:260, 60:340] = 128
+
+        assert _trim_black_border_rect(gray, (0, 0, 400, 300)) == (60, 40, 340, 260)
+
+    def test_global_optimization_adds_relaxed_vertical_seam(self):
+        """默认强阈值漏掉的弱缝，在超限区间内会被宽松补缝找回。"""
+        height, left_w, right_w = 700, 1000, 1000
+        left = (100 + (np.arange(left_w) % 2))[None, :].repeat(height, axis=0)
+        right = (108 + (np.arange(right_w) % 2))[None, :].repeat(height, axis=0)
+        gray = np.concatenate([left, right], axis=1).astype(np.uint8)
+
+        seam_ys, xs_per_band = optimize_seams_for_tiles(gray, [], [[]], max_tile_side=1200)
+
+        assert seam_ys == []
+        assert len(xs_per_band) == 1
+        assert any(abs(x - 999) <= 1 for x in xs_per_band[0]), xs_per_band[0]
