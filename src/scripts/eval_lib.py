@@ -1190,6 +1190,8 @@ def run_evaluation(
             viz_large_count,
             tile_size=tile_resolution,
             tile_overlap=infer.tile_overlap,
+            num_classes=dataset.num_classes,
+            vehicle_class_ids=set(dataset.vehicle_class_ids),
         )
 
     # ── 推理测速结果 ─────────────────────────────────────────────────

@@ -442,15 +442,20 @@ def save_large_image_visualizations(
     seed: int = 0,
     tile_size: int | None = None,
     tile_overlap: int = 0,
+    num_classes: int = 25,
+    vehicle_class_ids: set[int] | None = None,
 ) -> None:
     """随机抽选大图，保存左 GT / 右 Predict 的左右拼接对比图（展示切分结果）。
 
-    大图（超过模型分辨率、走滑窗切分的图像）直接显示尺寸过大（最大 12000²），
-    先缩放到固定展示长边（1600px）再画框，框坐标按同比例缩放。框用细线小字
-    （``_draw_box_label_thin``）绘制，避免密集框互相遮挡：左面板 GT 蓝色框
-    （类名），右面板预测绿色框（类名 + 置信度），并可选叠加**红色滑窗网格线**
-    （``tile_size``/``tile_overlap`` 非空时），直观展示大图如何被切成小块送入
-    检测。保存结构::
+    可视化使用**原始大图分辨率**（不做缩放），框用细线小字（``_draw_box_label_thin``）
+    绘制避免密集框互相遮挡。匹配语义与评测口径完全一致（``match_per_image_per_class``）：
+
+    - 左面板：GT 蓝色框（类名）；
+    - 右面板：TP 预测绿色框（类名 + 置信度）、FP 预测红色框（标签带 ``(FP)``）、
+      FN 真实框橙色（标签带 ``(FN)``，即未被匹配上的 GT），并可选叠加**红色
+      滑窗网格线**（``tile_size``/``tile_overlap`` 非空时）。
+
+    保存结构::
 
         {output_dir}/{image_id}.jpg
 
@@ -466,6 +471,9 @@ def save_large_image_visualizations(
         tile_size: 滑窗边长（= 模型输入分辨率）；``None`` = 不绘制分割网格线。
         tile_overlap: 滑窗重叠像素数（与切分推理的 overlap 一致，保证网格与
             实际切块位置吻合）。
+        num_classes: 总类别数（TP/FP/FN 匹配用，与评测口径一致）。
+        vehicle_class_ids: 车辆类别 id 集合（IoU=0.35 匹配规则）；``None`` =
+            无车辆特殊规则。
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -474,54 +482,52 @@ def save_large_image_visualizations(
     rng = random.Random(seed)
     chosen = sorted(rng.sample(sorted(image_ids), min(count, len(image_ids))))
 
-    # 按 image_id 索引 GT 与预测记录
+    # 按 image_id 索引 GT 记录（左面板标注用）
     gt_by_image: dict[str, list[BoxRecord]] = defaultdict(list)
     for gt in all_gt:
         gt_by_image[gt.image_id].append(gt)
-    pred_by_image: dict[str, list[BoxRecord]] = defaultdict(list)
-    for pred in pred_records:
-        pred_by_image[pred.image_id].append(pred)
 
-    display_max = 1600  # 展示长边上限：大图直接显示过大，缩放后画框
+    # 比赛口径一对一匹配（与评测指标完全一致）：TP 预测 / FP 预测 / FN 真实框
+    _, _, fp_boxes, fn_boxes, tp_preds = match_per_image_per_class(
+        all_gt, pred_records, num_classes, set(vehicle_class_ids or ())
+    )
+
     for image_id in chosen:
         img = load_image(image_id, test_image_paths)
         if img is None:
             continue
         height, width = img.shape[:2]
-        scale = min(1.0, display_max / max(height, width))
-        if scale < 1.0:
-            img = cv2.resize(
-                img,
-                (int(round(width * scale)), int(round(height * scale))),
-                interpolation=cv2.INTER_AREA,
-            )
 
-        # 缩放后框坐标需按同比例换算
-        def _scaled_xyxy(box: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
-            """把原图坐标的框换算到展示尺寸（乘缩放系数）。"""
-            return tuple(int(round(v * scale)) for v in box)
-
-        # 左面板：GT 蓝色框（类名），细框小字
+        # 左面板：GT 蓝色框（类名），细框小字，原始分辨率
         labeled = img.copy()
         for gt in gt_by_image.get(image_id, []):
-            x1, y1, x2, y2 = _scaled_xyxy(gt.xyxy)
+            x1, y1, x2, y2 = map(int, gt.xyxy)
             _draw_box_label_thin(labeled, x1, y1, x2, y2, class_names[gt.class_id], COLOR_GT)
 
-        # 右面板：预测绿色框（类名 + 置信度），细框小字；先画红色滑窗网格线
+        # 右面板：先画红色滑窗网格线，再按 TP/FP/FN 三色标注（原始分辨率）
         predicted = img.copy()
         if tile_size is not None:
-            _draw_tile_grid(predicted, (width, height), tile_size, tile_overlap, scale)
-        for pred in pred_by_image.get(image_id, []):
-            x1, y1, x2, y2 = _scaled_xyxy(pred.xyxy)
-            label = f"{class_names[pred.class_id]} {pred.score:.2f}"
+            _draw_tile_grid(predicted, (width, height), tile_size, tile_overlap, 1.0)
+        for tp in tp_preds.get(image_id, []):
+            x1, y1, x2, y2 = map(int, tp.xyxy)
+            label = f"{class_names[tp.class_id]} {tp.score:.2f}"
             _draw_box_label_thin(predicted, x1, y1, x2, y2, label, COLOR_TP)
+        for fp in fp_boxes.get(image_id, []):
+            x1, y1, x2, y2 = map(int, fp.xyxy)
+            label = f"{class_names[fp.class_id]}(FP)"
+            _draw_box_label_thin(predicted, x1, y1, x2, y2, label, COLOR_FP)
+        for fn in fn_boxes.get(image_id, []):
+            x1, y1, x2, y2 = map(int, fn.xyxy)
+            label = f"{class_names[fn.class_id]}(FN)"
+            _draw_box_label_thin(predicted, x1, y1, x2, y2, label, COLOR_FN_GT)
 
-        # 左右拼接对比图：左 GT 标注、右预测框（含切分网格）
-        combined = _compose_side_by_side(labeled, predicted, "GT（真实框）", "Pred（模型预测）")
+        # 左右拼接对比图：左 GT 标注、右 TP/FP/FN 标注（含切分网格）
+        combined = _compose_side_by_side(labeled, predicted, "GT（真实框）", "Pred（TP/FP/FN）")
         cv2.imwrite(str(output_dir / f"{image_id}.jpg"), combined)
         print(
             f"[i] 大图对比可视化: {image_id}（{len(gt_by_image.get(image_id, []))} GT / "
-            f"{len(pred_by_image.get(image_id, []))} Pred）→ {output_dir / f'{image_id}.jpg'}"
+            f"{len(tp_preds.get(image_id, []))} TP + {len(fp_boxes.get(image_id, []))} FP + "
+            f"{len(fn_boxes.get(image_id, []))} FN）→ {output_dir / f'{image_id}.jpg'}"
         )
         del img, labeled, predicted, combined
 

@@ -15,7 +15,12 @@ import cv2
 import numpy as np
 
 from val.competition_metrics import BoxRecord
-from visualization.detection import save_large_image_visualizations
+from visualization.detection import (
+    COLOR_FN_GT,
+    COLOR_FP,
+    COLOR_TP,
+    save_large_image_visualizations,
+)
 
 
 def _make_image(path: Path, width: int = 2000, height: int = 1200) -> None:
@@ -43,7 +48,7 @@ class TestSaveLargeImageVisualizations:
     """大图对比可视化：抽样、拼接、缩放坐标。"""
 
     def test_generates_side_by_side_file(self, tmp_path):
-        """输出左 GT / 右 Predict 的左右拼接图，尺寸为展示尺寸两倍宽。"""
+        """输出左 GT / 右 Predict 的左右拼接图，使用原始大图分辨率。"""
         image_path = tmp_path / "big.jpg"
         _make_image(image_path)
         gts, preds = _make_records("big")
@@ -60,12 +65,12 @@ class TestSaveLargeImageVisualizations:
         )
         assert (out_dir / "big.jpg").exists()
         combined = cv2.imread(str(out_dir / "big.jpg"))
-        # 长边 2000 > 展示上限 1600 → 缩放后宽 = 1600/2000*2000，拼接后两倍宽
-        assert combined.shape[1] == 2 * int(round(2000 * 1600 / 2000))
-        assert combined.shape[0] == 30 + int(round(1200 * 1600 / 2000))  # 标题条 30px
+        # 原始分辨率不做缩放：2000 宽 → 拼接后 4000 宽
+        assert combined.shape[1] == 2 * 2000
+        assert combined.shape[0] == 30 + 1200  # 标题条 30px
 
-    def test_no_scale_when_small(self, tmp_path):
-        """长边不超过展示上限时不缩放。"""
+    def test_small_image_keeps_resolution(self, tmp_path):
+        """小图（不缩放）拼接尺寸 = 原尺寸两倍宽。"""
         image_path = tmp_path / "small_big.jpg"
         _make_image(image_path, width=1024, height=1024)
         gts, preds = _make_records("small_big")
@@ -172,11 +177,10 @@ class TestSaveLargeImageVisualizations:
         )
         assert (out_dir / "grid.jpg").exists()
         combined = cv2.imread(str(out_dir / "grid.jpg"))
-        # 2048 宽 > 展示上限 1600 → 缩放，右面板含网格但拼接尺寸与不画网格时一致
-        display_w = int(round(2048 * 1600 / 2048))
-        assert combined.shape[1] == 2 * display_w
+        # 原始分辨率：拼接尺寸 = 原尺寸两倍宽
+        assert combined.shape[1] == 2 * 2048
         # 右侧面板存在红色像素（网格线 COLOR_FP = (0,0,255)）
-        right = combined[30:, display_w:, :]
+        right = combined[30:, 2048:, :]
         red_mask = (right[:, :, 2] > 200) & (right[:, :, 0] < 100) & (right[:, :, 1] < 100)
         assert red_mask.any(), "右面板未检测到红色网格线"
 
@@ -199,3 +203,50 @@ class TestSaveLargeImageVisualizations:
         right = combined[30:, combined.shape[1] // 2 :, :]
         red_mask = (right[:, :, 2] > 200) & (right[:, :, 0] < 100) & (right[:, :, 1] < 100)
         assert not red_mask.any(), "未传 tile_size 时不应出现红色网格线"
+
+    def test_tp_fp_fn_colors(self, tmp_path):
+        """右面板按比赛口径标注：TP 绿 / FP 红 / FN 橙（原始分辨率）。"""
+        image_path = tmp_path / "match.jpg"
+        _make_image(image_path, width=1100, height=1100)
+        # GT:框 A(将被 TP 匹配)+ 框 B(无预测 → FN)
+        gts = [
+            BoxRecord(image_id="match", class_id=0, xyxy=(100.0, 100.0, 300.0, 300.0)),
+            BoxRecord(image_id="match", class_id=0, xyxy=(600.0, 600.0, 800.0, 800.0)),
+        ]
+        # 预测:框 A 重合(TP)+ 框 C 无 GT(FP)
+        preds = [
+            BoxRecord(image_id="match", class_id=0, xyxy=(105.0, 105.0, 295.0, 295.0), score=0.9),
+            BoxRecord(image_id="match", class_id=0, xyxy=(100.0, 800.0, 300.0, 1000.0), score=0.7),
+        ]
+        out_dir = tmp_path / "viz_match"
+        save_large_image_visualizations(
+            ["match"],
+            gts,
+            preds,
+            [image_path],
+            {0: "MS"},
+            out_dir,
+            count=1,
+            num_classes=1,
+        )
+        combined = cv2.imread(str(out_dir / "match.jpg"))
+        right = combined[30:, combined.shape[1] // 2 :, :]
+
+        def color_present(bgr: tuple[int, int, int]) -> bool:
+            """检查右面板是否存在近似 *bgr*（BGR 通道序）的像素（框线/标签条）。"""
+            b, g, r = bgr
+            return bool(
+                (
+                    (right[:, :, 0] > b - 40)
+                    & (right[:, :, 0] < b + 40)
+                    & (right[:, :, 1] > g - 40)
+                    & (right[:, :, 1] < g + 40)
+                    & (right[:, :, 2] > r - 40)
+                    & (right[:, :, 2] < r + 40)
+                ).any()
+            )
+
+        # 右面板三色：TP 绿 / FP 红 / FN 橙（与可视化使用同一 COLOR_* 常量）
+        assert color_present(COLOR_TP), "右面板缺少 TP 绿色框"
+        assert color_present(COLOR_FP), "右面板缺少 FP 红色框"
+        assert color_present(COLOR_FN_GT), "右面板缺少 FN 橙色框"
