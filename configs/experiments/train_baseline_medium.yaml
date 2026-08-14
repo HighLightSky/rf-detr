@@ -6,11 +6,11 @@
 #   - 安全裁切已是默认路径（RandomSizedBBoxSafeCrop，erosion_rate=0.0），大目标不会被裁断
 #   - 有效 batch=32 与既往 medium 实验一致（batch 8 + accum 4），nano 基线为 64
 model:
-  variant: medium               # nano/small/medium/large/large_deprecated
+  variant: medium # nano/small/medium/large/large_deprecated
   num_classes: 25
-  resolution: 640               # 与既往 medium 实验一致（medium 默认 576，旧脚本显式 640）
+  resolution: 640 # 与既往 medium 实验一致（medium 默认 576，旧脚本显式 640）
   gradient_checkpointing: true
-  freeze_encoder: false         # 0805 对比实验证明全量微调更优（ship Recall 0.42 -> 0.80）
+  freeze_encoder: false # 0805 对比实验证明全量微调更优（ship Recall 0.42 -> 0.80）
 
 train:
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict
@@ -18,13 +18,13 @@ train:
   output_dir: output/0813-SHWX-rfdetr-medium-baseline-精细标注
   epochs: 120
   batch_size: 16
-  grad_accum_steps: 4            # 有效 batch = 64（与既往 medium 实验一致）
+  grad_accum_steps: 4 # 有效 batch = 64（与既往 medium 实验一致）
   num_workers: 6
   lr: 1e-4
   lr_encoder: 1.5e-4
   weight_decay: 1e-4
   clip_max_norm: 0.1
-  multi_scale: true             # 与 nano 基线一致（TrainConfig 默认 true，此处显式声明）
+  multi_scale: true # 与 nano 基线一致（TrainConfig 默认 true，此处显式声明）
   lr_drop: 70
   warmup_epochs: 0.0
   tensorboard: true
@@ -36,19 +36,19 @@ train:
   eval_interval: 5
   use_ema: true
   compute_val_loss: false
-  aug_config: AERIAL             # 预设名：AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/none
+  aug_config: AERIAL # 预设名：AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/none
   mosaic_p: 0.1
   # 平方根频率过采样（注意与 P0 class_balance_* 区分，两套机制不同）
   class_balanced_sampling: true
   class_balanced_threshold: null
-  class_balanced_class_ids: [0, 1]   # 0=HM 航母, 1=LQS 两栖舰；空=全部类别
+  class_balanced_class_ids: [0, 1] # 0=HM 航母, 1=LQS 两栖舰；空=全部类别
   dataset_cache_mode: raw
-  dataset_cache_dir: null        # null=使用 output_dir/dataset_cache
+  dataset_cache_dir: null # null=使用 output_dir/dataset_cache
   dataset_cache_rebuild: false
 test:
   dataset: shwx
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
-  resolution: 640                # 推理分辨率（medium 640 训练）
+  resolution: 640 # 推理分辨率（medium 640 训练）
   checkpoint: output/0813-SHWX-rfdetr-medium-baseline-精细标注/checkpoint_best_total.pth
   output_dir: output/0813-SHWX-rfdetr-medium-baseline-精细标注
   conf_threshold: 0.25

@@ -8,25 +8,25 @@
 #   - 显存预算：5090 32GB 下 batch 16 + accum 4（有效 batch=64，与旧基线一致），
 #     多尺度峰值约 832px（704+128），峰值显存较旧基线(384@b32)高约 30%，OOM 则降 batch 到 8/accum 8
 model:
-  variant: nano                 # nano/small/medium/large/large_deprecated
+  variant: nano # nano/small/medium/large/large_deprecated
   num_classes: 25
-  resolution: 704               # 提高分辨率找小目标（nano 默认 384）
+  resolution: 704 # 提高分辨率找小目标（nano 默认 384）
   gradient_checkpointing: true
-  freeze_encoder: false         # 0805 对比实验证明全量微调更优（ship Recall 0.42 -> 0.80）
+  freeze_encoder: false # 0805 对比实验证明全量微调更优（ship Recall 0.42 -> 0.80）
 
 train:
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
   dataset_file: yolo
   output_dir: output/0813-SHWX-rfdetr-nano-baseline-精细标注
   epochs: 120
-  batch_size: 16               # 704 分辨率下调 batch 保持有效 batch=64（384@b32 -> 704@b16）
-  grad_accum_steps: 4          # 有效 batch = 64（与旧基线一致）
+  batch_size: 16 # 704 分辨率下调 batch 保持有效 batch=64（384@b32 -> 704@b16）
+  grad_accum_steps: 4 # 有效 batch = 64（与旧基线一致）
   num_workers: 6
   lr: 1e-4
   lr_encoder: 1.5e-4
   weight_decay: 1e-4
   clip_max_norm: 0.1
-  multi_scale: true             # 与旧基线一致（TrainConfig 默认 true，此处显式声明）
+  multi_scale: true # 与旧基线一致（TrainConfig 默认 true，此处显式声明）
   lr_drop: 70
   warmup_epochs: 0.0
   tensorboard: true
@@ -38,19 +38,19 @@ train:
   eval_interval: 5
   use_ema: true
   compute_val_loss: false
-  aug_config: AERIAL             # 预设名：AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/none
+  aug_config: AERIAL # 预设名：AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/none
   mosaic_p: 0.1
   # 平方根频率过采样（注意与 P0 class_balance_* 区分，两套机制不同）
   class_balanced_sampling: true
   class_balanced_threshold: null
-  class_balanced_class_ids: [0, 1]   # 0=HM 航母, 1=LQS 两栖舰；空=全部类别
+  class_balanced_class_ids: [0, 1] # 0=HM 航母, 1=LQS 两栖舰；空=全部类别
   dataset_cache_mode: raw
-  dataset_cache_dir: null        # null=使用 output_dir/dataset_cache
+  dataset_cache_dir: null # null=使用 output_dir/dataset_cache
   dataset_cache_rebuild: false
 test:
   dataset: shwx
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo   # 与训练侧一致（重新标注版）
-  resolution: 704                # 推理分辨率须与训练一致（nano 704 训练）
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo # 与训练侧一致（重新标注版）
+  resolution: 704 # 推理分辨率须与训练一致（nano 704 训练）
   checkpoint: output/0813-SHWX-rfdetr-nano-baseline-精细标注/checkpoint_best_total.pth
   output_dir: output/0813-SHWX-rfdetr-nano-baseline-精细标注
   conf_threshold: 0.25

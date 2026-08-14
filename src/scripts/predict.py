@@ -79,7 +79,8 @@ def _parse_args() -> argparse.Namespace:
     """解析命令行参数（--image 必填，其余可经 yaml/命令行覆盖）。"""
     parser = argparse.ArgumentParser(description="RF-DETR 统一推理模板（yaml 配置）")
     parser.add_argument(
-        "-c", "--config",
+        "-c",
+        "--config",
         type=str,
         default=None,
         help="实验 yaml 配置文件路径；缺省使用内置默认 checkpoint",

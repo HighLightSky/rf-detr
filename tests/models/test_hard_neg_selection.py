@@ -106,9 +106,7 @@ class TestHardNegSelection:
         # q1 前景 4.0、q3 前景 5.0；两者 background 列均为 9.0（必须被忽略）
         scores = [0.0, 4.0, 0.0, 5.0] + [0.0] * 6
         logits = _logits(scores)
-        hn_idx, _ = select_hard_negatives_for_image(
-            logits, boxes, _GT_BOX, torch.tensor([], dtype=torch.long), top_k=1
-        )
+        hn_idx, _ = select_hard_negatives_for_image(logits, boxes, _GT_BOX, torch.tensor([], dtype=torch.long), top_k=1)
         assert torch.equal(hn_idx, torch.tensor([3]))  # 分数更高者入选，background 9.0 未干扰
 
     def test_target_classes_score_only(self) -> None:

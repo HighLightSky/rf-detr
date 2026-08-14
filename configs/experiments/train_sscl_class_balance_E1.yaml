@@ -5,8 +5,9 @@
 # E2: --set train.class_balance_beta=0.5 --set train.class_balance_max_weight=5.0
 # E3: --set train.class_balance_enabled=true --set train.logit_adjustment_enabled=true
 _template:
-  class_counts: auto             # 训练前统计类别数写 <output_dir>/class_counts.json
-                                 # 并自动注入 class_balance_counts_path
+  class_counts:
+    auto # 训练前统计类别数写 <output_dir>/class_counts.json
+    # 并自动注入 class_balance_counts_path
 
 model:
   variant: medium
@@ -73,11 +74,11 @@ train:
   # --- P0 正样本类均衡 IA-BCE（默认关闭）---
   # 注意与上方 class_balanced_*（平方根频率过采样）区分，两套机制不同！
   class_balance_enabled: false
-  class_balance_beta: 0.25       # E1：0.25；E2：0.5
-  class_balance_max_weight: 3.0  # E1：3.0；E2：5.0
-  class_balance_min_count: 10    # 分母下限，防极端小样本类权重过大
-  class_balance_ref_count: null  # null=自动取 sqrt(N_max * N_min)
-  class_balance_target_classes: [0, 1]   # 首发只作用于 HM/LQS
+  class_balance_beta: 0.25 # E1：0.25；E2：0.5
+  class_balance_max_weight: 3.0 # E1：3.0；E2：5.0
+  class_balance_min_count: 10 # 分母下限，防极端小样本类权重过大
+  class_balance_ref_count: null # null=自动取 sqrt(N_max * N_min)
+  class_balance_target_classes: [0, 1] # 首发只作用于 HM/LQS
   # class_balance_counts_path 由 _template.class_counts=auto 自动注入，不手写
   # --- P1 居中截断 Logit Adjustment（默认关闭）---
   logit_adjustment_enabled: false

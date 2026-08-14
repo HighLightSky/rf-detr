@@ -165,9 +165,7 @@ class SlotPrototypeBank(nn.Module):
         class_slot_updates = self.slot_num_updates[class_id, valid_slots]
         initialized = valid_slots[class_slot_updates > 0].tolist()
         uninitialized = [
-            int(slot.item())
-            for slot in valid_slots
-            if int(self.slot_num_updates[class_id, slot].item()) == 0
+            int(slot.item()) for slot in valid_slots if int(self.slot_num_updates[class_id, slot].item()) == 0
         ]
         updated = False
 
@@ -209,9 +207,7 @@ class SlotPrototypeBank(nn.Module):
                 continue
             batch_mean = class_features[slot_mask].mean(dim=0)
             if not torch.isfinite(batch_mean).all():
-                logger.debug(
-                    f"PrototypeBank: 类别 {class_id} 的 slot {slot_id} 本批特征含 NaN/Inf，跳过更新"
-                )
+                logger.debug(f"PrototypeBank: 类别 {class_id} 的 slot {slot_id} 本批特征含 NaN/Inf，跳过更新")
                 continue
             if int(self.slot_num_updates[class_id, slot_id].item()) == 0:
                 self.prototypes[class_id, slot_id].copy_(batch_mean)
@@ -264,8 +260,7 @@ class SlotPrototypeBank(nn.Module):
     def get_normalized_prototypes(self) -> tuple[Tensor, Tensor]:
         """返回按类别聚合后的归一化原型与有效掩码。
 
-        该接口保留给旧分析脚本与兼容代码使用；多 slot 情况下返回同类 slot
-        的均值并再做一次归一化。
+        该接口保留给旧分析脚本与兼容代码使用；多 slot 情况下返回同类 slot 的均值并再做一次归一化。
         """
         slot_norm, slot_valid = self.get_normalized_slot_prototypes()
         class_valid = slot_valid.any(dim=-1)
@@ -313,8 +308,7 @@ class SlotPrototypeBank(nn.Module):
                 self._resize_if_needed(target_dim, target_slots)
             elif self.prototypes.shape[-1] not in (0, target_dim):
                 raise ValueError(
-                    f"原型维度不一致: 当前 hidden_dim={self.prototypes.shape[-1]}, "
-                    f"checkpoint hidden_dim={target_dim}"
+                    f"原型维度不一致: 当前 hidden_dim={self.prototypes.shape[-1]}, checkpoint hidden_dim={target_dim}"
                 )
 
             if loaded_proto.ndim == 2 and self.prototypes.ndim == 3:

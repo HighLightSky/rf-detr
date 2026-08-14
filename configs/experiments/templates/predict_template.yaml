@@ -5,8 +5,8 @@
 # 建议: 复制为 predict_<实验名>.yaml 再修改
 # ============================================================================
 predict:
-  checkpoint: output/xxxx-SHWX-实验名/checkpoint_best_total.pth   # 相对项目根
-  conf: 0.25                   # 置信度阈值（--conf 可覆盖）
-  output_dir: output/xxxx-SHWX-实验名/predict   # 输出 labels/ + visualization/
-  image: null                 # 通常由 --image 命令行提供；也可在此给默认路径
-  class_names: shwx           # 类别名来源：内置名 shwx/dior，或 {label: 名称} 字典
+  checkpoint: output/xxxx-SHWX-实验名/checkpoint_best_total.pth # 相对项目根
+  conf: 0.25 # 置信度阈值（--conf 可覆盖）
+  output_dir: output/xxxx-SHWX-实验名/predict # 输出 labels/ + visualization/
+  image: null # 通常由 --image 命令行提供；也可在此给默认路径
+  class_names: shwx # 类别名来源：内置名 shwx/dior，或 {label: 名称} 字典

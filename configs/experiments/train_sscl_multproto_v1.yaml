@@ -35,10 +35,9 @@ train:
   multi_scale: false
 
   # --- 平方根重采样 ---
-  class_balanced_sampling: true       # 平方根频率过采样
-  class_balanced_threshold: null      # 缺省自动推导 t = 4 × max(freq(目标类集))
-  class_balanced_class_ids: [0, 1]    # 白名单：HM/LQS
-
+  class_balanced_sampling: true # 平方根频率过采样
+  class_balanced_threshold: null # 缺省自动推导 t = 4 × max(freq(目标类集))
+  class_balanced_class_ids: [0, 1] # 白名单：HM/LQS
 
   # --- SSCL 基础配置：沿用 0807 量级，不引入分类均衡与 LA ---
   sscl_enabled: true
@@ -83,13 +82,13 @@ test:
   dataset: shwx
   checkpoint: output/0812-SHWX-SSCL-MultiProto-v1-原始不切割-decoder2-e18/checkpoint_best_total.pth
   output_dir: output/0812-SHWX-SSCL-MultiProto-v1-原始不切割-decoder2-e18
-  conf_threshold: 0.28                 # 全局置信度阈值
-  class_conf_thresholds: {}            # 逐类阈值 {类别id: 阈值}；可整段贴入 calibrate_thresholds 产物
-  device: cuda:0                       # 无 CUDA 时自动回退 CPU
-  batch_size: 32                       # GPU 单次前向图像数
-  num_workers: 12                      # CPU 预取 worker 数
+  conf_threshold: 0.28 # 全局置信度阈值
+  class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}；可整段贴入 calibrate_thresholds 产物
+  device: cuda:0 # 无 CUDA 时自动回退 CPU
+  batch_size: 32 # GPU 单次前向图像数
+  num_workers: 12 # CPU 预取 worker 数
   prefetch_factor: 3
   gpu_util_sample_interval: 0.5
   use_fp16: false
-  save_fp_fn: true                     # 保存 FP/FN 可视化
-  save_yolo_preds: false               # 输出 YOLO 格式预测框（供归因/探针脚本复用）
+  save_fp_fn: true # 保存 FP/FN 可视化
+  save_yolo_preds: false # 输出 YOLO 格式预测框（供归因/探针脚本复用）

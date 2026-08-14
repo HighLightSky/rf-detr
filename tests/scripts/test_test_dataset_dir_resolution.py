@@ -5,10 +5,8 @@
 # ------------------------------------------------------------------------
 """测试配置 ``dataset_dir`` / ``resolution`` 测试：数据集根目录与推理分辨率可被 yaml 配置覆盖。
 
-改动前测试数据集目录固定在 ``DATASET_CONFIGS`` 内置的 ``data_dir``，重新标注后的
-数据集（如 ``SHWX-dataset-dict-redo``）无法直接评估。改动后 ``test.py`` 从 yaml 的
-``test.dataset_dir`` 读取目录覆盖数据路径（与训练侧 ``dataset_dir`` 同一配置模式），
-``test.resolution`` 显式指定推理输入分辨率（nano 704 训练时须与训练一致）。
+改动前测试数据集目录固定在 ``DATASET_CONFIGS`` 内置的 ``data_dir``，重新标注后的 数据集（如 ``SHWX-dataset-dict-redo``）无法直接评估。改动后 ``test.py`` 从 yaml
+的 ``test.dataset_dir`` 读取目录覆盖数据路径（与训练侧 ``dataset_dir`` 同一配置模式）， ``test.resolution`` 显式指定推理输入分辨率（nano 704 训练时须与训练一致）。
 """
 
 from pathlib import Path
@@ -56,7 +54,7 @@ class TestBuildDatasetCfgDataDir:
 
 
 class TestTestYamlDatasetDirParsing:
-    """yaml ``test.dataset_dir`` / ``test.resolution`` 经 ``expcfg`` 解析后原样保留。"""
+    """Yaml ``test.dataset_dir`` / ``test.resolution`` 经 ``expcfg`` 解析后原样保留。"""
 
     def test_dataset_dir_resolved_to_absolute(self, tmp_path):
         """``dataset_dir: /绝对路径`` 在 ``build_test_kwargs`` 阶段原样保留（不二次拼接）。"""

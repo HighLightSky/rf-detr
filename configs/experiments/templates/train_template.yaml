@@ -6,18 +6,21 @@
 
 # --- 模板专用键（train.py 消费，不会传给 model.train）---
 _template:
-  class_counts: auto   # auto=训练前统计类别数写 <output_dir>/class_counts.json
-                       #   并自动注入 class_balance_counts_path（P0 类均衡数据准备）
-                       # off/省略=关闭自动统计
+  class_counts:
+    auto # auto=训练前统计类别数写 <output_dir>/class_counts.json
+    #   并自动注入 class_balance_counts_path（P0 类均衡数据准备）
+    # off/省略=关闭自动统计
 
 # --- 模型构造参数（RFDETR 变体类 kwargs 全部透传）---
 model:
-  variant: medium      # 模板专用键: nano/small/medium/large/large_deprecated
-                       #   large=新版 RFDETRLarge(768)，large_deprecated=旧版(560)
-  num_classes: 25      # 类别数（SHWX=25, DIOR=20）
-  resolution: 640      # 输入分辨率；不写则用变体默认（nano 384/small 512/medium 576/
-                       #   large 704/large_deprecated 560），旧实验脚本显式写 640
-  gradient_checkpointing: true   # 用计算换显存（backbone 激活值不缓存）
+  variant:
+    medium # 模板专用键: nano/small/medium/large/large_deprecated
+    #   large=新版 RFDETRLarge(768)，large_deprecated=旧版(560)
+  num_classes: 25 # 类别数（SHWX=25, DIOR=20）
+  resolution:
+    640 # 输入分辨率；不写则用变体默认（nano 384/small 512/medium 576/
+    #   large 704/large_deprecated 560），旧实验脚本显式写 640
+  gradient_checkpointing: true # 用计算换显存（backbone 激活值不缓存）
   # freeze_encoder: false        # 冻结 backbone（LoRA 实验用 true）
   # backbone_lora: true          # 注入 LoRA/DoRA 适配器（须配合 freeze_encoder=true）
   # pretrain_weights: output/0805-.../checkpoint_best_total.pth
@@ -27,23 +30,23 @@ model:
 train:
   # ── 数据集 ─────────────────────────────────────────────────────
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict
-  dataset_file: yolo               # yolo/coco/roboflow
+  dataset_file: yolo # yolo/coco/roboflow
   # ── 训练超参 ───────────────────────────────────────────────────
   output_dir: output/xxxx-SHWX-实验名
   epochs: 6
-  batch_size: 32                   # 每 GPU batch size
-  grad_accum_steps: 2              # 有效 batch = batch_size * grad_accum_steps
+  batch_size: 32 # 每 GPU batch size
+  grad_accum_steps: 2 # 有效 batch = batch_size * grad_accum_steps
   num_workers: 12
-  lr: 1e-5                         # 解码器学习率（短微调用 1e-5，全量用 1e-4）
-  lr_encoder: 1e-5                 # backbone 学习率
+  lr: 1e-5 # 解码器学习率（短微调用 1e-5，全量用 1e-4）
+  lr_encoder: 1e-5 # backbone 学习率
   weight_decay: 1e-4
   clip_max_norm: 0.1
-  lr_drop: 6                       # 步长衰减 epoch；短训练写 max(1, epochs) 保持恒定 LR
+  lr_drop: 6 # 步长衰减 epoch；短训练写 max(1, epochs) 保持恒定 LR
   warmup_epochs: 0.0
   # ── 数据增广 ───────────────────────────────────────────────────
-  aug_config: AERIAL               # 预设名: AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/none
-  mosaic_p: 0.0                    # Mosaic 概率（微调 0.0，全量 0.5~0.8）
-  multi_scale: false               # 多尺度训练（全量开，SSCL 微调关）
+  aug_config: AERIAL # 预设名: AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/none
+  mosaic_p: 0.0 # Mosaic 概率（微调 0.0，全量 0.5~0.8）
+  multi_scale: false # 多尺度训练（全量开，SSCL 微调关）
   # 平方根频率过采样（MMDetection ClassBalancedDataset 风格）
   # class_balanced_sampling: true
   # class_balanced_threshold: null
@@ -57,8 +60,8 @@ train:
   # ── EMA / 验证 / 恢复 ──────────────────────────────────────────
   use_ema: true
   eval_interval: 1
-  compute_val_loss: false          # 关闭验证 loss 计算省显存
-  resume: ""                       # last.ckpt 路径（相对项目根）实现续训
+  compute_val_loss: false # 关闭验证 loss 计算省显存
+  resume: "" # last.ckpt 路径（相对项目根）实现续训
   # ── 缓存（加速训练）──
   # dataset_cache_mode: raw
   # dataset_cache_dir: null
@@ -70,17 +73,17 @@ train:
 
   # ── SSCL 语义对比学习 ──────────────────────────────────────────
   sscl_enabled: true
-  sscl_semantic_matrix_path: data/semantic_matrix_shwx.pt   # 相对项目根
-  sscl_matrix_normalize: minmax    # minmax/softmax/none
-  sscl_lambda: 0.03                # SSCL 损失权重 λ
-  sscl_tau: 0.1                    # 对比学习温度 τ
-  sscl_rho: 0.3                    # 语义先验放大系数 ρ
-  sscl_omega_max: 2.0              # 负样本语义权重上限
-  sscl_anchor_classes: [0, 1, 2, 3]   # 参与计算 sscl 损失的类别；null=全部
-  sscl_confusing_classes: [0, 1, 2, 3]  # 参与充当比较类别的类别；null=全部
-  sscl_start_epoch: 0              # 微调从 0 启用；全量可设 30
-  sscl_freeze_strategy: conservative  # conservative/none
-  sscl_unfreeze_decoder_layers: 1   # conservative 下解冻 decoder 末尾层数；1=旧行为
+  sscl_semantic_matrix_path: data/semantic_matrix_shwx.pt # 相对项目根
+  sscl_matrix_normalize: minmax # minmax/softmax/none
+  sscl_lambda: 0.03 # SSCL 损失权重 λ
+  sscl_tau: 0.1 # 对比学习温度 τ
+  sscl_rho: 0.3 # 语义先验放大系数 ρ
+  sscl_omega_max: 2.0 # 负样本语义权重上限
+  sscl_anchor_classes: [0, 1, 2, 3] # 参与计算 sscl 损失的类别；null=全部
+  sscl_confusing_classes: [0, 1, 2, 3] # 参与充当比较类别的类别；null=全部
+  sscl_start_epoch: 0 # 微调从 0 启用；全量可设 30
+  sscl_freeze_strategy: conservative # conservative/none
+  sscl_unfreeze_decoder_layers: 1 # conservative 下解冻 decoder 末尾层数；1=旧行为
   # --- 原型库 + 投影头 ---
   sscl_prototype_enabled: true
   sscl_prototype_momentum: 0.99
@@ -92,13 +95,13 @@ train:
   # sscl_prototype_group_weight: 1.5
   sscl_projection_enabled: true
   sscl_projection_dim: 128
-  sscl_prototype_instance_pos: true   # 实例正样本锚定冷启动
+  sscl_prototype_instance_pos: true # 实例正样本锚定冷启动
   # --- 基类蒸馏 ---
   sscl_distill_enabled: false
   sscl_distill_lambda: 0.5
   sscl_distill_temperature: 2.0
   sscl_distill_mode: mse
-  sscl_teacher_checkpoint: null    # 蒸馏开启时填 checkpoint 路径
+  sscl_teacher_checkpoint: null # 蒸馏开启时填 checkpoint 路径
   sscl_protected_classes: null
   # --- 难例负样本 ---
   sscl_hard_neg_enabled: false
@@ -111,7 +114,7 @@ train:
   class_balance_beta: 0.25
   class_balance_max_weight: 3.0
   class_balance_min_count: 10
-  class_balance_ref_count: null    # null=自动取 sqrt(N_max*N_min)
+  class_balance_ref_count: null # null=自动取 sqrt(N_max*N_min)
   class_balance_target_classes: [0, 1]
   # class_balance_counts_path 由 _template.class_counts=auto 自动注入
 

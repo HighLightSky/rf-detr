@@ -7,5 +7,5 @@ predict:
   # 相对项目根路径
   conf: 0.25
   output_dir: output/0807-SHWX-SSCL-Proj-原型+实例正样本/predict
-  image: null            # 通常由 --image 命令行提供；也可在此给默认
-  class_names: shwx      # 类别名来源：内置名 shwx/dior，或 {label: 名称} 字典
+  image: null # 通常由 --image 命令行提供；也可在此给默认
+  class_names: shwx # 类别名来源：内置名 shwx/dior，或 {label: 名称} 字典

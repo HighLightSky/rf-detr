@@ -48,7 +48,8 @@ def _parse_args() -> argparse.Namespace:
     """解析命令行参数（-c 必填，--set 可多次，--dump-kwargs 只打印）。"""
     parser = argparse.ArgumentParser(description="RF-DETR 统一训练模板（yaml 配置）")
     parser.add_argument(
-        "-c", "--config",
+        "-c",
+        "--config",
         type=str,
         required=True,
         help="实验 yaml 配置文件路径（configs/experiments/*.yaml）",

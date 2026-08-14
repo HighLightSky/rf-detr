@@ -223,16 +223,14 @@ def build_dataset_cfg(
         # 细粒度类别分组映射：每个类独立成组，用于输出逐类指标
         per_class_to_group={class_id: name_ for class_id, name_ in class_names.items()},
         per_class_iou_thresholds={
-            name_: 0.35 if class_id in cfg["vehicle_class_ids"] else 0.50
-            for class_id, name_ in class_names.items()
+            name_: 0.35 if class_id in cfg["vehicle_class_ids"] else 0.50 for class_id, name_ in class_names.items()
         },
     )
 
 
 @dataclass
 class InferenceCfg:
-    """推理参数（原 ``CONF_THRESHOLD``/``DEVICE``/``BATCH_SIZE``/``NUM_WORKERS`` 等
-    模块级常量的收敛形态）。
+    """推理参数（原 ``CONF_THRESHOLD``/``DEVICE``/``BATCH_SIZE``/``NUM_WORKERS`` 等 模块级常量的收敛形态）。
 
     Attributes:
         device: 推理设备（如 ``"cuda:0"``；无 CUDA 时自动回退 CPU）。
@@ -315,9 +313,7 @@ class LaBiasCfg:
         # 补齐到分类头输出通道数（pred_logits 最后一维 = num_classes + 1，
         # 含背景槽位；counts 只覆盖真实类别），背景槽位 bias 补 0。
         if la_bias.numel() < num_logit_classes:
-            la_bias = torch.cat(
-                [la_bias, torch.zeros(num_logit_classes - la_bias.numel(), dtype=la_bias.dtype)]
-            )
+            la_bias = torch.cat([la_bias, torch.zeros(num_logit_classes - la_bias.numel(), dtype=la_bias.dtype)])
         return la_bias.to(device)
 
 
@@ -639,8 +635,7 @@ def build_test_report(
                 if infer.class_conf_thresholds
                 else ""
             ),
-            "IoU 阈值: "
-            + "，".join(f"{key}={value:.2f}" for key, value in dataset.group_iou_thresholds.items()),
+            "IoU 阈值: " + "，".join(f"{key}={value:.2f}" for key, value in dataset.group_iou_thresholds.items()),
             sep,
         ]
     )

@@ -91,53 +91,53 @@ predict:                            # predict.py 消费
 ### 透传规则
 
 1. `train:` 段键名原封不动作为 `model.train(**kwargs)` 的参数；新增 TrainConfig
-   字段（`src/rfdetr/config.py`）直接加键即可，**无需改任何代码**。
+    字段（`src/rfdetr/config.py`）直接加键即可，**无需改任何代码**。
 2. `TrainConfig` 的 `extra="forbid"` 天然校验拼写错误——yaml 键写错会在启动时报出
-   具体字段名。
+    具体字段名。
 3. 相对路径一律以项目根解析（与旧脚本 `project_root / X` 行为一致），绝对路径原样。
 4. `--set` 支持点路径标量覆盖，变体实验无需复制 yaml：
-   ```bash
-   # E2 变体（P0 增强）
-   python src/scripts/train.py -c configs/experiments/train_sscl_class_balance_E1.yaml \
-     --set train.class_balance_enabled=true --set train.class_balance_beta=0.5 \
-     --set train.class_balance_max_weight=5.0 --set train.output_dir=output/xxxx-E2
-   # hardneg k=5
-   python src/scripts/train.py -c configs/experiments/train_sscl_hardneg_k3.yaml \
-     --set train.sscl_hard_neg_topk=5 --set train.output_dir=output/xxxx-HardNeg-k5-iou03
-   # 多 slot + 难负样本直接抑制
-   python src/scripts/train.py -c configs/experiments/train_sscl_multproto_hardneg_suppress_v1.yaml
-   ```
+    ```bash
+    # E2 变体（P0 增强）
+    python src/scripts/train.py -c configs/experiments/train_sscl_class_balance_E1.yaml \
+        --set train.class_balance_enabled=true --set train.class_balance_beta=0.5 \
+        --set train.class_balance_max_weight=5.0 --set train.output_dir=output/xxxx-E2
+    # hardneg k=5
+    python src/scripts/train.py -c configs/experiments/train_sscl_hardneg_k3.yaml \
+        --set train.sscl_hard_neg_topk=5 --set train.output_dir=output/xxxx-HardNeg-k5-iou03
+    # 多 slot + 难负样本直接抑制
+    python src/scripts/train.py -c configs/experiments/train_sscl_multproto_hardneg_suppress_v1.yaml
+    ```
 
 ## 旧脚本 → yaml 迁移映射表
 
-| 旧脚本（已删除） | 等价配置 | 差异说明 |
-|---|---|---|
-| train.py | train_baseline.yaml | MODEL=nano、freeze_encoder=false |
-| train_sscl.py | train_sscl_0807.yaml | 0807 纯原型（instance_pos=false） |
-| train_sscl_all.py | train_sscl_all.yaml | 全类别，start_epoch=30 |
-| train_sscl_strong.py | train_sscl_strong_{A,B,C}.yaml | 原 env 变量改 yaml 字段 |
-| train_sscl_hardneg.py | train_sscl_hardneg_k3.yaml | k 用 --set 切换 |
-| train_sscl_class_balance.py | train_sscl_class_balance_E1.yaml | E2/E3 用 --set |
-| — | train_sscl_multproto_v1.yaml | 新增多 slot 原型 v1，统一入口直接运行 |
-| train_LoRA.py | train_lora.yaml | freeze_encoder+backbone_lora |
-| test.py | test_shwx.yaml / test_dior.yaml | 含推理侧 LA bias 配置 |
+| 旧脚本（已删除）            | 等价配置                         | 差异说明                              |
+| --------------------------- | -------------------------------- | ------------------------------------- |
+| train.py                    | train_baseline.yaml              | MODEL=nano、freeze_encoder=false      |
+| train_sscl.py               | train_sscl_0807.yaml             | 0807 纯原型（instance_pos=false）     |
+| train_sscl_all.py           | train_sscl_all.yaml              | 全类别，start_epoch=30                |
+| train_sscl_strong.py        | train_sscl_strong\_{A,B,C}.yaml  | 原 env 变量改 yaml 字段               |
+| train_sscl_hardneg.py       | train_sscl_hardneg_k3.yaml       | k 用 --set 切换                       |
+| train_sscl_class_balance.py | train_sscl_class_balance_E1.yaml | E2/E3 用 --set                        |
+| —                           | train_sscl_multproto_v1.yaml     | 新增多 slot 原型 v1，统一入口直接运行 |
+| train_LoRA.py               | train_lora.yaml                  | freeze_encoder+backbone_lora          |
+| test.py                     | test_shwx.yaml / test_dior.yaml  | 含推理侧 LA bias 配置                 |
 
 ## 注意事项
 
 1. **两套"类均衡"易混淆**：
-   - `class_balanced_sampling/class_balanced_*`：平方根频率过采样（数据采样层）；
-   - `class_balance_*`：P0 正样本类均衡 IA-BCE（损失层）。
+    - `class_balanced_sampling/class_balanced_*`：平方根频率过采样（数据采样层）；
+    - `class_balance_*`：P0 正样本类均衡 IA-BCE（损失层）。
 2. **`large` 有两代**：`large` = 新版 RFDETRLarge（分辨率 704），
-   `large_deprecated` = 旧版（560）。旧 train.py 用的是 deprecated 版。
+    `large_deprecated` = 旧版（560）。旧 train.py 用的是 deprecated 版。
 3. **训练/推理侧 LA bias 一致性**：P1 的训练参数（`logit_adjustment_*` /
-   `class_balance_*`）写在 train yaml，推理侧对应参数写在 test yaml 的
-   `la_bias:` 段——改了训练配方记得同步测试配置（不写 la_bias 则推理侧不生效）。
+    `class_balance_*`）写在 train yaml，推理侧对应参数写在 test yaml 的
+    `la_bias:` 段——改了训练配方记得同步测试配置（不写 la_bias 则推理侧不生效）。
 4. **`aug_config` 只接受预设名**：`AERIAL`/`CONSERVATIVE`/`AGGRESSIVE`/
-   `INDUSTRIAL`/`none`（AUG_* 是嵌套 dict，无法直接写进 yaml）。
+    `INDUSTRIAL`/`none`（AUG\_\* 是嵌套 dict，无法直接写进 yaml）。
 5. **cron 清理**：旧 `experiments_tmp/monitor_train.sh` 的 crontab 引用已失效，
-   需手动清理（`crontab -e`）。
+    需手动清理（`crontab -e`）。
 6. **配置溯源**：每个训练输出目录的 `training_config.json` 记录全量生效配置
-   （157 键），是复现实验的权威来源。
+    （157 键），是复现实验的权威来源。
 
 ## 常用工具
 
@@ -147,5 +147,5 @@ python src/scripts/train.py -c configs/experiments/xxx.yaml --dump-kwargs
 
 # 逐类阈值重标定（产物可贴入 test yaml 的 class_conf_thresholds）
 python src/scripts/calibrate_thresholds.py output/xxx/checkpoint_best_total.pth \
-  --bias-json output/xxx/class_counts.json --bias-k 1.0
+    --bias-json output/xxx/class_counts.json --bias-k 1.0
 ```

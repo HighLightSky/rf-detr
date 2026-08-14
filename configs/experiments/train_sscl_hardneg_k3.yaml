@@ -16,7 +16,7 @@ train:
   output_dir: output/0810-SHWX-SSCL-Proj-HardNeg-k3-iou03
   epochs: 6
   batch_size: 64
-  grad_accum_steps: 1            # 有效 batch = 64
+  grad_accum_steps: 1 # 有效 batch = 64
   num_workers: 12
   lr: 1e-5
   lr_encoder: 1e-5
@@ -36,7 +36,7 @@ train:
   aug_config: AERIAL
   mosaic_p: 0.0
   multi_scale: false
-  dataset_cache_mode: raw        # 缓存解码后的原始 RGB 图片加速训练
+  dataset_cache_mode: raw # 缓存解码后的原始 RGB 图片加速训练
   dataset_cache_dir: null
   dataset_cache_rebuild: false
   # --- SSCL（0807 配方 + 实例正样本）---
@@ -66,5 +66,5 @@ train:
   # --- 难例负样本（本次实验变量）---
   sscl_hard_neg_enabled: true
   sscl_hard_neg_topk: 3
-  sscl_hard_neg_score_thresh: -2.0   # 最大前景 logit 下限（≈ p>0.12）
+  sscl_hard_neg_score_thresh: -2.0 # 最大前景 logit 下限（≈ p>0.12）
   sscl_hard_neg_log_interval: 100

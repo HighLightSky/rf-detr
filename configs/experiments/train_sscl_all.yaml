@@ -4,7 +4,7 @@
 model:
   variant: medium
   num_classes: 25
-  resolution: 640                # 旧脚本显式 640
+  resolution: 640 # 旧脚本显式 640
   gradient_checkpointing: true
   # 不写 pretrain_weights = 使用官方发布权重（DINOv2 backbone + COCO decoder）
 
@@ -14,7 +14,7 @@ train:
   output_dir: output/0802-SHWX-rfdetr_medium_SSCL-all
   epochs: 100
   batch_size: 8
-  grad_accum_steps: 4            # 有效 batch = 32
+  grad_accum_steps: 4 # 有效 batch = 32
   num_workers: 12
   lr: 1e-4
   lr_encoder: 1.5e-4
@@ -32,8 +32,8 @@ train:
   use_ema: true
   compute_val_loss: false
   aug_config: AERIAL
-  mosaic_p: 0.8                  # 从预训练全量训练，保留 Mosaic
-  multi_scale: true              # 保留多尺度
+  mosaic_p: 0.8 # 从预训练全量训练，保留 Mosaic
+  multi_scale: true # 保留多尺度
   # --- SSCL 配置（全类别：anchor/confusing 为 null）---
   sscl_enabled: true
   sscl_semantic_matrix_path: data/semantic_matrix_shwx.pt
@@ -42,14 +42,14 @@ train:
   sscl_tau: 0.1
   sscl_rho: 0.3
   sscl_omega_max: 2.0
-  sscl_anchor_classes: null      # null=全部 25 类作为 anchor
+  sscl_anchor_classes: null # null=全部 25 类作为 anchor
   sscl_confusing_classes: null
-  sscl_start_epoch: 30           # 前 30 轮仅常规损失
-  sscl_freeze_strategy: none     # 从预训练直接训练：不冻结
+  sscl_start_epoch: 30 # 前 30 轮仅常规损失
+  sscl_freeze_strategy: none # 从预训练直接训练：不冻结
   sscl_prototype_enabled: true
   sscl_prototype_momentum: 0.99
   sscl_prototype_min_samples: 1
   sscl_projection_enabled: true
   sscl_projection_dim: 128
   sscl_prototype_instance_pos: true
-  sscl_distill_enabled: false    # 从 COCO 起步没有合理 SHWX teacher
+  sscl_distill_enabled: false # 从 COCO 起步没有合理 SHWX teacher
