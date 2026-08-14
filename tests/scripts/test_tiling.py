@@ -3,10 +3,11 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-"""Tiling 模块单元测试：滑窗原点网格、小图/大图拆分、按类别 NMS。
+"""Tiling 模块单元测试：滑窗原点网格、小图/大图拆分、按类别 NMS、中心归属合并。
 
-对应里程碑 1（朴素滑窗切分 + 按类别 NMS 去重基线）的纯函数部分，无 GPU 依赖；
-``tile_predict_records`` 的端到端行为由评测回归验证（test_shwx_large.yaml 配置）。
+对应里程碑 1（朴素滑窗切分 + 按类别 NMS 去重基线）与里程碑 2（center 策略：
+中心归属 + 极严格安全合并）的纯函数部分，无 GPU 依赖；``tile_predict_records``
+的端到端行为由评测回归验证（test_shwx_large.yaml 配置）。
 """
 
 import dataclasses
@@ -15,7 +16,14 @@ import pytest
 import torch
 
 from scripts import eval_lib, expcfg
-from scripts.tiling import apply_nms, split_image_paths, tile_origins
+from scripts.tiling import (
+    _check_tile_strategy,
+    apply_nms,
+    merge_center_duplicates,
+    split_image_paths,
+    tile_core_bounds,
+    tile_origins,
+)
 
 
 class TestTileOrigins:
@@ -153,6 +161,163 @@ class TestApplyNms:
         assert keep.numel() == 0
 
 
+class TestTileCoreBounds:
+    """tile 核心区边界：halo 只在有邻居的一侧剥离，覆盖并集无空洞。"""
+
+    def test_middle_tile(self):
+        """双轴滑动中块：两侧各剥离 halo。"""
+        assert tile_core_bounds((2560, 2560), (768, 768), 1024, 256) == (896, 896, 1664, 1664)
+
+    def test_first_tile_reaches_left_edge(self):
+        """首块核心延伸到图左/上边缘（防边缘条带漏检）。"""
+        assert tile_core_bounds((2560, 2560), (0, 0), 1024, 256) == (0, 0, 896, 896)
+
+    def test_last_tile_reaches_right_edge(self):
+        """末块核心延伸到图右/下边缘（防边缘条带漏检）。"""
+        assert tile_core_bounds((2560, 2560), (1536, 1536), 1024, 256) == (1664, 1664, 2560, 2560)
+
+    def test_clamped_last_tile_overlap_strip(self):
+        """夹取末块与前一块核心存在重叠条带（合并兜底的前提）。"""
+        assert tile_core_bounds((2048, 2048), (1024, 1024), 1024, 256) == (1152, 1152, 2048, 2048)
+        assert tile_core_bounds((2048, 2048), (768, 768), 1024, 256) == (896, 896, 1664, 1664)
+        assert 1664 - 1152 == 512  # 重叠条带 [1152, 1664] 宽度 512px
+
+    def test_short_axis_keeps_full_content(self):
+        """短轴（单块轴）核心 = 全部内容，halo 不剥离（不误丢边缘目标）。"""
+        assert tile_core_bounds((2000, 700), (0, 0), 1024, 256) == (0, 0, 896, 700)
+        assert tile_core_bounds((2000, 700), (976, 0), 1024, 256) == (1104, 0, 2000, 700)
+
+    def test_overlap_zero_full_tile(self):
+        """overlap=0 时核心 = 整块内容。"""
+        assert tile_core_bounds((2048, 2048), (0, 0), 1024, 0) == (0, 0, 1024, 1024)
+        assert tile_core_bounds((2048, 2048), (1024, 1024), 1024, 0) == (1024, 1024, 2048, 2048)
+
+    def test_odd_overlap_one_px_overlap(self):
+        """奇数 overlap：相邻核心重叠恰 1px（歧义条带由合并兜底）。"""
+        assert tile_core_bounds((2560, 2560), (0, 0), 1024, 255) == (0, 0, 897, 897)
+        assert tile_core_bounds((2560, 2560), (769, 0), 1024, 255) == (896, 0, 1666, 897)
+
+    def test_both_axes_within_resolution(self):
+        """双轴都不超过分辨率：单块核心 = 全部内容。"""
+        assert tile_core_bounds((900, 900), (0, 0), 1024, 256) == (0, 0, 900, 900)
+        assert tile_core_bounds((1024, 1024), (0, 0), 1024, 256) == (0, 0, 1024, 1024)
+
+    @pytest.mark.parametrize("image_size", [(2048, 2048), (2560, 2560), (5000, 700), (2000, 900)])
+    @pytest.mark.parametrize("overlap", [0, 128, 255, 256, 512])
+    def test_coverage_union_no_hole(self, image_size, overlap):
+        """核心并集 = 全图（无空洞）——抽样像素点性质校验。"""
+        width, height = image_size
+        cores = [
+            tile_core_bounds(image_size, (x0, y0), 1024, overlap) for x0, y0 in tile_origins(image_size, 1024, overlap)
+        ]
+        # 点查方式（而非集合抽样）：覆盖区间起点不与验证网格对齐时也能正确判定
+        for x in range(0, width, 8):
+            for y in range(0, height, 8):
+                assert any(x_lo <= x < x_hi and y_lo <= y < y_hi for x_lo, y_lo, x_hi, y_hi in cores), (
+                    f"{width}x{height} overlap={overlap} 核心空洞在 ({x},{y})"
+                )
+
+
+class TestMergeCenterDuplicates:
+    """极严格安全合并：只抑制跨 tile 的同一目标重复框。"""
+
+    def test_cross_tile_duplicate_suppressed(self):
+        """跨 tile 近同框（IoU 0.96、中心距/面积比满足）→ 低分被抑制。"""
+        boxes = torch.tensor([[0.0, 0.0, 100.0, 100.0], [2.0, 2.0, 102.0, 102.0]])
+        labels = torch.tensor([0, 0])
+        scores = torch.tensor([0.9, 0.7])
+        tiles = torch.tensor([[0, 0], [768, 0]])
+        keep = merge_center_duplicates(boxes, labels, scores, tiles)
+        assert keep.tolist() == [0]
+
+    def test_same_tile_never_suppressed(self):
+        """同 tile 的近同框永不合并（相邻真实目标免疫）。"""
+        boxes = torch.tensor([[0.0, 0.0, 100.0, 100.0], [2.0, 2.0, 102.0, 102.0]])
+        labels = torch.tensor([0, 0])
+        scores = torch.tensor([0.9, 0.7])
+        tiles = torch.tensor([[0, 0], [0, 0]])
+        keep = merge_center_duplicates(boxes, labels, scores, tiles)
+        assert sorted(keep.tolist()) == [0, 1]
+
+    def test_iou_below_threshold_kept(self):
+        """IoU 0.85 < 0.9（其余条件满足）→ 都保留（IoU 是主闸门）。"""
+        boxes = torch.tensor([[0.0, 0.0, 100.0, 100.0], [4.0, 4.0, 104.0, 104.0]])
+        labels = torch.tensor([0, 0])
+        scores = torch.tensor([0.9, 0.7])
+        tiles = torch.tensor([[0, 0], [768, 0]])
+        keep = merge_center_duplicates(boxes, labels, scores, tiles)
+        assert sorted(keep.tolist()) == [0, 1]
+
+    def test_different_classes_never_suppressed(self):
+        """跨类别同框不同 tile → 都保留。"""
+        boxes = torch.tensor([[0.0, 0.0, 100.0, 100.0], [0.0, 0.0, 100.0, 100.0]])
+        labels = torch.tensor([0, 1])
+        scores = torch.tensor([0.9, 0.8])
+        tiles = torch.tensor([[0, 0], [768, 0]])
+        keep = merge_center_duplicates(boxes, labels, scores, tiles)
+        assert sorted(keep.tolist()) == [0, 1]
+
+    def test_adjacent_real_objects_kept(self):
+        """相邻真实目标（IoU≈0.7 < 0.9）→ 都保留（召回保护）。"""
+        boxes = torch.tensor([[0.0, 0.0, 100.0, 100.0], [18.0, 0.0, 118.0, 100.0]])
+        labels = torch.tensor([0, 0])
+        scores = torch.tensor([0.9, 0.8])
+        tiles = torch.tensor([[0, 0], [768, 0]])
+        keep = merge_center_duplicates(boxes, labels, scores, tiles)
+        assert sorted(keep.tolist()) == [0, 1]
+
+    def test_clamped_last_tile_overlap_strip(self):
+        """夹取末块重叠条带场景：同一目标被两块检出 → 低分被抑制。"""
+        boxes = torch.tensor([[100.0, 100.0, 200.0, 200.0], [101.0, 101.0, 201.0, 201.0]])
+        labels = torch.tensor([0, 0])
+        scores = torch.tensor([0.6, 0.95])
+        tiles = torch.tensor([[768, 768], [1024, 1024]])
+        keep = merge_center_duplicates(boxes, labels, scores, tiles)
+        assert keep.tolist() == [1]
+
+    def test_score_order_independent(self):
+        """降序贪心：高分框输入顺序靠后也保留，低分被抑制。"""
+        boxes = torch.tensor([[0.0, 0.0, 100.0, 100.0], [2.0, 2.0, 102.0, 102.0]])
+        labels = torch.tensor([0, 0])
+        scores = torch.tensor([0.7, 0.95])  # 低分在前输入
+        tiles = torch.tensor([[0, 0], [768, 0]])
+        keep = merge_center_duplicates(boxes, labels, scores, tiles)
+        assert keep.tolist() == [1]
+
+    def test_extreme_area_ratio_kept(self):
+        """含包关系面积比 0.25（IoU 必然 < 0.9）→ 都保留（整体安全）。"""
+        boxes = torch.tensor([[0.0, 0.0, 100.0, 100.0], [25.0, 25.0, 75.0, 75.0]])
+        labels = torch.tensor([0, 0])
+        scores = torch.tensor([0.9, 0.8])
+        tiles = torch.tensor([[0, 0], [768, 0]])
+        keep = merge_center_duplicates(boxes, labels, scores, tiles)
+        assert sorted(keep.tolist()) == [0, 1]
+
+    def test_empty_input(self):
+        """空输入返回空索引。"""
+        boxes = torch.zeros((0, 4))
+        labels = torch.zeros(0, dtype=torch.int64)
+        scores = torch.zeros(0)
+        tiles = torch.zeros((0, 2), dtype=torch.int64)
+        keep = merge_center_duplicates(boxes, labels, scores, tiles)
+        assert keep.numel() == 0
+
+
+class TestTileStrategyValidation:
+    """tile_strategy 策略名校验。"""
+
+    def test_valid_strategies(self):
+        """合法策略名不抛错。"""
+        _check_tile_strategy("nms")
+        _check_tile_strategy("center")
+
+    @pytest.mark.parametrize("strategy", ["center_rescue", "", "NMS", "nms_plus"])
+    def test_invalid_strategies_raise(self, strategy):
+        """非法策略名抛 ValueError。"""
+        with pytest.raises(ValueError):
+            _check_tile_strategy(strategy)
+
+
 class TestFilterPostprocessResults:
     """置信度阈值过滤（整图路径与切分路径共用的公共函数）。"""
 
@@ -216,19 +381,29 @@ class TestInferenceCfgTilingFields:
     """InferenceCfg 滑窗字段：默认值 + yaml 透传（test.py 的构造路径）。"""
 
     def test_default_values(self):
-        """切分默认关闭（tile_overlap=0），NMS 阈值与 tile 批量有合理默认。"""
+        """切分默认关闭（tile_overlap=0），合并策略默认 nms（里程碑 1 基线）。"""
         cfg = eval_lib.InferenceCfg()
         assert cfg.tile_overlap == 0
         assert cfg.tile_nms_iou == 0.5
         assert cfg.tile_batch_size is None
+        assert cfg.tile_strategy == "nms"
 
     def test_yaml_passthrough(self):
         """Yaml 的 test 段新键经 build_test_kwargs 透传到 InferenceCfg（与 test.py 同构）。"""
         kwargs = expcfg.build_test_kwargs(
-            {"test": {"dataset": "shwx", "tile_overlap": 256, "tile_nms_iou": 0.6, "tile_batch_size": 16}}
+            {
+                "test": {
+                    "dataset": "shwx",
+                    "tile_overlap": 256,
+                    "tile_nms_iou": 0.6,
+                    "tile_batch_size": 16,
+                    "tile_strategy": "center",
+                }
+            }
         )
         infer_fields = {f.name for f in dataclasses.fields(eval_lib.InferenceCfg)}
         infer = eval_lib.InferenceCfg(**{k: v for k, v in kwargs.items() if k in infer_fields})
         assert infer.tile_overlap == 256
         assert infer.tile_nms_iou == 0.6
         assert infer.tile_batch_size == 16
+        assert infer.tile_strategy == "center"

@@ -244,8 +244,10 @@ class InferenceCfg:
         use_fp16: 用 FP16 张量核加速推理（RTX 30 系约 2.5 倍提速）。
         tile_overlap: 滑窗切分重叠像素数；``0`` = 关闭切分（大图仍走整图缩放
             路径），``> 0`` = 超分辨率大图切块推理。
-        tile_nms_iou: 切分合并后按类别 NMS 的 IoU 阈值。
+        tile_nms_iou: 切分合并后按类别 NMS 的 IoU 阈值（``"nms"`` 策略）。
         tile_batch_size: 切分路径的 tile 批量大小；``None`` = 沿用 ``batch_size``。
+        tile_strategy: 大图合并策略：``"nms"`` = 里程碑 1 基线（全部保留 + 按类别
+            NMS）；``"center"`` = 里程碑 2（中心归属 + 跨 tile 极严格安全合并）。
     """
 
     device: str = "cuda:0"
@@ -259,6 +261,7 @@ class InferenceCfg:
     tile_overlap: int = 0
     tile_nms_iou: float = 0.5
     tile_batch_size: int | None = None
+    tile_strategy: str = "nms"
 
 
 @dataclass
@@ -844,10 +847,7 @@ def filter_postprocess_results(
         # 逐类阈值：命中 class_conf_thresholds 的类用类阈值，否则回退全局阈值
         if class_conf_thresholds:
             per_class_thr = torch.tensor(
-                [
-                    class_conf_thresholds.get(int(label), conf_threshold)
-                    for label in result["labels"].tolist()
-                ],
+                [class_conf_thresholds.get(int(label), conf_threshold) for label in result["labels"].tolist()],
                 device=result["scores"].device,
             )
         else:
@@ -1122,7 +1122,7 @@ def run_evaluation(
         print(
             f"[i] 滑窗切分推理: 小图 {len(small_paths)} 张走整图路径; "
             f"大图 {len(large_paths)} 张走切分路径(overlap={infer.tile_overlap}, "
-            f"NMS IoU={infer.tile_nms_iou})"
+            f"策略={infer.tile_strategy}, NMS IoU={infer.tile_nms_iou})"
         )
     pred_records, throughput, gpu_util, timed_images = predict_batched_to_records(
         model,
@@ -1162,6 +1162,7 @@ def run_evaluation(
             prefetch_factor=infer.prefetch_factor,
             use_fp16=infer.use_fp16,
             gpu_util_sample_interval=infer.gpu_util_sample_interval,
+            tile_strategy=infer.tile_strategy,
         )
         pred_records += tile_records
         print(

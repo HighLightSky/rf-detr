@@ -18,8 +18,9 @@ test:
   use_fp16: false
   # la_bias 不配置：该 checkpoint 训练时 logit_adjustment_enabled=false，推理侧应与训练一致
   tile_overlap: 256 # 滑窗重叠像素；0 = 关闭切分（大图走整图缩放路径）
-  tile_nms_iou: 0.5 # 切分合并后按类别 NMS 的 IoU 阈值
+  tile_nms_iou: 0.5 # 切分合并后按类别 NMS 的 IoU 阈值（"nms" 策略）
   tile_batch_size: 16 # 切分路径 tile 批量；省略 = 沿用 batch_size
-  save_fp_fn: true # 保存 FP/FN 可视化
-  save_yolo_preds: true # 输出 YOLO 格式预测框（供两路字节级比对/归因）
+  tile_strategy: center # 里程碑2: 中心归属+跨 tile 极严格安全合并(结构性去重替代 NMS); nms 为里程碑1基线对照
+  save_fp_fn: false # 保存 FP/FN 可视化
+  save_yolo_preds: false # 输出 YOLO 格式预测框（供两路字节级比对/归因）
   viz_large_count: 3 # 随机可视化 N 张大图的切割结果（左 GT / 右 Predict，固定种子可复现）；0=关闭
