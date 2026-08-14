@@ -514,20 +514,33 @@ def main() -> None:
             )
         all_results.append({"image": str(image_path), "width": image_w, "height": image_h, "crops": crops_json})
 
-        # ── 可视化（边界框青色 + 检测框类别色）──────────────────────
+        # ── 可视化（切割矩形青色粗框+编号，检测框类别色）────────────
         if not args.no_vis:
             vis = image_bgr.copy()
-            for box_xyxy in boxes_orig:
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = max(0.6, min(1.2, image_w / 1600))  # 大图字号自适应
+            for crop_idx, (box_xyxy, crop_json) in enumerate(zip(boxes_orig, crops_json), start=1):
                 x0, y0, x1, y1 = (int(round(v)) for v in box_xyxy)
-                cv2.rectangle(vis, (x0, y0), (x1, y1), BOUNDARY_BOX_COLOR, 2)
-            for crop_json in crops_json:
+                cv2.rectangle(vis, (x0, y0), (x1, y1), BOUNDARY_BOX_COLOR, 3)
+                # 编号标签（白字青底，画在框左上角内侧，越界时下移）
+                label = f"#{crop_idx}"
+                (text_w, text_h), baseline = cv2.getTextSize(label, font, font_scale, 2)
+                label_y = max(y0 + text_h + baseline, text_h + baseline)
+                cv2.rectangle(
+                    vis,
+                    (x0, label_y - text_h - baseline),
+                    (x0 + text_w, label_y),
+                    BOUNDARY_BOX_COLOR,
+                    -1,
+                )
+                cv2.putText(vis, label, (x0, label_y - baseline), font, font_scale, (0, 0, 0), 2, cv2.LINE_AA)
+                # 检测目标框（类别色 + score，复用 predict.py 绘制）
                 dets = crop_json["detections"]
-                if not dets:
-                    continue
-                xyxy_array = np.array([d["xyxy"] for d in dets])
-                score_array = np.array([d["score"] for d in dets])
-                class_id_array = np.array([d["class_id"] for d in dets])
-                _draw_detections(vis, xyxy_array, score_array, class_id_array, class_names)
+                if dets:
+                    xyxy_array = np.array([d["xyxy"] for d in dets])
+                    score_array = np.array([d["score"] for d in dets])
+                    class_id_array = np.array([d["class_id"] for d in dets])
+                    _draw_detections(vis, xyxy_array, score_array, class_id_array, class_names)
             vis_dir = output_dir / "visualization"
             vis_dir.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(vis_dir / f"{stem}.jpg"), vis)
