@@ -12,7 +12,7 @@
 2. ``tile_origins``：生成滑窗原点网格（带 overlap，末块夹取贴边，无缝隙）。
 3. ``apply_nms``：按类别分组的 NMS 去重（类间不互相抑制）。
 4. ``tile_predict_records``：大图切块批量推理（worker 预取流水线），坐标映射
-   回全图后按类别 NMS 合并。
+   回全图后按策略合并（nms / center / center_rescue）。
 
 切分路径采用与整图路径（``predict_batched_to_records``）同构的 worker 预取
 流水线：DataLoader 的多个 worker 进程并行完成大图解码与切块，主线程把来自
@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
 
@@ -176,15 +177,27 @@ CENTER_MERGE_CENTER_DIST_FRAC = 0.1
 CENTER_MERGE_AREA_RATIO_MIN = 0.5
 CENTER_MERGE_AREA_RATIO_MAX = 2.0
 
-# 支持的大图合并策略："nms"=里程碑 1 基线；"center"=里程碑 2 中心归属+安全合并
-TILE_STRATEGIES = ("nms", "center")
+# ── center_rescue 策略（里程碑 3）常量 ─────────────────────────────────
+# 触边残框定向重裁：重裁块从残框内侧边向缺口方向取 R 宽（留 margin），
+# 目标跨度 D ≤ R - margin 时必然完整落入新块。
+RESCUE_MARGIN = 24  # 重裁块内侧边外留白；R - margin = 1000 ≥ 目标跨度上限
+RESCUE_TOUCH_TOL = 2.0  # 触边判定容差：postprocess clamp 后精确贴边，容忍预估贴内几像素
+RESCUE_CONTAIN_TOL = 2.0  # "候选框包含残框"容差（浮点噪声）
+RESCUE_MIN_GAIN = 4.0  # 候选框向缺口方向最小延伸量；低于此视为未救回，保留残框
+RESCUE_SENTINEL_BASE = 1 << 20  # 重检框唯一哨兵 tile origin 基址（与真实 origin 永不冲突）
+
+# 支持的大图合并策略：
+#   "nms"（里程碑 1 基线）= 全部保留 + 按类别 NMS；
+#   "center"（里程碑 2）= 中心归属 + 跨 tile 极严格安全合并；
+#   "center_rescue"（里程碑 3）= center + 触边残框定向重裁（救回被切大目标）。
+TILE_STRATEGIES = ("nms", "center", "center_rescue")
 
 
 def _check_tile_strategy(strategy: str) -> None:
     """校验大图合并策略名。
 
     Args:
-        strategy: ``"nms"`` 或 ``"center"``（见 ``TILE_STRATEGIES``）。
+        strategy: ``"nms"`` / ``"center"`` / ``"center_rescue"``（见 ``TILE_STRATEGIES``）。
 
     Raises:
         ValueError: 策略名不在支持列表内。
@@ -322,6 +335,190 @@ def merge_center_duplicates(
         return torch.empty(0, dtype=torch.int64, device=boxes.device)
     keep = torch.cat(keep_parts)
     return keep[torch.argsort(scores[keep], descending=True)]
+
+
+def _fragment_rescue_sides(
+    fragment_xyxy: tuple[float, float, float, float],
+    tile_origin: tuple[int, int],
+    tile_content: tuple[int, int],
+    image_size: tuple[int, int],
+    tol: float = RESCUE_TOUCH_TOL,
+) -> tuple[bool, bool, bool, bool]:
+    """判定残框触到所在 tile 的哪些边（全图坐标）。
+
+    残框 = 预测框触到 tile 的内容边界（容差 *tol*），且该边**不是图像边界**
+    （首/末块或短轴单块的 tile 边即图像边，贴边的框可能是完整目标）。触边
+    是"目标被切"的可靠信号，但 *tol* 引入少量假阳性（完整目标紧贴 tile 边），
+    安全性由 ``_rescue_accept`` 的 acceptance 闸门兜底。
+
+    Args:
+        fragment_xyxy: 残框 (x0, y0, x1, y1)（全图坐标）。
+        tile_origin: 该框所属 tile 的原点 (tx0, ty0)。
+        tile_content: tile 内容尺寸 (tw, th)（短轴可能不足 R）。
+        image_size: 图像 (宽, 高)。
+        tol: 触边容差（像素）。
+
+    Returns:
+        ``(left, right, top, bottom)``：残框触到的边；任何一边为 True 即需重裁。
+    """
+    fx0, fy0, fx1, fy1 = fragment_xyxy
+    tx0, ty0 = tile_origin
+    tw, th = tile_content
+    width, height = image_size
+    left = (fx0 - tx0 <= tol) and (tx0 > 0)
+    right = ((tx0 + tw) - fx1 <= tol) and (tx0 + tw < width)
+    top = (fy0 - ty0 <= tol) and (ty0 > 0)
+    bottom = ((ty0 + th) - fy1 <= tol) and (ty0 + th < height)
+    return left, right, top, bottom
+
+
+def _rescue_crop_bounds(
+    fragment_xyxy: tuple[float, float, float, float],
+    rescue_sides: tuple[bool, bool, bool, bool],
+    image_size: tuple[int, int],
+    resolution: int,
+    margin: int = RESCUE_MARGIN,
+) -> tuple[int, int, int, int]:
+    """生成残框的重裁块范围 ``(x0, y0, w, h)``（全图坐标）。
+
+    每轴独立：触边轴以残框**内侧边**为基准向缺口方向取 R 宽（留 margin，
+    目标跨度 D ≤ R - margin 时必然完整落入）；不触边轴中心对齐（残框在该轴
+    跨度 ≤ R，必被包含）；双轴同触（目标跨度 > R）中心对齐兜底（只能部分
+    延伸——已知极限）。块夹取到图像范围，夹取后内容可能 < R（由调用方
+    np.pad 补到 R×R）。
+
+    Args:
+        fragment_xyxy: 残框 (x0, y0, x1, y1)（全图坐标）。
+        rescue_sides: ``_fragment_rescue_sides`` 的判定结果 (left, right, top, bottom)。
+        image_size: 图像 (宽, 高)。
+        resolution: 滑窗边长（= 模型输入分辨率）。
+        margin: 内侧边外留白。
+
+    Returns:
+        ``(x0, y0, w, h)`` 重裁块范围（w/h 为内容尺寸，可能 < resolution）。
+    """
+    fx0, fy0, fx1, fy1 = fragment_xyxy
+    left, right, top, bottom = rescue_sides
+    width, height = image_size
+    block = resolution - margin  # 触边轴可容纳的目标跨度上限
+
+    def axis(f0: float, f1: float, lo_touch: bool, hi_touch: bool, dim: int) -> tuple[int, int]:
+        """计算单轴 (start, 内容宽)。"""
+        if lo_touch and not hi_touch:
+            start = f1 - block  # 目标向 -∞ 方向延伸：内侧边 f1 锚定，右侧留 margin
+        elif hi_touch and not lo_touch:
+            start = f0 - margin  # 目标向 +∞ 方向延伸：内侧边 f0 锚定，左侧留 margin
+        else:
+            start = (f0 + f1) / 2 - resolution / 2  # 不触边/双轴同触：中心对齐
+        # 夹取只把块往目标方向推，不丢目标；上界 max(dim - R, 0) 保证短轴
+        # (dim < R) 时夹到 0 而非负数
+        start = min(max(start, 0), max(dim - resolution, 0))
+        content = min(start + resolution, dim) - start
+        return int(round(start)), int(content)
+
+    x0, w = axis(fx0, fx1, left, right, width)
+    y0, h = axis(fy0, fy1, top, bottom, height)
+    return x0, y0, w, h
+
+
+def _rescue_accept(
+    candidate_xyxy: tuple[float, float, float, float],
+    fragment_xyxy: tuple[float, float, float, float],
+    rescue_sides: tuple[bool, bool, bool, bool],
+    min_gain: float = RESCUE_MIN_GAIN,
+    contain_tol: float = RESCUE_CONTAIN_TOL,
+) -> bool:
+    """判定重检候选框是否为残框的完整版（三闸门，缺一不可）。
+
+    1. 候选框**完整包含**残框（容差 *contain_tol*）——排除缺口区相邻真实目标
+       （其框与残框有重叠但不可能包含大残框）；
+    2. 候选框向**每个缺口方向延伸 ≥ min_gain**——"真的看到了 tile 外像素"的
+       证据；假触边（完整目标贴 tile 边）时重检框≈残框、无延伸 → 拒绝；
+    3. 同类别由 ``_select_rescue_candidate`` 保证。
+
+    Args:
+        candidate_xyxy: 候选框 (x0, y0, x1, y1)（全图坐标）。
+        fragment_xyxy: 残框 (x0, y0, x1, y1)。
+        rescue_sides: 残框触边方向 (left, right, top, bottom)。
+        min_gain: 向缺口方向的最小延伸量。
+        contain_tol: 包含判定容差。
+
+    Returns:
+        是否接受该候选为完整框。
+    """
+    c0, c1, c2, c3 = candidate_xyxy
+    f0, f1, f2, f3 = fragment_xyxy
+    contains = c0 <= f0 + contain_tol and c2 >= f2 - contain_tol and c1 <= f1 + contain_tol and c3 >= f3 - contain_tol
+    if not contains:
+        return False
+    left, right, top, bottom = rescue_sides
+    return (
+        (not right or c2 >= f2 + min_gain)
+        and (not left or c0 <= f0 - min_gain)
+        and (not bottom or c3 >= f3 + min_gain)
+        and (not top or c1 <= f1 - min_gain)
+    )
+
+
+def _select_rescue_candidate(
+    candidates_xyxy: list[tuple[float, float, float, float]],
+    candidates_labels: list[int],
+    candidates_scores: list[float],
+    fragment_xyxy: tuple[float, float, float, float],
+    fragment_label: int,
+    rescue_sides: tuple[bool, bool, bool, bool],
+) -> tuple[tuple[float, float, float, float], int, float] | None:
+    """从重检块候选框中选出残框的完整版。
+
+    过滤条件：同类别 + ``_rescue_accept`` 通过；多候选取**分数最高**者
+    （平局取面积最大）；无合格候选返回 ``None``（调用方保留残框兜底）。
+
+    Args:
+        candidates_xyxy: 重检块内的候选框（全图坐标）。
+        candidates_labels: 候选框类别 id。
+        candidates_scores: 候选框置信度。
+        fragment_xyxy: 残框 (x0, y0, x1, y1)。
+        fragment_label: 残框类别 id。
+        rescue_sides: 残框触边方向。
+
+    Returns:
+        ``(box, label, score)`` 或 ``None``。
+    """
+    best: tuple[tuple[float, float, float, float], int, float] | None = None
+    best_area = 0.0
+    for box, label, score in zip(candidates_xyxy, candidates_labels, candidates_scores):
+        if label != fragment_label:
+            continue
+        if not _rescue_accept(box, fragment_xyxy, rescue_sides):
+            continue
+        area = (box[2] - box[0]) * (box[3] - box[1])
+        if best is None or score > best[2] or (score == best[2] and area > best_area):
+            best = (box, label, score)
+            best_area = area
+    return best
+
+
+@dataclass
+class _Fragment:
+    """触边残框记录（center_rescue 定向重裁的输入）。
+
+    Attributes:
+        box: 残框 (4,) 全图坐标张量（center 过滤前的原始框）。
+        label: 残框类别 id（标量张量）。
+        score: 残框置信度（标量张量）。
+        part_idx: 所属 tile 在 ``per_image[stem]`` 中的 part 位置。
+        row_in_part: 该框在 part 内（center 过滤后）的行号；``-1`` = 未被保留。
+        sides: 触边方向 (left, right, top, bottom)。
+        retained: center 过滤后是否仍保留在 ``per_image`` 中。
+    """
+
+    box: torch.Tensor
+    label: torch.Tensor
+    score: torch.Tensor
+    part_idx: int
+    row_in_part: int
+    sides: tuple[bool, bool, bool, bool]
+    retained: bool
 
 
 class _TileDataset(Dataset):
@@ -474,7 +671,9 @@ def tile_predict_records(
         prefetch_factor: 每个 worker 在内存中预取的 tile 批数。
         use_fp16: FP16 推理。
         gpu_util_sample_interval: 后台采样 GPU 利用率的时间间隔（秒）。
-        tile_strategy: 大图合并策略（``"nms"`` / ``"center"``，见 ``TILE_STRATEGIES``）。
+        tile_strategy: 大图合并策略（``"nms"`` / ``"center"`` / ``"center_rescue"``，
+            见 ``TILE_STRATEGIES``）；``"center_rescue"`` = center + 触边残框
+            定向重裁（救回被滑窗切开的较大目标）。
 
     Returns:
         ``(pred_records, steady_throughput, gpu_util, timed_images)``，与整图路径
@@ -523,6 +722,9 @@ def tile_predict_records(
     # 每张大图累计的 (全图坐标框, 类别, 分数, tile 原点) 张量列表，
     # 循环结束后逐张按策略合并（tile 原点供 center 策略的安全合并判断跨 tile）
     per_image: dict[str, list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]] = {}
+    # center_rescue：触边残框记录（center 过滤前收集，供重裁阶段使用）
+    fragments: dict[str, list[_Fragment]] = {}
+    stem_to_path = {image_path.stem: image_path for image_path in image_paths}
     total_tiles = len(dataset)
     tiles_done = 0
     bench_start = time.perf_counter()
@@ -559,10 +761,30 @@ def tile_predict_records(
             ):
                 # 偏移到全图坐标（GPU 上完成，合并后再统一转 CPU）
                 offset_boxes = boxes + offsets[i]
-                if tile_strategy == "center":
+                # center_rescue：center 过滤**之前**收集触边残框（过滤后才知
+                # retained）——可见部分过小（中心落 halo）的残框会被 center
+                # 丢弃，pre-center 收集可一并救回
+                pending_sides: list[tuple[int, tuple[bool, bool, bool, bool]]] = []
+                if tile_strategy == "center_rescue":
+                    image_w, image_h = image_size_map[stem]
+                    tx0, ty0 = origins[i].tolist()
+                    tw, th = sizes[i].tolist()
+                    for r in range(offset_boxes.shape[0]):
+                        sides = _fragment_rescue_sides(
+                            tuple(offset_boxes[r].float().tolist()),
+                            (tx0, ty0),
+                            (tw, th),
+                            (image_w, image_h),
+                        )
+                        if any(sides):
+                            pending_sides.append((r, sides))
+                # center 过滤会重新绑定 labels/scores，残框记录需引用过滤前的原始行
+                raw_labels, raw_scores = labels, scores
+                keep = None
+                if tile_strategy in ("center", "center_rescue"):
                     # 中心归属：只保留预测框中心落在该块核心区（core/halo）内的框。
                     # 核心区恰好铺满全图（无缝隙），每个目标的中心至多落在一个
-                    # 核心区内 → 跨 tile 重复预测在源头消除
+                    # 核心区内 → 跨 tile 重复预测在源头消除（两策略逐位一致）
                     cx = (offset_boxes[:, 0] + offset_boxes[:, 2]) * 0.5
                     cy = (offset_boxes[:, 1] + offset_boxes[:, 3]) * 0.5
                     core = cores[i].to(device)
@@ -572,10 +794,35 @@ def tile_predict_records(
                         labels[keep],
                         scores[keep],
                     )
-                # tile 标签按该块框数展开成 (N_i, 2)：合并时 cat 后与 boxes 行对齐
+                # tile 标签按该块框数展开成 (N_i, 2)（移到 GPU，与框同设备）：
+                # 合并时 cat 后与 boxes 行对齐
                 per_image.setdefault(stem, []).append(
-                    (offset_boxes, labels, scores, origins[i].expand(offset_boxes.shape[0], -1))
+                    (
+                        offset_boxes,
+                        labels,
+                        scores,
+                        origins[i].expand(offset_boxes.shape[0], -1).to(device),
+                    )
                 )
+                if tile_strategy == "center_rescue" and pending_sides:
+                    part_idx = len(per_image[stem]) - 1
+                    frag_list = fragments.setdefault(stem, [])
+                    for r, sides in pending_sides:
+                        # 注意：labels/scores 在 center 过滤后已被索引，残框记录
+                        # 需引用过滤前的原始行——offset_boxes/labels/scores 在
+                        # 过滤分支内被重新绑定，此处用过滤前的引用
+                        retained = bool(keep[r]) if keep is not None else False
+                        frag_list.append(
+                            _Fragment(
+                                box=boxes[r] + offsets[i],
+                                label=raw_labels[r],
+                                score=raw_scores[r],
+                                part_idx=part_idx,
+                                row_in_part=int(keep[:r].sum()) if retained else -1,
+                                sides=sides,
+                                retained=retained,
+                            )
+                        )
             tiles_done += len(stems)
             print_progress(tiles_done, total_tiles, bench_start, device)
 
@@ -583,16 +830,141 @@ def tile_predict_records(
     torch.cuda.synchronize()
     print()
 
+    # ── center_rescue：触边残框定向重裁 ──────────────────────────────
+    # 被切目标的完整框在**任何原有 tile 里都不存在**（overlap < D 时邻居块
+    # 同样只看到残片），只能以残框内侧边为基准重裁重检。rescue_results 为
+    # stem → [None 或 (box, label, score)]（按残框索引），None = 重检失败。
+    # 重检前向必须在 inference_mode 内：块外前向会构建 autograd graph，
+    # 激活全量驻留显存（主循环已释放，重检阶段不包会 OOM）。
+    rescue_results: dict[str, list[tuple[tuple[float, float, float, float], int, float] | None]] = {}
+    if tile_strategy == "center_rescue" and fragments:
+        # 阶段 B：逐图解码 + 切重检块（仅解码有残框的图，一次切出全部重检块）。
+        # 只重裁 retained 的残框（中心在 core 的贴边框才是真残框：中心在 halo
+        # 的贴边框多为小目标预测误差——真被切目标的中心必落在相邻 tile 的
+        # core 内，由那块触发重裁，无需在此处理）
+        crop_items: list[tuple[str, int, int, int, int, int, torch.Tensor]] = []
+        for stem, frags in fragments.items():
+            image = cv2.cvtColor(cv2.imread(str(stem_to_path[stem])), cv2.COLOR_BGR2RGB)
+            for fi, frag in enumerate(frags):
+                if not frag.retained:
+                    continue
+                x0, y0, w, h = _rescue_crop_bounds(
+                    tuple(frag.box.float().tolist()),
+                    frag.sides,
+                    image_size_map[stem],
+                    resolution,
+                )
+                crop = image[y0 : y0 + h, x0 : x0 + w]
+                # 短轴不足 R 时与主循环相同的 np.pad(edge) 补到 R×R
+                if h != resolution or w != resolution:
+                    crop = np.pad(
+                        crop,
+                        ((0, resolution - h), (0, resolution - w), (0, 0)),
+                        mode="edge",
+                    )
+                crop_items.append(
+                    (
+                        stem,
+                        fi,
+                        x0,
+                        y0,
+                        w,
+                        h,
+                        torch.from_numpy(np.ascontiguousarray(crop)).permute(2, 0, 1),
+                    )
+                )
+            del image
+        # 阶段 C：批量前向（预处理与主循环逐位一致；必须在 inference_mode 内，
+        # 块外前向会构建 autograd graph 导致激活驻留显存 OOM）
+        rescue_results = {stem: [None] * len(frags) for stem, frags in fragments.items()}
+        with torch.inference_mode():
+            for start in range(0, len(crop_items), batch_size):
+                batch = crop_items[start : start + batch_size]
+                gpu_images = [
+                    F.resize(
+                        tensor.to(device, non_blocking=True).to(model_dtype).div_(255.0),
+                        (resolution, resolution),
+                        antialias=False,
+                    )
+                    for _, _, _, _, _, _, tensor in batch
+                ]
+                batch_tensor = F.normalize(torch.stack(gpu_images), means, stds)
+                predictions = model.model.model(batch_tensor)
+                if la_bias is not None:
+                    adjusted_logits = predictions["pred_logits"] - la_bias_k * la_bias.to(
+                        dtype=predictions["pred_logits"].dtype
+                    )
+                    predictions = {**predictions, "pred_logits": adjusted_logits}
+                target_sizes = torch.tensor([[h, w] for _, _, _, _, w, h, _ in batch], device=device)
+                results = model.model.postprocess(predictions, target_sizes=target_sizes)
+                for k, (stem, fi, cx0, cy0, _, _, _) in enumerate(batch):
+                    # 阶段 D：候选选择（同类别 + 完整包含残框 + 向缺口方向延伸）
+                    cand_boxes, cand_labels, cand_scores = filter_postprocess_results(
+                        [results[k]], conf_threshold, class_conf_thresholds
+                    )[0]
+                    offset = torch.tensor([cx0, cy0, cx0, cy0], device=cand_boxes.device)
+                    cand_full = cand_boxes + offset
+                    frag = fragments[stem][fi]
+                    rescue_results[stem][fi] = _select_rescue_candidate(
+                        [tuple(b.tolist()) for b in cand_full],
+                        [int(l) for l in cand_labels.tolist()],
+                        [float(s) for s in cand_scores.tolist()],
+                        tuple(frag.box.float().tolist()),
+                        int(frag.label),
+                        frag.sides,
+                    )
+
     # 逐张合并所有 tile 的框 → 按策略去重 → 转 BoxRecord
+    # center_rescue：被替换的残框行先行移除，重检完整框带唯一哨兵 origin 追加，
+    # 与 tile 框统一过一次安全合并（rescue-rescue 去重、rescue-tile 由面积比守卫）
+    sentinel = RESCUE_SENTINEL_BASE
     for stem, parts in per_image.items():
-        boxes = torch.cat([part[0] for part in parts])
-        labels = torch.cat([part[1] for part in parts])
-        scores = torch.cat([part[2] for part in parts])
-        if tile_strategy == "nms":
-            keep = apply_nms(boxes, labels, scores, nms_iou)
-        else:  # center：跨 tile 极严格安全合并（同 tile 内相邻真实目标永不合并）
-            tile_ids = torch.cat([part[3] for part in parts]).to(boxes.device)
+        if tile_strategy == "center_rescue" and stem in fragments:
+            # 重检成功的残框行跳过集合（按 part 内行号）
+            skip_rows: dict[int, set[int]] = {}
+            boxes_list: list[torch.Tensor] = []
+            labels_list: list[torch.Tensor] = []
+            scores_list: list[torch.Tensor] = []
+            tiles_list: list[torch.Tensor] = []
+            for fi, frag in enumerate(fragments[stem]):
+                if not frag.retained:
+                    continue  # 非真残框（预测误差贴边），已由 center 过滤，不处理
+                result = rescue_results[stem][fi]
+                if result is not None:
+                    # 重检成功：残框行被替换为完整框
+                    skip_rows.setdefault(frag.part_idx, set()).add(frag.row_in_part)
+                    box, label, score = result
+                    boxes_list.append(torch.tensor([box], device=device))
+                    labels_list.append(torch.tensor([label], device=device))
+                    scores_list.append(torch.tensor([score], device=device))
+                    tiles_list.append(torch.tensor([[sentinel, sentinel]], device=device))
+                    sentinel += 1
+                # 重检失败：残框保留在 parts 中（不跳过），部分召回兜底
+            for pi, part in enumerate(parts):
+                skip = skip_rows.get(pi, set())
+                for row in range(part[0].shape[0]):
+                    if row in skip:
+                        continue
+                    boxes_list.append(part[0][row : row + 1])
+                    labels_list.append(part[1][row : row + 1])
+                    scores_list.append(part[2][row : row + 1])
+                    tiles_list.append(part[3][row : row + 1])
+            boxes = torch.cat(boxes_list)
+            labels = torch.cat(labels_list)
+            scores = torch.cat(scores_list)
+            # part 的 tile 标签来自 collate（CPU），重检框的哨兵标签在 GPU，
+            # 统一移到 GPU 再合并
+            tile_ids = torch.cat(tiles_list).to(device)
             keep = merge_center_duplicates(boxes, labels, scores, tile_ids)
+        else:
+            boxes = torch.cat([part[0] for part in parts])
+            labels = torch.cat([part[1] for part in parts])
+            scores = torch.cat([part[2] for part in parts])
+            if tile_strategy == "nms":
+                keep = apply_nms(boxes, labels, scores, nms_iou)
+            else:  # center：跨 tile 极严格安全合并（同 tile 内相邻真实目标永不合并）
+                tile_ids = torch.cat([part[3] for part in parts]).to(boxes.device)
+                keep = merge_center_duplicates(boxes, labels, scores, tile_ids)
         for xyxy, class_id, score in zip(
             boxes[keep].cpu().numpy(),
             labels[keep].cpu().numpy(),
@@ -607,7 +979,22 @@ def tile_predict_records(
                 )
             )
 
+    # ── 重裁统计 ────────────────────────────────────────────────────
+    if tile_strategy == "center_rescue" and fragments:
+        total_frags = sum(1 for frags in fragments.values() for frag in frags if frag.retained)
+        success = sum(
+            1
+            for stem, frags in fragments.items()
+            for fi, frag in enumerate(frags)
+            if frag.retained and rescue_results[stem][fi] is not None
+        )
+        print(
+            f"[i] center_rescue: {len(fragments)} 图 / {total_frags} 真残框"
+            f"（另有 {sum(len(frags) for frags in fragments.values()) - total_frags} 个非真残框已忽略）→ "
+            f"{success} 重裁成功，{total_frags - success} 失败保留残框兜底"
+        )
+
     steady_elapsed = time.perf_counter() - bench_start
-    timed_images = len(per_image)
+    timed_images = len(set(per_image) | set(fragments))
     steady_throughput = timed_images / steady_elapsed if steady_elapsed > 0 else 0.0
     return pred_records, steady_throughput, gpu_monitor.average_utilization(), timed_images

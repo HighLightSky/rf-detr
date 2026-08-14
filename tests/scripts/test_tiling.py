@@ -18,6 +18,10 @@ import torch
 from scripts import eval_lib, expcfg
 from scripts.tiling import (
     _check_tile_strategy,
+    _fragment_rescue_sides,
+    _rescue_accept,
+    _rescue_crop_bounds,
+    _select_rescue_candidate,
     apply_nms,
     merge_center_duplicates,
     split_image_paths,
@@ -310,12 +314,243 @@ class TestTileStrategyValidation:
         """合法策略名不抛错。"""
         _check_tile_strategy("nms")
         _check_tile_strategy("center")
+        _check_tile_strategy("center_rescue")
 
-    @pytest.mark.parametrize("strategy", ["center_rescue", "", "NMS", "nms_plus"])
+    @pytest.mark.parametrize("strategy", ["", "NMS", "nms_plus", "rescue"])
     def test_invalid_strategies_raise(self, strategy):
         """非法策略名抛 ValueError。"""
         with pytest.raises(ValueError):
             _check_tile_strategy(strategy)
+
+
+class TestFragmentRescueSides:
+    """残框触边识别：触 tile 边且该边非图像边界。"""
+
+    def test_touches_right_edge(self):
+        """框右缘 == tile 右缘（tile 右侧非图像边）→ 仅 right。"""
+        sides = _fragment_rescue_sides((100.0, 100.0, 1024.0, 400.0), (0, 0), (1024, 1024), (2000, 1200))
+        assert sides == (False, True, False, False)
+
+    def test_touches_left_edge(self):
+        """框左缘 == tile 左缘（tile 左侧非图像边）→ 仅 left。"""
+        sides = _fragment_rescue_sides((0.0, 100.0, 500.0, 400.0), (768, 0), (1024, 1024), (2000, 1200))
+        assert sides == (True, False, False, False)
+
+    def test_tolerance_boundary(self):
+        """贴内距离 == tol 判定为触边；tol+0.01 不触边。"""
+        # 框右缘贴 tile 右缘内 2px（= tol）→ 触边
+        assert _fragment_rescue_sides((100.0, 100.0, 1022.0, 400.0), (0, 0), (1024, 1024), (2000, 1200)) == (
+            False,
+            True,
+            False,
+            False,
+        )
+        # 框右缘贴内 2.01px（> tol）→ 不触边
+        assert _fragment_rescue_sides((100.0, 100.0, 1021.99, 400.0), (0, 0), (1024, 1024), (2000, 1200)) == (
+            False,
+            False,
+            False,
+            False,
+        )
+
+    def test_touching_image_edge_not_fragment(self):
+        """框贴 tile 右缘但该边是图像右缘（末块）→ 完整目标，非残框。"""
+        # tile x 范围 [976, 2000]，框右缘贴 2000（= 图像右缘）→ 非残框
+        sides = _fragment_rescue_sides((1100.0, 100.0, 2000.0, 400.0), (976, 0), (1024, 1024), (2000, 1200))
+        assert sides == (False, False, False, False)
+
+    def test_first_tile_left_is_image_edge(self):
+        """首块左缘 == 图像左缘 → 非残框。"""
+        sides = _fragment_rescue_sides((0.0, 100.0, 500.0, 400.0), (0, 0), (1024, 1024), (2000, 1200))
+        assert sides == (False, False, False, False)
+
+    def test_short_axis_single_tile_never_fragment(self):
+        """短轴单块（内容 == 图像宽）→ 该轴永不判定为残框。"""
+        sides = _fragment_rescue_sides((0.0, 100.0, 700.0, 400.0), (0, 0), (2000, 700), (2000, 700))
+        assert sides == (False, False, False, False)
+
+    def test_corner_touches_two_axes(self):
+        """双轴角部触边（目标在 tile 角被切）→ left + top。"""
+        sides = _fragment_rescue_sides((0.0, 0.0, 500.0, 500.0), (768, 176), (1024, 1024), (2000, 1200))
+        assert sides == (True, False, True, False)
+
+    def test_no_touch(self):
+        """框完全在 tile 内部 → 全部 False。"""
+        sides = _fragment_rescue_sides((300.0, 300.0, 700.0, 700.0), (0, 0), (1024, 1024), (2000, 1200))
+        assert sides == (False, False, False, False)
+
+
+class TestRescueCropBounds:
+    """重裁块生成：触边轴内侧边锚定，不触边轴中心对齐，夹取安全。"""
+
+    R = 1024
+
+    def test_right_touch_anchors_inner_edge(self):
+        """右触边：块 [f0-margin, f0+R-margin]，完整包含 D ≤ R-margin 的目标。"""
+        fragment = (300.0, 100.0, 1024.0, 500.0)
+        x0, y0, w, h = _rescue_crop_bounds(fragment, (False, True, False, False), (2000, 1200), 1024)
+        assert x0 == 300 - 24
+        assert w == 1024
+        # 目标 [300, 300+D] 完整落入 [276, 1300] ⟺ D ≤ 1000
+        assert 300 + 1000 <= x0 + 1024
+
+    def test_left_touch_anchors_inner_edge(self):
+        """左触边：块 [f1-(R-margin), f1+margin]，夹取到图像内。"""
+        # f1=500 时 start = 500-1000 = -500 → 夹取到 0
+        fragment = (0.0, 100.0, 500.0, 500.0)
+        x0, y0, w, h = _rescue_crop_bounds(fragment, (True, False, False, False), (2000, 1200), 1024)
+        assert x0 == 0
+        assert w == 1024
+        assert x0 + w >= 500  # 残框右缘被包含
+        # f1=1500 时 start = 500，无夹取
+        fragment = (1000.0, 100.0, 1500.0, 500.0)
+        x0, y0, w, h = _rescue_crop_bounds(fragment, (True, False, False, False), (2000, 1200), 1024)
+        assert x0 == 1500 - (1024 - 24)
+        assert w == 1024
+        # 目标 [1500-D, 1500] 完整落入 ⟺ D ≤ 1000
+        assert x0 <= 1500 - 1000
+
+    def test_untouched_axis_center_aligned(self):
+        """不触边轴中心对齐，块完整包含残框（越界时夹取到 0）。"""
+        fragment = (300.0, 300.0, 1024.0, 700.0)
+        x0, y0, w, h = _rescue_crop_bounds(fragment, (False, True, False, False), (2000, 1200), 1024)
+        # y 轴不触边：中心对齐 = (300+700)/2 - 512 = -212 → 夹取到 0
+        assert y0 == 0
+        assert y0 + h >= 700  # 残框下缘被包含
+
+    def test_clamp_to_image_bounds(self):
+        """夹取：start < 0 → 0；start > dim-R → dim-R；内容可能 < R。"""
+        # 左触边且内侧边靠近图像左缘 → start 夹到 0
+        fragment = (0.0, 100.0, 100.0, 500.0)
+        x0, y0, w, h = _rescue_crop_bounds(fragment, (True, False, False, False), (2000, 1200), 1024)
+        assert x0 == 0
+        assert w == 1024
+        # 右触边且内侧边靠近图像右缘 → start 夹到 dim-R
+        fragment = (1800.0, 100.0, 2000.0, 500.0)
+        x0, y0, w, h = _rescue_crop_bounds(fragment, (False, True, False, False), (2000, 1200), 1024)
+        assert x0 == 2000 - 1024
+        assert w == 1024
+
+    def test_short_axis_untouched_clamps_to_zero(self):
+        """短轴 (dim < R) 不触边：start 夹到 0（回归：不能夹成负数）。"""
+        fragment = (300.0, 100.0, 1024.0, 600.0)
+        x0, y0, w, h = _rescue_crop_bounds(fragment, (False, True, False, False), (2000, 700), 1024)
+        assert y0 == 0
+        assert h == 700
+
+    def test_both_sides_touch_center_aligned(self):
+        """双轴同触（目标跨度 > R）：中心对齐兜底。"""
+        fragment = (0.0, 100.0, 2000.0, 500.0)
+        x0, y0, w, h = _rescue_crop_bounds(fragment, (True, True, False, False), (2000, 1200), 1024)
+        assert x0 == int(round((0 + 2000) / 2 - 512))  # 中心对齐 = 488，未夹取
+        assert w == 1024
+
+    @pytest.mark.parametrize("dim", [2000, 3000, 5000])
+    def test_crop_contains_full_target(self, dim):
+        """属性测试：真实一致构造（残框 = 目标∩tile、sides 按目标超出方向），
+        新块完整包含目标（D ∈ [256, 1000]）。"""
+        tile = (0, 0, 1024, 1024)  # tile 内容范围（全图坐标）
+        for d in (256, 512, 900, 1000):
+            for target in (
+                (300.0, 300.0, 300.0 + d, 300.0 + d),  # 目标在 tile 内部
+                (900.0, 300.0, 900.0 + d, 300.0 + d),  # 目标向右超出
+                (300.0, 900.0, 300.0 + d, 900.0 + d),  # 目标向下超出
+                (900.0, 900.0, 900.0 + d, 900.0 + d),  # 目标向右下超出
+            ):
+                if target[2] > dim or target[3] > dim:
+                    continue  # 目标超出图像范围
+                # 残框 = 目标 ∩ tile（真实语义：postprocess clamp 后）
+                fragment = (
+                    max(target[0], tile[0]),
+                    max(target[1], tile[1]),
+                    min(target[2], tile[2]),
+                    min(target[3], tile[3]),
+                )
+                if fragment[2] <= fragment[0] or fragment[3] <= fragment[1]:
+                    continue
+                # 触边方向 = 目标超出 tile 的方向
+                sides = (
+                    target[0] < tile[0],
+                    target[2] > tile[2],
+                    target[1] < tile[1],
+                    target[3] > tile[3],
+                )
+                x0, y0, w, h = _rescue_crop_bounds(fragment, sides, (dim, dim), 1024)
+                assert x0 <= target[0] and x0 + w >= target[2], (
+                    f"D={d} target={target} sides={sides} x 轴未包含: 块 [{x0}, {x0 + w}]"
+                )
+                assert y0 <= target[1] and y0 + h >= target[3], (
+                    f"D={d} target={target} sides={sides} y 轴未包含: 块 [{y0}, {y0 + h}]"
+                )
+
+
+class TestRescueAccept:
+    """重检候选接受判定：完整包含 + 向缺口方向延伸。"""
+
+    FRAG = (300.0, 300.0, 1024.0, 700.0)
+    SIDES_RIGHT = (False, True, False, False)
+
+    def test_contains_and_extends_accepted(self):
+        """完整包含残框且向右延伸 → 接受。"""
+        assert _rescue_accept((276.0, 276.0, 1300.0, 724.0), self.FRAG, self.SIDES_RIGHT)
+
+    def test_no_extension_rejected(self):
+        """框 == 残框（无延伸，假触边）→ 拒绝，保留残框兜底。"""
+        assert not _rescue_accept((298.0, 298.0, 1026.0, 702.0), self.FRAG, self.SIDES_RIGHT)
+
+    def test_overlap_without_contain_rejected(self):
+        """只延伸但不完整包含（缺口区相邻真实目标）→ 拒绝。"""
+        # 候选只覆盖残框左半 + 向右延伸
+        assert not _rescue_accept((276.0, 300.0, 1300.0, 500.0), self.FRAG, self.SIDES_RIGHT)
+
+    def test_min_gain_boundary(self):
+        """延伸 == min_gain 接受；min_gain - ε 拒绝。"""
+        assert _rescue_accept((276.0, 276.0, 1028.0, 724.0), self.FRAG, self.SIDES_RIGHT)
+        assert not _rescue_accept((276.0, 276.0, 1027.99, 724.0), self.FRAG, self.SIDES_RIGHT)
+
+    def test_both_axes_must_extend(self):
+        """双轴触边：两轴都必须延伸。"""
+        frag = (0.0, 0.0, 500.0, 500.0)
+        sides = (True, False, True, False)
+        # 只向左延伸、不向上延伸 → 拒绝
+        assert not _rescue_accept((-200.0, 2.0, 500.0, 500.0), frag, sides)
+        # 两轴都延伸 → 接受
+        assert _rescue_accept((-200.0, -200.0, 500.0, 500.0), frag, sides)
+
+
+class TestSelectRescueCandidate:
+    """重检候选选择：同类 + accept + 分数最高（平局面积最大）。"""
+
+    FRAG = (300.0, 300.0, 1024.0, 700.0)
+    SIDES = (False, True, False, False)
+
+    def test_picks_highest_score(self):
+        """多候选取分数最高者。"""
+        candidates = [
+            (276.0, 276.0, 1300.0, 724.0),  # 合格，低分
+            (276.0, 276.0, 1400.0, 724.0),  # 合格，高分
+        ]
+        best = _select_rescue_candidate(candidates, [0, 0], [0.5, 0.9], self.FRAG, 0, self.SIDES)
+        assert best == (candidates[1], 0, 0.9)
+
+    def test_score_tie_prefers_larger_area(self):
+        """平局取面积最大。"""
+        candidates = [
+            (276.0, 276.0, 1300.0, 724.0),
+            (276.0, 276.0, 1400.0, 724.0),
+        ]
+        best = _select_rescue_candidate(candidates, [0, 0], [0.9, 0.9], self.FRAG, 0, self.SIDES)
+        assert best[0] == candidates[1]
+
+    def test_wrong_class_rejected(self):
+        """不同类别不参与替换。"""
+        candidates = [(276.0, 276.0, 1300.0, 724.0)]
+        best = _select_rescue_candidate(candidates, [1], [0.9], self.FRAG, 0, self.SIDES)
+        assert best is None
+
+    def test_no_qualified_returns_none(self):
+        """无合格候选 → None（调用方保留残框）。"""
+        assert _select_rescue_candidate([], [], [], self.FRAG, 0, self.SIDES) is None
 
 
 class TestFilterPostprocessResults:
