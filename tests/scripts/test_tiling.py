@@ -12,12 +12,15 @@
 
 import dataclasses
 
+import cv2
+import numpy as np
 import pytest
 import torch
 
 from scripts import eval_lib, expcfg
 from scripts.tiling import (
     _check_tile_strategy,
+    _TileDataset,
     _fragment_rescue_sides,
     _rescue_accept,
     _rescue_crop_bounds,
@@ -119,6 +122,34 @@ class TestSplitImagePaths:
         small, large = split_image_paths(paths, size_map, 1024)
         assert [p.stem for p in small] == ["c0", "c2"]
         assert [p.stem for p in large] == ["c1"]
+
+
+class TestTileDatasetSeamBounds:
+    """seam 矩形在数据集层必须保留真实边界。"""
+
+    def test_large_seam_tile_keeps_true_extent(self, tmp_path):
+        """真实宽高大于 1024 的 seam 图块，不得被默认裁成 1024 前缀。"""
+        image_path = tmp_path / "seam.jpg"
+        image = np.zeros((800, 1200, 3), dtype=np.uint8)
+        for x in range(image.shape[1]):
+            image[:, x, :] = x % 256
+        cv2.imwrite(str(image_path), image)
+
+        dataset = _TileDataset(
+            [image_path],
+            {"seam": (1200, 800)},
+            resolution=1024,
+            overlap=256,
+            origins_map={"seam": [(0, 0, 1100, 700, 0)]},
+        )
+
+        assert len(dataset) == 1
+        stem, x0, y0, tile_w, tile_h, core, tile = dataset[0]
+        assert stem == "seam"
+        assert (x0, y0) == (0, 0)
+        assert (tile_w, tile_h) == (1100, 700)
+        assert core == (0, 0, 1100, 700)
+        assert tile.shape == (3, 1024, 1024)
 
 
 class TestApplyNms:
@@ -642,3 +673,17 @@ class TestInferenceCfgTilingFields:
         assert infer.tile_nms_iou == 0.6
         assert infer.tile_batch_size == 16
         assert infer.tile_strategy == "center"
+
+
+class TestEffectiveNumWorkers:
+    """切分模式对应的实际 DataLoader worker 数。"""
+
+    def test_seam_mode_forces_serial_workers(self):
+        """seam 模式主进程做完缝检测后不再 fork DataLoader worker。"""
+        infer = eval_lib.InferenceCfg(num_workers=12, tile_cut_mode="seam")
+        assert eval_lib._effective_num_workers(infer, seam_mode=True) == 0
+
+    def test_grid_mode_preserves_workers(self):
+        """普通滑窗模式保留配置中的 worker 数。"""
+        infer = eval_lib.InferenceCfg(num_workers=12, tile_cut_mode="grid")
+        assert eval_lib._effective_num_workers(infer, seam_mode=False) == 12

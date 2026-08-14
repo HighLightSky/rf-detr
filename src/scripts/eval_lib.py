@@ -36,7 +36,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -248,6 +248,9 @@ class InferenceCfg:
         tile_batch_size: 切分路径的 tile 批量大小；``None`` = 沿用 ``batch_size``。
         tile_strategy: 大图合并策略：``"nms"`` = 里程碑 1 基线（全部保留 + 按类别
             NMS）；``"center"`` = 里程碑 2（中心归属 + 跨 tile 极严格安全合并）。
+        tile_cut_mode: 大图切块方式：``"grid"`` = 滑窗网格切块（现有行为，
+            里程碑 1-3）；``"seam"`` = 拼接缝切分（里程碑 4，检测小图拼接缝
+            沿缝切割，无重叠、无目标截断，合并固定 center）。
     """
 
     device: str = "cuda:0"
@@ -262,6 +265,26 @@ class InferenceCfg:
     tile_nms_iou: float = 0.5
     tile_batch_size: int | None = None
     tile_strategy: str = "nms"
+    tile_cut_mode: str = "grid"
+
+
+def _effective_num_workers(infer: InferenceCfg, seam_mode: bool) -> int:
+    """解析评测阶段实际使用的 DataLoader worker 数。
+
+    seam 模式会先在主进程执行大规模 OpenCV/numpy 缝检测。之后若继续 fork
+    DataLoader worker，容易继承库内部线程锁状态并死锁，因此 seam 模式强制
+    走主进程串行解码；普通整图/滑窗路径保持配置值。
+
+    Args:
+        infer: 推理配置。
+        seam_mode: 是否启用拼接缝切分模式。
+
+    Returns:
+        实际传给 DataLoader 的 ``num_workers``。
+    """
+    if seam_mode and infer.num_workers > 0:
+        return 0
+    return infer.num_workers
 
 
 @dataclass
@@ -1102,15 +1125,20 @@ def run_evaluation(
     attach_from_checkpoint(model.model.model, _ckpt_sd.get("model", _ckpt_sd))
     del _ckpt_sd
 
-    # ── 大图滑窗切分推理（tile_overlap > 0 时启用）────────────────────────
+    # ── 大图切分推理（tile_overlap > 0 或 tile_cut_mode="seam" 时启用）───
     # 小图（max(w,h) <= 分辨率）走整图批量路径；大图逐张切块推理，两路结果
     # 合并后由下游统一评估。切分关闭时所有图走整图缩放路径（行为与旧版一致，
     # 用于回归对照）。
-    tile_mode = infer.tile_overlap > 0
+    # "grid" 模式 = 滑窗网格切块（里程碑 1-3）；"seam" 模式 = 拼接缝切分
+    # （里程碑 4：检测小图拼接缝沿缝切割，无重叠、无目标截断）。
+    seam_mode = infer.tile_cut_mode == "seam"
+    tile_mode = infer.tile_overlap > 0 or seam_mode
+    effective_num_workers = _effective_num_workers(infer, seam_mode)
     small_paths = test_image_paths
     large_paths: list[Path] = []
-    # 推理分辨率（model 释放后仍供大图对比可视化绘制滑窗网格线使用）
+    # 推理分辨率（model 释放后仍供大图对比可视化绘制切分网格线使用）
     tile_resolution = int(model.model.resolution)
+    origins_map: dict[str, list[tuple[int, int, int, int, int]]] | None = None
     if tile_mode:
         # 惰性 import：避免 eval_lib ↔ tiling 模块循环依赖
         from scripts.tiling import split_image_paths, tile_predict_records
@@ -1119,11 +1147,36 @@ def run_evaluation(
         if image_size_map is None:
             image_size_map = build_image_size_map(test_image_paths)
         small_paths, large_paths = split_image_paths(test_image_paths, image_size_map, tile_resolution)
-        print(
-            f"[i] 滑窗切分推理: 小图 {len(small_paths)} 张走整图路径; "
-            f"大图 {len(large_paths)} 张走切分路径(overlap={infer.tile_overlap}, "
-            f"策略={infer.tile_strategy}, NMS IoU={infer.tile_nms_iou})"
-        )
+        if seam_mode:
+            # 拼接缝切分：主进程逐张检测缝并组合图块原点（缝图块无重叠，
+            # 超限图块内部展开滑窗网格兜底）
+            from scripts.seam_cut import build_seam_origins_map
+
+            origins_map, seam_stats = build_seam_origins_map(
+                large_paths,
+                image_size_map,
+                tile_resolution,
+                infer.tile_overlap,
+            )
+            total_h = sum(ny for ny, _nx in seam_stats.values())
+            total_v = sum(nx for _ny, nx in seam_stats.values())
+            total_tiles = sum(len(origins) for origins in origins_map.values())
+            print(
+                f"[i] 拼接缝切分推理: 小图 {len(small_paths)} 张走整图路径; "
+                f"大图 {len(large_paths)} 张检测到水平缝 {total_h} 条、垂直缝 {total_v} 条, "
+                f"共 {total_tiles} 个图块(超限图块滑窗兜底 overlap={infer.tile_overlap})"
+            )
+            if effective_num_workers != infer.num_workers:
+                print(
+                    "[i] seam 模式已在主进程完成 OpenCV/numpy 缝检测，"
+                    f"为避免 fork DataLoader worker 死锁，实际 num_workers 从 {infer.num_workers} 降为 0"
+                )
+        else:
+            print(
+                f"[i] 滑窗切分推理: 小图 {len(small_paths)} 张走整图路径; "
+                f"大图 {len(large_paths)} 张走切分路径(overlap={infer.tile_overlap}, "
+                f"策略={infer.tile_strategy}, NMS IoU={infer.tile_nms_iou})"
+            )
     pred_records, throughput, gpu_util, timed_images = predict_batched_to_records(
         model,
         small_paths,
@@ -1131,7 +1184,7 @@ def run_evaluation(
         conf_threshold=infer.conf_threshold,
         class_conf_thresholds=infer.class_conf_thresholds,
         batch_size=infer.batch_size,
-        num_workers=infer.num_workers,
+        num_workers=effective_num_workers,
         la_bias=la_bias,
         num_classes=dataset.num_classes,
         prefetch_factor=infer.prefetch_factor,
@@ -1155,14 +1208,15 @@ def run_evaluation(
             nms_iou=infer.tile_nms_iou,
             conf_threshold=infer.conf_threshold,
             batch_size=infer.tile_batch_size or infer.batch_size,
-            num_workers=infer.num_workers,
+            num_workers=effective_num_workers,
             class_conf_thresholds=infer.class_conf_thresholds,
             la_bias=bias_tensor,
             la_bias_k=bias_k,
             prefetch_factor=infer.prefetch_factor,
             use_fp16=infer.use_fp16,
             gpu_util_sample_interval=infer.gpu_util_sample_interval,
-            tile_strategy=infer.tile_strategy,
+            tile_strategy="center" if seam_mode else infer.tile_strategy,
+            origins_map=origins_map,
         )
         pred_records += tile_records
         print(
@@ -1188,8 +1242,9 @@ def run_evaluation(
             dataset.class_names,
             dataset.exp_output_dir / "large_viz",
             viz_large_count,
-            tile_size=tile_resolution,
+            tile_size=None if seam_mode else tile_resolution,
             tile_overlap=infer.tile_overlap,
+            tile_origins_map=origins_map,
             num_classes=dataset.num_classes,
             vehicle_class_ids=set(dataset.vehicle_class_ids),
         )
@@ -1197,7 +1252,7 @@ def run_evaluation(
     # ── 推理测速结果 ─────────────────────────────────────────────────
     print("=" * 80)
     print("推理测速结果")
-    print(f"GPU 批量大小: {infer.batch_size}  |  CPU 预取 worker 数: {infer.num_workers}")
+    print(f"GPU 批量大小: {infer.batch_size}  |  CPU 预取 worker 数: {effective_num_workers}")
     # timed_images=0（如全部图像走切分路径）时 throughput 为 0，避免除零
     if throughput > 0:
         print(f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {timed_images / throughput:.1f}s）")
@@ -1332,6 +1387,6 @@ def run_evaluation(
         total_macro=total_macro,
         per_class_results=per_class_results,
         dataset=dataset,
-        infer=infer,
+        infer=replace(infer, num_workers=effective_num_workers),
     )
     write_test_result(report_lines, dataset.exp_output_dir / "test_result.txt")

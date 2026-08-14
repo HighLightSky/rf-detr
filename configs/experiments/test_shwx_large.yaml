@@ -1,12 +1,13 @@
-# SHWX-large 数据集测试评估配置（672 张小图 + 100 张 concat 拼接大图）
-# 里程碑 1：朴素滑窗切分 + 按类别 NMS 去重基线
+# SHWX-large 数据集测试评估配置（672 张小图 + 100 张 hstrip 拼接大图）
+# 里程碑 4：无缝拼接缝切分（tile_cut_mode: seam，检测拼接缝沿缝切割，
+# 无重叠、无目标截断，理论指标回到全小图基线水平）
 # 用法: python src/scripts/test.py -c configs/experiments/test_shwx_large.yaml
-# 回归对照: --set test.tile_overlap=0 关闭切分，100 张大图走旧整图缩放路径
+# 对照: --set test.tile_cut_mode=grid 退回滑窗切分（里程碑 1-3）
 test:
   dataset: shwx # eval_lib.DATASET_CONFIGS 内置名（类别语义沿用 shwx）
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-large # 仅换数据集根目录
   checkpoint: output/0813-强基线-多原型/0813-SHWX-SSCL-MultiProto-HardNegSuppress-v5-强基线-1024-强SSCL-MS不负样本抑制/checkpoint_best_total.pth
-  output_dir: output/0813-强基线-多原型/0813-SHWX-SSCL-MultiProto-HardNegSuppress-v5-强基线-1024-强SSCL-MS不负样本抑制-eval-large
+  output_dir: output/0813-强基线-多原型/0813-SHWX-SSCL-MultiProto-HardNegSuppress-v5-强基线-1024-强SSCL-MS不负样本抑制-eval-large-seam
   resolution: 1024 # 推理输入分辨率（checkpoint 记录为 576，评测口径为大分辨率 1024）
   conf_threshold: 0.25 # 全局置信度阈值
   class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}
@@ -17,10 +18,11 @@ test:
   gpu_util_sample_interval: 0.5
   use_fp16: false
   # la_bias 不配置：该 checkpoint 训练时 logit_adjustment_enabled=false，推理侧应与训练一致
-  tile_overlap: 256 # 滑窗重叠像素；0 = 关闭切分（大图走整图缩放路径）
+  tile_overlap: 256 # 滑窗重叠像素；seam 模式下仅超限图块（>1200px）的兜底网格使用
   tile_nms_iou: 0.5 # 切分合并后按类别 NMS 的 IoU 阈值（"nms" 策略）
   tile_batch_size: 16 # 切分路径 tile 批量；省略 = 沿用 batch_size
-  tile_strategy: center_rescue # 里程碑3: center(中心归属+安全合并) + 触边残框定向重裁(救回被切大目标); center/nms 为对照
+  tile_strategy: center_rescue # seam 模式固定 center 合并（字段保留，grid 模式仍按此执行）
+  tile_cut_mode: seam # 大图切块方式: seam = 拼接缝切分(里程碑4); grid = 滑窗切分(里程碑1-3)
   save_fp_fn: false # 保存 FP/FN 可视化
-  save_yolo_preds: false # 输出 YOLO 格式预测框（供两路字节级比对/归因）
-  viz_large_count: 3 # 随机可视化 N 张大图的切割结果（左 GT / 右 Predict，固定种子可复现）；0=关闭
+  save_yolo_preds: false # 输出 YOLO 格式预测框（供大图部分单独归因）
+  viz_large_count: 10 # 随机可视化 N 张大图的切割结果（左 GT / 右 Predict，固定种子可复现）；0=关闭

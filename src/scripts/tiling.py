@@ -536,6 +536,7 @@ class _TileDataset(Dataset):
         image_size_map: Mapping[str, tuple[int, int]],
         resolution: int,
         overlap: int,
+        origins_map: Mapping[str, list[tuple[int, int, int, int, int]]] | None = None,
     ) -> None:
         """构建 tile 样本列表（按图像行优先、图内行优先排列）。
 
@@ -543,17 +544,38 @@ class _TileDataset(Dataset):
             image_paths: 大图路径列表。
             image_size_map: ``{stem: (width, height)}`` 尺寸映射。
             resolution: 模型输入分辨率（= tile 边长）。
-            overlap: 滑窗重叠像素数。
+            overlap: 滑窗重叠像素数（``origins_map`` 为 None 时生成滑窗网格用）。
+            origins_map: 按图提供的切块矩形 ``{stem: [(x0, y0, x1, y1, tile_overlap)]}``；
+                ``None`` = 用滑窗网格生成。拼接缝切分（seam_cut 里程碑 4）传
+                缝切分矩形：缝图块 ``tile_overlap=0``（整块直连，保留真实边界），
+                超限图块的兜底网格块按各自 ``tile_overlap`` 计算核心区。
         """
         self._items: list[tuple[str, Path, int, int, int, int, tuple[int, int, int, int]]] = []
         self._resolution = resolution
         for image_path in image_paths:
             width, height = image_size_map[image_path.stem]
-            for x0, y0 in tile_origins((width, height), resolution, overlap):
-                tile_w = min(x0 + resolution, width) - x0
-                tile_h = min(y0 + resolution, height) - y0
-                # 核心区在主进程计算一次（center 策略的中心归属过滤用），随 pickle 进 worker
-                core = tile_core_bounds((width, height), (x0, y0), resolution, overlap)
+            if origins_map is not None:
+                origins: list[tuple[int, int, int, int, int]] = origins_map[image_path.stem]
+            else:
+                origins = [(x0, y0, overlap) for x0, y0 in tile_origins((width, height), resolution, overlap)]
+            for origin in origins:
+                if len(origin) == 3:
+                    x0, y0, tile_overlap = origin
+                    x1 = min(x0 + resolution, width)
+                    y1 = min(y0 + resolution, height)
+                elif len(origin) == 5:
+                    x0, y0, x1, y1, tile_overlap = origin
+                else:
+                    raise ValueError("切块规格必须是 3 元组或 5 元组")
+                tile_w = x1 - x0
+                tile_h = y1 - y0
+                # seam 图块的核心区就是整块本身；兜底滑窗块仍沿用 center 核心逻辑。
+                core = (x0, y0, x1, y1) if tile_overlap == 0 else tile_core_bounds(
+                    (width, height),
+                    (x0, y0),
+                    resolution,
+                    tile_overlap,
+                )
                 self._items.append((image_path.stem, image_path, x0, y0, tile_w, tile_h, core))
         self._cache: dict[str, np.ndarray] = {}
 
@@ -579,15 +601,17 @@ class _TileDataset(Dataset):
                 raise FileNotFoundError(f"无法读取图像: {image_path}")
             self._cache[stem] = image
         tile = image[y0 : y0 + tile_h, x0 : x0 + tile_w]
-        # 短轴不足 resolution 的块用边缘复制 pad 到 R×R：worker 混批时保证
-        # batch 内所有 tile 同尺寸可 stack；内容尺寸（tile_w/tile_h）仍传给
-        # target_sizes 做坐标映射，pad 区域不参与有效预测
-        if tile_h != self._resolution or tile_w != self._resolution:
-            tile = np.pad(
-                tile,
-                ((0, self._resolution - tile_h), (0, self._resolution - tile_w), (0, 0)),
-                mode="edge",
-            )
+        # 短边不足 resolution 的块用边缘复制补齐；若真实块大于 resolution，
+        # 先保留完整内容再缩放到 R×R，避免 seam 模式悄悄截断源小图。
+        if tile_h <= self._resolution and tile_w <= self._resolution:
+            if tile_h != self._resolution or tile_w != self._resolution:
+                tile = np.pad(
+                    tile,
+                    ((0, self._resolution - tile_h), (0, self._resolution - tile_w), (0, 0)),
+                    mode="edge",
+                )
+        else:
+            tile = cv2.resize(tile, (self._resolution, self._resolution), interpolation=cv2.INTER_LINEAR)
         # ascontiguousarray：numpy 切片是视图，转 torch 需要连续内存（3MB 拷贝可忽略）
         tile = np.ascontiguousarray(tile)
         return stem, x0, y0, tile_w, tile_h, core, torch.from_numpy(tile).permute(2, 0, 1)
@@ -634,6 +658,7 @@ def tile_predict_records(
     use_fp16: bool = False,
     gpu_util_sample_interval: float = 0.5,
     tile_strategy: str = "nms",
+    origins_map: Mapping[str, list[tuple[int, int, int, int, int]]] | None = None,
 ) -> tuple[list[BoxRecord], float, float | None, int]:
     """大图滑窗切分推理：worker 预取切块，tile 混合批量前向，按策略合并。
 
@@ -674,6 +699,8 @@ def tile_predict_records(
         tile_strategy: 大图合并策略（``"nms"`` / ``"center"`` / ``"center_rescue"``，
             见 ``TILE_STRATEGIES``）；``"center_rescue"`` = center + 触边残框
             定向重裁（救回被滑窗切开的较大目标）。
+        origins_map: 按图提供的切块矩形 ``{stem: [(x0, y0, x1, y1, tile_overlap)]}``；
+            ``None`` = 用滑窗网格生成（拼接缝切分传缝切分原点，见 seam_cut 模块）。
 
     Returns:
         ``(pred_records, steady_throughput, gpu_util, timed_images)``，与整图路径
@@ -704,7 +731,7 @@ def tile_predict_records(
     gpu_monitor.start()
 
     # worker 预取流水线：worker 并行解码大图并切片，主线程持续取 tile 批量
-    dataset = _TileDataset(image_paths, image_size_map, resolution, overlap)
+    dataset = _TileDataset(image_paths, image_size_map, resolution, overlap, origins_map=origins_map)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -732,8 +759,8 @@ def tile_predict_records(
     with torch.inference_mode():
         for stems, origins, sizes, cores, tensors in loader:
             # 预处理与整图路径逐位一致：uint8(C,H,W) → GPU → 除 255 → 缩放到
-            # (resolution, resolution)（整块时恒等；短轴不足的块会被拉伸，坐标
-            # 由 target_sizes 按内容尺寸映射回来，语义与整图路径一致）
+            # (resolution, resolution)。seam 图块在 worker 侧已经保留完整边界，
+            # 这里不再把 1024 之外的内容裁掉。
             gpu_images = [
                 F.resize(
                     tensor.to(device, non_blocking=True).to(model_dtype).div_(255.0),

@@ -14,7 +14,7 @@ import random
 import shutil
 from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Mapping
 
 import cv2
 import numpy as np
@@ -250,6 +250,27 @@ def _draw_tile_grid(
         cv2.rectangle(img, (x1, y1), (x2, y2), COLOR_FP, 1)
 
 
+def _draw_tile_rects(
+    img: "cv2.Mat",
+    origins: list[tuple[int, int, int, int, int]],
+    scale: float,
+) -> None:
+    """沿图块矩形绘制切割线（红色细线，拼接缝切分可视化用）。
+
+    拼接缝切分的图块互不重叠、恰好铺满图像，直接按真实矩形边界画框即可；
+    对所有图块逐个画框后，边界线会自然重叠成切割线，语义与实际切分一致。
+
+    Args:
+        img: 待绘制的图像（原地修改，BGR）。
+        origins: 图块矩形列表 ``[(x0, y0, x1, y1, tile_overlap)]``。
+        scale: 原图坐标到展示尺寸的缩放系数。
+    """
+    for x0, y0, x1, y1, _ov in origins:
+        pt1 = (int(round(x0 * scale)), int(round(y0 * scale)))
+        pt2 = (int(round(x1 * scale)), int(round(y1 * scale)))
+        cv2.rectangle(img, pt1, pt2, COLOR_FP, 1)
+
+
 def load_image(image_id: str, test_image_paths: list[Path]) -> "cv2.Mat | None":
     """根据 image_id 加载原始图像。
 
@@ -442,6 +463,7 @@ def save_large_image_visualizations(
     seed: int = 0,
     tile_size: int | None = None,
     tile_overlap: int = 0,
+    tile_origins_map: Mapping[str, list[tuple[int, int, int, int, int]]] | None = None,
     num_classes: int = 25,
     vehicle_class_ids: set[int] | None = None,
 ) -> None:
@@ -471,6 +493,9 @@ def save_large_image_visualizations(
         tile_size: 滑窗边长（= 模型输入分辨率）；``None`` = 不绘制分割网格线。
         tile_overlap: 滑窗重叠像素数（与切分推理的 overlap 一致，保证网格与
             实际切块位置吻合）。
+        tile_origins_map: 拼接缝切分（里程碑 4）的图块原点 ``{image_id:
+            [(x0, y0, x1, y1, tile_overlap)]}``；非空时按实际图块矩形绘制切割线
+            （替代滑窗网格线，直观展示沿缝切割结果）。
         num_classes: 总类别数（TP/FP/FN 匹配用，与评测口径一致）。
         vehicle_class_ids: 车辆类别 id 集合（IoU=0.35 匹配规则）；``None`` =
             无车辆特殊规则。
@@ -504,9 +529,12 @@ def save_large_image_visualizations(
             x1, y1, x2, y2 = map(int, gt.xyxy)
             _draw_box_label_thin(labeled, x1, y1, x2, y2, class_names[gt.class_id], COLOR_GT)
 
-        # 右面板：先画红色滑窗网格线，再按 TP/FP/FN 三色标注（原始分辨率）
+        # 右面板：先画红色切分网格线（滑窗网格或拼接缝切分矩形），
+        # 再按 TP/FP/FN 三色标注（原始分辨率）
         predicted = img.copy()
-        if tile_size is not None:
+        if tile_origins_map and image_id in tile_origins_map:
+            _draw_tile_rects(predicted, tile_origins_map[image_id], 1.0)
+        elif tile_size is not None:
             _draw_tile_grid(predicted, (width, height), tile_size, tile_overlap, 1.0)
         for tp in tp_preds.get(image_id, []):
             x1, y1, x2, y2 = map(int, tp.xyxy)
