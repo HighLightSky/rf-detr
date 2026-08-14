@@ -157,23 +157,34 @@ def compute_coco_ap(gt: dict, pred: dict, max_dets: int = 500) -> dict[str, floa
     coco_pred.createIndex()
 
     evaluator = COCOeval(coco_gt, coco_pred, "bbox")
-    # maxDets 前 3 档须为 [1, 10, 100]（summarize 的 AP@[.5:.95] 用写死的
-    # maxDets=100 查档），追加第 4 档覆盖每图最多 183 框（precision[..., -1]）
+    # maxDets 前 3 档须为 [1, 10, 100]（summarize 内部按固定 maxDets=100 查档，
+    # 会导致每图 >100 框的高密度图被截断、AP 被低估），追加第 4 档 max_dets
+    # （默认 500，覆盖大图矩形检测每图最多 183 框）作为 AP 计算口径。
+    # 注意：AP 一律从 precision 张量取 maxDets[-1]（500）档，不使用
+    # evaluator.stats（那是 100 档，高密度图截断后数值偏低）。
     evaluator.params.maxDets = [1, 10, 100, max_dets]
     evaluator.evaluate()
     evaluator.accumulate()
-    evaluator.summarize()  # 打印标准 AP 摘要（同时填充 evaluator.stats）
-    stats = evaluator.stats  # [AP50:95, AP50, AP75, AP_small, AP_medium, AP_large, ...]
+    evaluator.summarize()  # 打印标准 AP 摘要（仅供参考，100 档口径）
 
-    # AP90：precision 张量 [iouThrs=10, recThrs=101, K=1, areaRng=1, maxDets=M]，
-    # IoU 档 0.9 位于索引 8（0.5 + 8×0.05），取最后 maxDets 档
+    # precision 张量 [iouThrs=10, recThrs=101, K=1, areaRng=4, maxDets=4]，
+    # 取 all 面积档、maxDets 最后一档（500）；IoU 0.5/0.75/0.9 位于
+    # 索引 0/5/8（0.5 + 档距 0.05）。-1 表示该 recall 点无正样本，过滤后平均
+    # （与 pycocotools 的 _summarize 同口径）
     precision = evaluator.eval["precision"]
-    ap90 = float(precision[8, :, 0, 0, -1].mean()) if precision.size else 0.0
+    precision_500 = precision[:, :, 0, 0, -1]
+    valid = precision_500[precision_500 > -1]
+
+    def _ap_at(iou_index: int) -> float:
+        """取单个 IoU 档的 AP（过滤无正样本的 recall 点）。"""
+        values = precision_500[iou_index][precision_500[iou_index] > -1]
+        return float(values.mean()) if values.size else 0.0
+
     return {
-        "AP50:95": float(stats[0]),
-        "AP50": float(stats[1]),
-        "AP75": float(stats[2]),
-        "AP90": ap90,
+        "AP50:95": float(valid.mean()) if valid.size else 0.0,
+        "AP50": _ap_at(0),
+        "AP75": _ap_at(5),
+        "AP90": _ap_at(8),
     }
 
 
