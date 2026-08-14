@@ -31,6 +31,7 @@ model.train(dataset_dir="...", aug_config={"HorizontalFlip": {"p": 0.5}})
 | ``AUG_AGGRESSIVE``    | Large datasets (2000+ images)                 |
 | ``AUG_AERIAL``        | Satellite / overhead imagery                  |
 | ``AUG_INDUSTRIAL``    | Manufacturing / inspection data               |
+| ``AUG_ROT90``         | 大图裁切/拼接矩形检测（仅随机直角翻转）        |
 
 ## Transform Categories
 
@@ -153,4 +154,16 @@ AUG_INDUSTRIAL = {
     },
     "GaussianBlur": {"blur_limit": 3, "p": 0.3},
     "GaussNoise": {"std_range": (0.01, 0.05), "p": 0.3},
+}
+
+#: 随机直角翻转（90° 旋转 + 水平/垂直翻转），无色彩/裁剪/缩放增强。
+#: 组合覆盖 D4 群的 8 种直角对称（4 个旋转 × 2 个镜像），每一步独立采样；
+#: 用于大图裁切/拼接矩形边界检测——贴边拼接布局在直角对称下语义不变，
+#: 同时避免旋转色彩/缩放引入与部署预处理不一致的分布。
+#: 注意：仅 CPU/albumentations 后端可用（``RandomRotate90`` 不在 kornia
+#: 后端注册表中），训练时保持 ``augmentation_backend: cpu`` 默认值。
+AUG_ROT90 = {
+    "RandomRotate90": {"p": 0.5},
+    "HorizontalFlip": {"p": 0.5},
+    "VerticalFlip": {"p": 0.5},
 }

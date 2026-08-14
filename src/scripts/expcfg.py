@@ -21,8 +21,8 @@ yaml 结构为自定义三段式：
   ``TrainConfig`` 的 ``extra="forbid"`` 天然校验拼写错误；
 - 相对路径一律以项目根解析，绝对路径原样（与旧脚本 ``project_root / X`` 一致）；
 - ``--set train.sscl_lambda=0.2`` 支持点路径标量覆盖（yaml < --set < 专用 CLI 参数）；
-- ``aug_config`` 只接受预设名（AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/none），
-  ``AUG_AERIAL`` 等是嵌套 dict 无法直接写在 yaml 里，由本模块映射。
+- ``aug_config`` 只接受预设名（AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/
+  ROT90/none），``AUG_AERIAL`` 等是嵌套 dict 无法直接写在 yaml 里，由本模块映射。
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ from rfdetr.datasets.aug_configs import (  # noqa: E402
     AUG_AGGRESSIVE,
     AUG_CONSERVATIVE,
     AUG_INDUSTRIAL,
+    AUG_ROT90,
 )
 from rfdetr.variants import (  # noqa: E402
     RFDETRLarge,
@@ -70,6 +71,7 @@ AUG_PRESETS: dict[str, dict] = {
     "CONSERVATIVE": AUG_CONSERVATIVE,
     "AGGRESSIVE": AUG_AGGRESSIVE,
     "INDUSTRIAL": AUG_INDUSTRIAL,
+    "ROT90": AUG_ROT90,
     "none": {},
 }
 
@@ -104,8 +106,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
 def _parse_scalar(raw: str) -> int | float | str:
     """解析标量字符串：先试数值（int/float），失败保持字符串。
 
-    PyYAML 会把 ``1e-5``（无小数点）解析为字符串而非 float，这里补上数值
-    转换，保证 yaml 里写 ``lr: 1e-5`` 也能得到 0.00001。
+    PyYAML 会把 ``1e-5`` 解析为字符串而非 float，这里补上数值转换保证 yaml 里写 ``lr: 1e-5`` 得到 0.00001。
     """
     lowered = raw.lower()
     if lowered in ("inf", "+inf", "-inf", "nan"):
@@ -210,9 +211,7 @@ def build_model_kwargs(model_section: dict[str, Any] | None) -> tuple[dict[str, 
     section = dict(model_section or {})
     variant = section.pop("variant", "medium")
     if variant not in MODEL_REGISTRY:
-        raise ConfigError(
-            f"未知模型变体: {variant}（可选: {', '.join(MODEL_REGISTRY)}）"
-        )
+        raise ConfigError(f"未知模型变体: {variant}（可选: {', '.join(MODEL_REGISTRY)}）")
     return section, variant
 
 
@@ -241,9 +240,7 @@ def build_train_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
     train_kwargs = resolve_paths(PROJECT_ROOT, train_kwargs)
     if aug_name is not None:
         if aug_name not in AUG_PRESETS:
-            raise ConfigError(
-                f"aug_config 只支持预设名: {', '.join(AUG_PRESETS)}（得到: {aug_name}）"
-            )
+            raise ConfigError(f"aug_config 只支持预设名: {', '.join(AUG_PRESETS)}（得到: {aug_name}）")
         train_kwargs["aug_config"] = AUG_PRESETS[aug_name]
     return train_kwargs
 

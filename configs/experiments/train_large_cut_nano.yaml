@@ -1,0 +1,60 @@
+# 大图裁切小图矩形边界检测器：rf-detr-nano @ 704，单类（sample），仅随机直角翻转
+# 用法: python src/scripts/train.py -c configs/experiments/train_large_cut_nano.yaml
+# 说明:
+#   - 任务：大图（3000~12000px）等比缩放到 704 最长边后，预测所有小图矩形（贴边拼接、无重叠、轴对齐）
+#   - 训练增广只做随机直角翻转（RandomRotate90 + HFlip + VFlip，预设 ROT90），
+#     关闭 mosaic 与多尺度——贴边拼接布局在 D4 直角对称下语义不变，
+#     固定 704 保证训练/推理预处理分布一致（"裁切越准越好"）
+#   - 分辨率 704 = patch_size(16) × num_windows(2) × 22，PE 自动同步
+#   - 显存预算：5090 32GB 下 batch 8 + accum 8（有效 batch=64）。注意：本任务每图
+#     平均 63 个框（最多 183），DETR 匹配矩阵 O(num_queries × 框数 × batch)，
+#     框数多导致 loss 显存远超普通检测（704@b16 OOM，降到 b8 后可用）
+#   - 每图最多 183 个框，eval_max_dets 默认 500 可覆盖；若 val mAP 偏低可检查 num_queries 上限
+model:
+  variant: nano # nano/small/medium/large/large_deprecated
+  num_classes: 1 # 单类 sample（矩形框），分类头从官方 80 类自动重对齐
+  resolution: 704 # 训练与部署一致的输入分辨率（nano 默认 384，为精度上探 704）
+  gradient_checkpointing: true
+  freeze_encoder: false # 全量微调（0805 对比实验证明全量微调更优）
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/large-cut
+  dataset_file: yolo
+  output_dir: output/0814-large-cut-rfdetr-nano-704-rot90
+  epochs: 120
+  batch_size: 8 # 每图框数多（均值 63），匹配矩阵显存大：704@b16 OOM，b8 + accum8 保持有效 batch=64
+  grad_accum_steps: 8 # 有效 batch = 64
+  num_workers: 6
+  lr: 1e-4
+  lr_encoder: 1.5e-4
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  multi_scale: false # 固定 704：只做直角翻转，不引入尺度抖动
+  lr_drop: 70
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 5 # 每 5 epoch 在 val 上算一次 COCO mAP（AP50/AP75/AP50:95）
+  use_ema: true
+  compute_val_loss: false
+  aug_config: ROT90 # 预设名：AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/ROT90/none
+  mosaic_p: 0.0 # 关闭 mosaic（拼接数据本身无需再拼接）
+test:
+  dataset: shwx # 仅占位（单类矩形评估用 eval_large_cut.py）
+  dataset_dir: /home/liu/wzt/datasets/large-cut
+  resolution: 704 # 推理分辨率须与训练一致
+  checkpoint: output/0814-large-cut-rfdetr-nano-704-rot90/checkpoint_best_total.pth
+  output_dir: output/0814-large-cut-rfdetr-nano-704-rot90
+  conf_threshold: 0.25
+  class_conf_thresholds: {}
+  device: cuda:0
+  batch_size: 32
+  num_workers: 12
+  prefetch_factor: 3
+  use_fp16: false
+  save_fp_fn: true
+  save_yolo_preds: false
