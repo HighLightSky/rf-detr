@@ -1,0 +1,81 @@
+# [ProtoGuidance] 联合训练阶段一（120ep）：从头开启多模态原型弱注入 + 弱 SSCL
+# 目的：让 proj_token/融合/gate 在特征可塑期与主干共适应，检验"内容增强收益小"
+# 是模块问题还是三阶段结构问题（对照对象：E4-hard-neg-noMS 三阶段流水线）。
+# 设计要点：
+#   - λ→0.3 / γ→0.3 / aux=0.2 弱注入，warmup 10ep 线性爬升，不扰动主训练；
+#   - SSCL λ=0.01 从 ep20 开始，freeze=none（关键！proto_guidance 开启时
+#     conservative 会冻结 backbone/encoder，见 module_model._apply_sscl_freeze，
+#     联合训练必须 none）；
+#   - 难负样本抑制阶段一完全关闭（早期匹配是噪声）；
+#   - 调度与 0813 baseline 对齐（lr_drop=70 → 最后 50ep 低 LR 长尾即退火），
+#     数据口径 -redo（与 E 系列对照），分辨率 1024。
+# 用法: python src/scripts/train.py -c configs/experiments/proto_guidance_joint120.yaml
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 1024
+  gradient_checkpointing: true
+  freeze_encoder: false
+  # --- 多模态原型引导：弱注入全开（位置 + 辅助损失 + 内容） ---
+  proto_guidance_enabled: true
+  proto_guidance_artifacts_path: data/proto_guidance_shwx.pt
+  proto_guidance_fusion_mode: simple
+  proto_guidance_num_slots: 10
+  proto_guidance_position_enabled: true
+  proto_guidance_content_enabled: true
+  proto_guidance_aux_loss_enabled: true
+  proto_guidance_aux_loss_weight: 0.2
+  proto_guidance_warmup_epochs: 10.0
+  proto_guidance_lambda_pos_init: 0.05
+  proto_guidance_lambda_pos_max: 0.3
+  proto_guidance_gamma_content_init: 0.05
+  proto_guidance_gamma_content_max: 0.3
+  proto_guidance_tau_p: 0.2
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_file: yolo
+  output_dir: output/0815-SHWX-ProtoGuidance-joint120-1024
+  epochs: 120
+  batch_size: 8 # 1024 下 640 的 batch16 按面积比缩到 8；OOM 时降到 6 并调 accum
+  grad_accum_steps: 8 # 有效 batch = 64，与 baseline 一致
+  num_workers: 6
+  lr: 1e-4
+  lr_encoder: 1.5e-4
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  lr_drop: 70 # 最后 50ep 低 LR 长尾（与 0813 baseline 对齐）
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 5
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.1
+  multi_scale: false # 1024 下多尺度峰值显存过高（最大 scale 可到 1536）；需要时再开
+  class_balanced_sampling: true
+  class_balanced_class_ids: [0, 1]
+  dataset_cache_mode: raw
+  dataset_cache_dir: null
+  dataset_cache_rebuild: false
+
+  # --- SSCL：弱塑形 + 全程不冻结（联合训练核心） ---
+  sscl_enabled: true
+  sscl_semantic_matrix_path: data/semantic_matrix_shwx.pt
+  sscl_matrix_normalize: minmax
+  sscl_lambda: 0.01
+  sscl_tau: 0.1
+  sscl_rho: 0.3
+  sscl_omega_max: 2.0
+  sscl_anchor_classes: [0, 1, 2, 3]
+  sscl_confusing_classes: [0, 1, 2, 3]
+  sscl_start_epoch: 20 # 等检测定位成形（约 1/6 训练）后再加对比压力
+  sscl_freeze_strategy: none # 关键：联合训练不能冻结 backbone
+  sscl_unfreeze_decoder_layers: 2
+  sscl_prototype_enabled: false # 维持 instance-to-instance
+  sscl_hard_neg_enabled: false # 阶段一完全关闭难负样本抑制
