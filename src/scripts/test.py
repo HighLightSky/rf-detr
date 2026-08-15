@@ -121,6 +121,22 @@ def main() -> None:
         la_fields = {f.name for f in dataclasses.fields(eval_lib.LaBiasCfg)}
         la_bias_cfg = eval_lib.LaBiasCfg(**{k: v for k, v in la_bias_section.items() if k in la_fields})
 
+    # 大图切分测试配置：边界检测器（nano）只加载一次，大图走裁切推理
+    large_image_cfg: eval_lib.LargeImageCfg | None = None
+    if test_cfg.get("large_image_min_side") or test_cfg.get("boundary_checkpoint"):
+        large_image_cfg = eval_lib.LargeImageCfg(
+            min_side=int(test_cfg.get("large_image_min_side", 2000)),
+            boundary_checkpoint=test_cfg.get("boundary_checkpoint"),
+            boundary_resolution=int(test_cfg.get("boundary_resolution", 704)),
+            boundary_conf=float(test_cfg.get("boundary_conf", 0.25)),
+            detector_conf=float(test_cfg.get("detector_conf", 0.25)),
+            padding=int(test_cfg.get("tiling_padding", 32)),
+            nms_iou=float(test_cfg.get("tiling_nms_iou", 0.0)),
+            square_stretch=bool(test_cfg.get("tiling_square_stretch", False)),
+            batch_size=int(test_cfg.get("tiling_batch_size", 8)),
+            num_workers=int(test_cfg.get("tiling_num_workers", 4)),
+        )
+
     # test.resolution 可选：显式指定推理输入分辨率（须与训练分辨率一致，
     # 例如 nano 704 训练时填 704），省略则用 checkpoint 记录的分辨率
     eval_lib.run_evaluation(
@@ -131,6 +147,7 @@ def main() -> None:
         save_yolo_preds=bool(test_cfg.get("save_yolo_preds", False)),
         la_bias=la_bias_cfg,
         resolution=int(test_cfg["resolution"]) if test_cfg.get("resolution") else None,
+        large_image_cfg=large_image_cfg,
     )
 
 

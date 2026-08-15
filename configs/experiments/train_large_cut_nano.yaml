@@ -22,7 +22,7 @@ train:
   dataset_file: yolo
   output_dir: output/0814-large-cut-rfdetr-nano-704-rot90
   epochs: 120
-  batch_size: 8 # 每图框数多（均值 63），匹配矩阵显存大：704@b16 OOM，b8 + accum8 保持有效 batch=64
+  batch_size: 4 # 每图框数多（均值 63），匹配矩阵显存大：704@b16 OOM，b8 + accum8 保持有效 batch=64
   grad_accum_steps: 8 # 有效 batch = 64
   num_workers: 6
   lr: 1e-4
@@ -37,7 +37,8 @@ train:
   device: cuda
   devices: 1
   num_nodes: 1
-  resume: ""
+  # 续训：从上次中断的 last.ckpt（epoch 19/120）继续，直到 120 轮结束
+  resume: output/0814-large-cut-rfdetr-nano-704-rot90/last.ckpt
   eval_interval: 5 # 每 5 epoch 在 val 上算一次 COCO mAP（AP50/AP75/AP50:95）
   use_ema: true
   compute_val_loss: false

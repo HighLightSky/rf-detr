@@ -254,6 +254,35 @@ class InferenceCfg:
 
 
 @dataclass
+class LargeImageCfg:
+    """大图切分测试配置（nano 边界检测 → 裁切 → 目标检测 → 映射回原图）。
+
+    Attributes:
+        min_side: 大图判定阈值（长边像素数），长边 ≥ 该值的图像走切分流程。
+        boundary_checkpoint: nano 边界检测器 checkpoint 路径（切分流程必需）。
+        boundary_resolution: 边界检测器输入分辨率（须与训练一致）。
+        boundary_conf: 边界框置信度阈值。
+        detector_conf: 裁窗目标检测置信度阈值。
+        padding: 裁窗外扩像素。
+        nms_iou: 边界框 NMS IoU 阈值（0 关闭）。
+        square_stretch: 边界检测用方形拉伸替代 letterbox。
+        batch_size: 边界检测器 GPU 批量大小。
+        num_workers: 边界检测器预取 worker 数。
+    """
+
+    min_side: int = 2000
+    boundary_checkpoint: str | None = None
+    boundary_resolution: int = 704
+    boundary_conf: float = 0.25
+    detector_conf: float = 0.25
+    padding: int = 32
+    nms_iou: float = 0.0
+    square_stretch: bool = False
+    batch_size: int = 8
+    num_workers: int = 4
+
+
+@dataclass
 class LaBiasCfg:
     """推理侧 Logit Adjustment bias 配置（原 ``LOGIT_ADJUSTMENT_BIAS_*`` 常量）。
 
@@ -581,6 +610,8 @@ def build_test_report(
     per_class_results: dict[str, EvalResult | dict[str, EvalResult]],
     dataset: DatasetCfg,
     infer: InferenceCfg,
+    large_errors_dir: Path | None = None,
+    large_image_stats: dict[str, float] | None = None,
 ) -> list[str]:
     """组装 test_result.txt 报告文本行列表。
 
@@ -599,6 +630,9 @@ def build_test_report(
         per_class_results: 细粒度逐类评估结果。
         dataset: 数据集配置。
         infer: 推理参数。
+        large_errors_dir: 大图错误可视化目录；非 ``None`` 时写入报告。
+        large_image_stats: 大图切分目标检测的耗时统计（``count``/``avg``/
+            ``max``/``total``，秒）；非 ``None`` 时写入报告。
 
     Returns:
         报告文本行列表。
@@ -643,9 +677,16 @@ def build_test_report(
     # ── 推理测速结果 ────────────────────────────────────────────────
     report_lines.append("推理测速结果")
     report_lines.append(f"GPU 批量大小: {infer.batch_size}  |  CPU 预取 worker 数: {infer.num_workers}")
-    report_lines.append(f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {timed_images / throughput:.1f}s）")
+    elapsed = timed_images / throughput if throughput > 0 else 0.0
+    report_lines.append(f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {elapsed:.1f}s）")
     if gpu_util is not None:
         report_lines.append(f"推理期间 GPU 平均利用率: {gpu_util:.1f}%")
+    if large_image_stats is not None:
+        report_lines.append(
+            f"大图目标检测（裁切推理）: {int(large_image_stats['count'])} 张 | "
+            f"平均 {large_image_stats['avg']:.2f}s | 最大 {large_image_stats['max']:.2f}s | "
+            f"合计 {large_image_stats['total']:.2f}s"
+        )
     report_lines.append(sep)
 
     # ── 比赛指标评估结果（大类聚合）──────────────────────────────────
@@ -680,6 +721,8 @@ def build_test_report(
     report_lines.append(f"混淆矩阵: {dataset.exp_output_dir / 'confusion_matrix.png'}")
     report_lines.append(f"FP 可视化目录: {dataset.exp_output_dir / 'FP'}")
     report_lines.append(f"FN 可视化目录: {dataset.exp_output_dir / 'FN'}")
+    if large_errors_dir is not None:
+        report_lines.append(f"大图错误可视化目录: {large_errors_dir}")
 
     return report_lines
 
@@ -951,7 +994,7 @@ def predict_batched_to_records(
                 # 逐类阈值：命中 class_conf_thresholds 的类用类阈值，否则回退全局阈值
                 if class_conf_thresholds:
                     per_class_thr = torch.tensor(
-                        [class_conf_thresholds.get(int(l), conf_threshold) for l in result["labels"].tolist()],
+                        [class_conf_thresholds.get(int(label), conf_threshold) for label in result["labels"].tolist()],
                         device=result["scores"].device,
                     )
                 else:
@@ -994,6 +1037,38 @@ def predict_batched_to_records(
 # ══════════════════════════════════════════════════════════════════════
 
 
+def _classify_large_images(
+    test_image_paths: list[Path],
+    image_size_map: dict[str, tuple[int, int]] | None,
+    min_side: int,
+) -> set[str]:
+    """按长边阈值判定大图 image_id 集合。
+
+    优先使用已构建的 ``image_size_map``（YOLO 标签数据集）；不可用时用 PIL
+    只读文件头获取尺寸（不完整解码，兼容 COCO 等格式）。
+
+    Args:
+        test_image_paths: 测试图像路径列表。
+        image_size_map: 可选的 ``{image_id: (w, h)}`` 尺寸映射。
+        min_side: 大图长边阈值（像素），长边 ≥ 该值的图像视为大图。
+
+    Returns:
+        大图 image_id 集合。
+    """
+    if min_side <= 0:
+        return set()
+    if image_size_map is not None:
+        return {stem for stem, (w, h) in image_size_map.items() if max(w, h) >= min_side}
+    from PIL import Image
+
+    large_ids: set[str] = set()
+    for img_path in test_image_paths:
+        with Image.open(img_path) as pil_img:
+            if max(pil_img.size) >= min_side:
+                large_ids.add(img_path.stem)
+    return large_ids
+
+
 def run_evaluation(
     dataset: DatasetCfg,
     infer: InferenceCfg,
@@ -1003,6 +1078,7 @@ def run_evaluation(
     save_yolo_preds: bool = False,
     la_bias: LaBiasCfg | None = None,
     resolution: int | None = None,
+    large_image_cfg: LargeImageCfg | None = None,
 ) -> None:
     """按比赛口径在测试集上完整评估一个 checkpoint。
 
@@ -1020,6 +1096,10 @@ def run_evaluation(
         resolution: 可选：推理输入分辨率。构造参数优先于 checkpoint 记录的
             ``model_config``（例如 nano 以 704 训练时强制 704 推理）；
             ``None`` 用 checkpoint 记录的分辨率。
+        large_image_cfg: 大图切分测试配置。传入时，长边 ≥ ``min_side`` 的
+            图像走 nano 边界检测切分流程（nano 只加载一次），其余小图仍按
+            整图推理；大图 FP/FN 可视化单独保存到 ``output_dir/large_errors/``。
+            ``None`` 表示不启用（保持原逻辑，全部整图推理）。
     """
     os.chdir(PROJECT_ROOT)
 
@@ -1030,6 +1110,21 @@ def run_evaluation(
     test_image_paths = read_test_image_paths(dataset.test_image_dir)
     # YOLO 格式需要图像尺寸把归一化坐标换算成像素；COCO 的 bbox 本身就是像素坐标
     image_size_map = build_image_size_map(test_image_paths) if dataset.label_format == "yolo" else None
+
+    # 大图判定（供推理分流与 FP/FN 可视化共用）
+    large_image_ids: set[str] = set()
+    if large_image_cfg is not None and large_image_cfg.min_side > 0:
+        large_image_ids = _classify_large_images(
+            test_image_paths,
+            image_size_map,
+            large_image_cfg.min_side,
+        )
+    large_errors_dir: Path | None = dataset.exp_output_dir / "large_errors" if large_image_ids else None
+    if large_image_ids:
+        print(
+            f"[i] 大图切分评估启用：{len(large_image_ids)} 张大图"
+            f"（长边≥{large_image_cfg.min_side if large_image_cfg else 0}px）"
+        )
 
     # 读取测试集真实框（按数据集标签格式分派）
     if dataset.label_format == "yolo":
@@ -1059,20 +1154,73 @@ def run_evaluation(
     _ckpt_sd = torch.load(str(checkpoint_path), map_location="cpu", weights_only=True)
     attach_from_checkpoint(model.model.model, _ckpt_sd.get("model", _ckpt_sd))
     del _ckpt_sd
-    pred_records, throughput, gpu_util, timed_images = predict_batched_to_records(
-        model,
-        test_image_paths,
-        device,
-        conf_threshold=infer.conf_threshold,
-        class_conf_thresholds=infer.class_conf_thresholds,
-        batch_size=infer.batch_size,
-        num_workers=infer.num_workers,
-        la_bias=la_bias,
-        num_classes=dataset.num_classes,
-        prefetch_factor=infer.prefetch_factor,
-        gpu_util_sample_interval=infer.gpu_util_sample_interval,
-        use_fp16=infer.use_fp16,
-    )
+
+    # ── 推理分流：小图整图批量推理；大图走 nano 切分流程（nano 只加载一次）──
+    large_image_stats: dict[str, float] | None = None
+    crop_boxes_by_image: dict[str, list[tuple[float, float, float, float]]] = {}
+    if large_image_cfg is not None and large_image_ids and large_image_cfg.boundary_checkpoint:
+        small_paths = [p for p in test_image_paths if p.stem not in large_image_ids]
+        large_paths = [p for p in test_image_paths if p.stem in large_image_ids]
+        if small_paths:
+            small_records, throughput, gpu_util, timed_images = predict_batched_to_records(
+                model,
+                small_paths,
+                device,
+                conf_threshold=infer.conf_threshold,
+                class_conf_thresholds=infer.class_conf_thresholds,
+                batch_size=infer.batch_size,
+                num_workers=infer.num_workers,
+                la_bias=la_bias,
+                num_classes=dataset.num_classes,
+                prefetch_factor=infer.prefetch_factor,
+                gpu_util_sample_interval=infer.gpu_util_sample_interval,
+                use_fp16=infer.use_fp16,
+            )
+        else:
+            small_records, throughput, gpu_util, timed_images = [], 0.0, None, 0
+
+        from scripts.large_image_tiler import LargeImageTiler
+
+        tiler = LargeImageTiler(
+            model,
+            large_image_cfg.boundary_checkpoint,
+            boundary_resolution=large_image_cfg.boundary_resolution,
+            boundary_conf=large_image_cfg.boundary_conf,
+            detector_conf=large_image_cfg.detector_conf,
+            padding=large_image_cfg.padding,
+            nms_iou=large_image_cfg.nms_iou,
+            square_stretch=large_image_cfg.square_stretch,
+            device=device,
+            batch_size=large_image_cfg.batch_size,
+            num_workers=large_image_cfg.num_workers,
+        )
+        large_records, per_image_seconds, crop_boxes_by_image = tiler.predict(large_paths)
+        pred_records = small_records + large_records
+        if per_image_seconds:
+            durations = list(per_image_seconds.values())
+            large_image_stats = {
+                "count": float(len(durations)),
+                "avg": sum(durations) / len(durations),
+                "max": max(durations),
+                "total": sum(durations),
+            }
+    else:
+        if large_image_cfg is not None and large_image_ids and not large_image_cfg.boundary_checkpoint:
+            print("[w] 已启用大图切分但未配置 boundary_checkpoint，回退为整图推理（大图会被缩小）。")
+        pred_records, throughput, gpu_util, timed_images = predict_batched_to_records(
+            model,
+            test_image_paths,
+            device,
+            conf_threshold=infer.conf_threshold,
+            class_conf_thresholds=infer.class_conf_thresholds,
+            batch_size=infer.batch_size,
+            num_workers=infer.num_workers,
+            la_bias=la_bias,
+            num_classes=dataset.num_classes,
+            prefetch_factor=infer.prefetch_factor,
+            gpu_util_sample_interval=infer.gpu_util_sample_interval,
+            use_fp16=infer.use_fp16,
+        )
     del model
     release_cuda_cache(device)
 
@@ -1084,9 +1232,16 @@ def run_evaluation(
     print("=" * 80)
     print("推理测速结果")
     print(f"GPU 批量大小: {infer.batch_size}  |  CPU 预取 worker 数: {infer.num_workers}")
-    print(f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {timed_images / throughput:.1f}s）")
+    elapsed = timed_images / throughput if throughput > 0 else 0.0
+    print(f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {elapsed:.1f}s）")
     if gpu_util is not None:
         print(f"推理期间 GPU 平均利用率: {gpu_util:.1f}%")
+    if large_image_stats is not None:
+        print(
+            f"大图目标检测（裁切推理）: {int(large_image_stats['count'])} 张 | "
+            f"平均 {large_image_stats['avg']:.2f}s | 最大 {large_image_stats['max']:.2f}s | "
+            f"合计 {large_image_stats['total']:.2f}s"
+        )
     print("=" * 80)
 
     # ── 按比赛规则评估：大类（舰船/飞机/车辆）─────────────────────────
@@ -1178,7 +1333,12 @@ def run_evaluation(
     # ── FP / FN 可视化保存 ───────────────────────────────────────────
     if save_fp_fn:
         print("\n[i] 正在生成 FP/FN 可视化...")
-        clear_vis_dirs(dataset.exp_output_dir / "FP", dataset.exp_output_dir / "FN", dataset.class_names)
+        clear_vis_dirs(
+            dataset.exp_output_dir / "FP",
+            dataset.exp_output_dir / "FN",
+            dataset.class_names,
+            large_errors_dir=large_errors_dir,
+        )
         fp_img, fn_img, fp_box, fn_box, tp_pred = match_per_image_per_class(
             gt_records,
             pred_records,
@@ -1196,6 +1356,9 @@ def run_evaluation(
             dataset.class_names,
             dataset.exp_output_dir / "FP",
             dataset.exp_output_dir / "FN",
+            large_image_ids=large_image_ids,
+            large_errors_dir=large_errors_dir,
+            large_crop_boxes=crop_boxes_by_image,
         )
         print("[完成] FP/FN 可视化保存完成")
 
@@ -1215,5 +1378,7 @@ def run_evaluation(
         per_class_results=per_class_results,
         dataset=dataset,
         infer=infer,
+        large_errors_dir=large_errors_dir,
+        large_image_stats=large_image_stats,
     )
     write_test_result(report_lines, dataset.exp_output_dir / "test_result.txt")

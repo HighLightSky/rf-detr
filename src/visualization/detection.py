@@ -49,6 +49,7 @@ COLOR_GT = (255, 0, 0)  # 蓝色 — 真实框
 COLOR_TP = (0, 255, 0)  # 绿色 — 正确预测
 COLOR_FP = (0, 0, 255)  # 红色 — 虚警
 COLOR_FN_GT = (0, 165, 255)  # 橙色 — 漏检的真实框
+COLOR_CROP = (255, 255, 0)  # 青色 — 大图裁窗边界
 
 # ── PIL 中文字体候选路径 ─────────────────────────────────────────────
 # cv2 的 HERSHEY 字体不支持中文，绘制标题条时用 PIL 渲染；按优先级依次尝试，
@@ -65,6 +66,7 @@ def clear_vis_dirs(
     fp_dir: str | Path,
     fn_dir: str | Path,
     class_names: dict[int, str],
+    large_errors_dir: str | Path | None = None,
 ) -> None:
     """清空之前的 FP / FN 可视化目录并预创建子类文件夹。
 
@@ -72,6 +74,8 @@ def clear_vis_dirs(
         fp_dir: FP 可视化保存根目录。
         fn_dir: FN 可视化保存根目录。
         class_names: 类别 ID 到名称的映射字典。
+        large_errors_dir: 可选；大图错误可视化的单独根目录。传入时同时
+            清空并预创建其 ``FP/``、``FN/`` 两个平铺目录（不按类分）。
     """
     fp_dir = Path(fp_dir)
     fn_dir = Path(fn_dir)
@@ -81,6 +85,11 @@ def clear_vis_dirs(
     for cls_name in class_names.values():
         (fp_dir / cls_name).mkdir(parents=True, exist_ok=True)
         (fn_dir / cls_name).mkdir(parents=True, exist_ok=True)
+    if large_errors_dir is not None:
+        large_errors_dir = Path(large_errors_dir)
+        if large_errors_dir.exists():
+            shutil.rmtree(large_errors_dir)
+        large_errors_dir.mkdir(parents=True, exist_ok=True)
 
 
 def match_per_image_per_class(
@@ -277,6 +286,9 @@ def save_fp_fn_visualizations(
     class_names: dict[int, str],
     fp_dir: str | Path,
     fn_dir: str | Path,
+    large_image_ids: set[str] | None = None,
+    large_errors_dir: str | Path | None = None,
+    large_crop_boxes: dict[str, list[tuple[float, float, float, float]]] | None = None,
 ) -> None:
     """按类别保存 FP/FN 可视化图像。
 
@@ -285,6 +297,12 @@ def save_fp_fn_visualizations(
 
         {fp_dir}/{类名}/{image_id}.jpg  — 左：GT 标注图；右：预测图（TP 绿色 / FP 红色）
         {fn_dir}/{类名}/{image_id}.jpg  — 左：GT 标注图（FN 橙色）；右：预测图（TP 绿色 / FP 红色）
+
+    传入 ``large_image_ids`` 与 ``large_errors_dir`` 时，属于大图且存在错误
+    （FP 或 FN）的图像**只保存一张**到 ``{large_errors_dir}/{image_id}.jpg``：
+    左侧 GT（FN 橙色高亮）、右侧预测（TP 绿 / FP 红），并把裁窗边界（青色）
+    叠加在预测区域上；不区分 FP/FN、不按类别分目录。小图仍按原有目录结构
+    保存，互不混放。
 
     Args:
         fp_images: class_id → 存在 FP 的 image_id 集合。
@@ -297,9 +315,18 @@ def save_fp_fn_visualizations(
         class_names: 类别 ID 到名称的映射字典。
         fp_dir: FP 可视化保存根目录。
         fn_dir: FN 可视化保存根目录。
+        large_image_ids: 大图 image_id 集合（长边达到阈值）。为 ``None`` 或
+            空集时所有图像按原逻辑保存。
+        large_errors_dir: 大图错误可视化根目录；仅当 ``large_image_ids``
+            非空时生效。
+        large_crop_boxes: ``{image_id: [(x0, y0, x1, y1), ...]}`` 大图裁窗
+            在原图中的坐标（含 padding），叠加绘制在预测区域。
     """
     fp_dir = Path(fp_dir)
     fn_dir = Path(fn_dir)
+    large_errors_dir = Path(large_errors_dir) if large_errors_dir is not None else None
+    large_image_ids = large_image_ids or set()
+    large_crop_boxes = large_crop_boxes or {}
 
     # 按 image_id 索引 GT 记录
     gt_by_image: dict[str, list[BoxRecord]] = defaultdict(list)
@@ -308,11 +335,22 @@ def save_fp_fn_visualizations(
 
     total_fp_images = 0
     total_fn_images = 0
+    total_large_errors = 0
+
+    # 大图错误图像集合（FP 或 FN，去重、不区分类型）
+    large_error_images: set[str] = set()
+    for cls_set in fp_images.values():
+        large_error_images |= cls_set
+    for cls_set in fn_images.values():
+        large_error_images |= cls_set
+    large_error_images = {img for img in large_error_images if img in large_image_ids}
 
     # ── 保存 FP 可视化 ──────────────────────────────────────────────
     for cls_id, image_ids in sorted(fp_images.items()):
         cls_name = class_names[cls_id]
         for image_id in sorted(image_ids):
+            if image_id in large_image_ids:
+                continue
             img = load_image(image_id, test_image_paths)
             if img is None:
                 continue
@@ -343,6 +381,8 @@ def save_fp_fn_visualizations(
     for cls_id, image_ids in sorted(fn_images.items()):
         cls_name = class_names[cls_id]
         for image_id in sorted(image_ids):
+            if image_id in large_image_ids:
+                continue
             img = load_image(image_id, test_image_paths)
             if img is None:
                 continue
@@ -372,6 +412,39 @@ def save_fp_fn_visualizations(
             cv2.imwrite(str(fn_dir / cls_name / f"{image_id}.jpg"), combined)
             total_fn_images += 1
 
+    # ── 保存大图错误可视化（每张一次，含裁窗边界）───────────────────
+    if large_errors_dir is not None:
+        for image_id in sorted(large_error_images):
+            img = load_image(image_id, test_image_paths)
+            if img is None:
+                continue
+
+            gts = gt_by_image.get(image_id, [])
+            fn_for_img = {b.class_id for b in fn_boxes.get(image_id, [])}
+
+            # 标注图：GT 框，FN 用橙色高亮
+            labeled = img.copy()
+            for gt in gts:
+                color = COLOR_FN_GT if gt.class_id in fn_for_img else COLOR_GT
+                label = f"{class_names[gt.class_id]}(FN)" if gt.class_id in fn_for_img else class_names[gt.class_id]
+                x1, y1, x2, y2 = map(int, gt.xyxy)
+                _draw_box_label(labeled, x1, y1, x2, y2, label, color)
+
+            # 预测图：TP 绿色 + FP 红色 + 裁窗边界青色
+            predicted = img.copy()
+            for tp in tp_preds.get(image_id, []):
+                x1, y1, x2, y2 = map(int, tp.xyxy)
+                _draw_box_label(predicted, x1, y1, x2, y2, class_names[tp.class_id], COLOR_TP)
+            for fp in fp_boxes.get(image_id, []):
+                x1, y1, x2, y2 = map(int, fp.xyxy)
+                _draw_box_label(predicted, x1, y1, x2, y2, f"{class_names[fp.class_id]}(FP)", COLOR_FP)
+            for x0, y0, x1, y1 in large_crop_boxes.get(image_id, []):
+                _draw_box_label(predicted, int(x0), int(y0), int(x1), int(y1), "crop", COLOR_CROP)
+
+            combined = _compose_side_by_side(labeled, predicted, "GT（真实框）", "Pred（模型预测 + 裁窗）")
+            cv2.imwrite(str(large_errors_dir / f"{image_id}.jpg"), combined)
+            total_large_errors += 1
+
     # 打印统计
     print(f"\n[i] FP 可视化: {total_fp_images} 张图像 → {fp_dir}")
     for cls_id in sorted(fp_images.keys()):
@@ -379,6 +452,8 @@ def save_fp_fn_visualizations(
     print(f"[i] FN 可视化: {total_fn_images} 张图像 → {fn_dir}")
     for cls_id in sorted(fn_images.keys()):
         print(f"    {class_names[cls_id]:12s}: {len(fn_images[cls_id])} 张")
+    if large_errors_dir is not None:
+        print(f"[i] 大图错误可视化: {total_large_errors} 张图像 → {large_errors_dir}")
 
 
 def build_confusion_matrix(

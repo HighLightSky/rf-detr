@@ -2,10 +2,10 @@
 # 用法: python src/scripts/test.py -c configs/experiments/test_shwx.yaml
 test:
   dataset: shwx # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-large
   resolution: 1024
-  checkpoint: output/0815-SHWX-ProtoGuidance-E4/checkpoint_best_total.pth
-  output_dir: output/0815-SHWX-ProtoGuidance-E4
+  checkpoint: output/0815-SHWX-ProtoGuidance-E4-hard-neg-noMS/checkpoint_best_total.pth
+  output_dir: output/0815-SHWX-ProtoGuidance-E4-hard-neg-noMS-test-large
   conf_threshold: 0.25 # 全局置信度阈值
   class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}；可整段贴入 calibrate_thresholds 产物
   device: cuda:0 # 无 CUDA 时自动回退 CPU
@@ -15,4 +15,15 @@ test:
   gpu_util_sample_interval: 0.5
   use_fp16: false
   save_fp_fn: true # 保存 FP/FN 可视化
+  large_image_min_side: 2000 # 大图判定阈值（长边≥该值视为大图），大图的 FP/FN 可视化单独存到 output_dir/large_errors/
+  # --- 大图切分（方案A：nano 边界检测 → 裁切 → 目标检测 → 映射回原图）---
+  boundary_checkpoint: output/0814-large-cut-rfdetr-nano-704-rot90/checkpoint_best_ema.pth # nano 边界检测器（只加载一次）
+  boundary_resolution: 704 # 边界检测器输入分辨率（须与训练一致）
+  boundary_conf: 0.25 # 边界框置信度阈值
+  detector_conf: 0.25 # 裁窗目标检测置信度阈值
+  tiling_padding: 0 # 裁窗外扩像素
+  tiling_nms_iou: 0.5 # 边界框 NMS IoU 阈值（0 关闭）
+  tiling_square_stretch: false # 边界检测用方形拉伸替代 letterbox
+  tiling_batch_size: 8 # 边界检测器 GPU 批量大小
+  tiling_num_workers: 4 # 边界检测器预取 worker 数
   save_yolo_preds: false # 输出 YOLO 格式预测框（供归因/探针脚本复用）
