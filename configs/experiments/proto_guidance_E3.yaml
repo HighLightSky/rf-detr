@@ -1,0 +1,55 @@
+# [ProtoGuidance] E3：E2 + 内容查询增强（gated 多槽位原型 cross-attention 注入类别先验）
+# 预期：gate_mean 从 ~0.05 上行、proto_logits_pmax 上行、FSC/HM 召回 ↑ 且 FP 不放大。
+# 决策规则：一 epoch 后 gate_mean 仍 <0.02 → gate_bias_init 提至 logit(0.15)≈-1.734 重跑。
+# 用法: python src/scripts/train.py -c configs/experiments/proto_guidance_E3.yaml
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 640
+  gradient_checkpointing: true
+  pretrain_weights: output/0814-SHWX-ProtoGuidance-StageA/checkpoint_best_total.pth
+  # --- 多模态原型引导：位置 + 辅助损失 + 内容增强 ---
+  proto_guidance_enabled: true
+  proto_guidance_artifacts_path: data/proto_guidance_shwx.pt
+  proto_guidance_fusion_mode: simple
+  proto_guidance_num_slots: 10
+  proto_guidance_position_enabled: true
+  proto_guidance_content_enabled: true
+  proto_guidance_aux_loss_enabled: true
+  proto_guidance_aux_loss_weight: 1.0
+  proto_guidance_warmup_epochs: 2.0
+  proto_guidance_lambda_pos_init: 0.05
+  proto_guidance_lambda_pos_max: 1.0
+  proto_guidance_gamma_content_init: 0.05
+  proto_guidance_gamma_content_max: 1.0
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_file: yolo
+  output_dir: output/0814-SHWX-ProtoGuidance-E3
+  epochs: 18
+  batch_size: 32
+  grad_accum_steps: 2
+  num_workers: 12
+  lr: 1e-5
+  lr_encoder: 1e-5
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  lr_drop: 18
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 1
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+  class_balanced_sampling: true
+  class_balanced_class_ids: [0, 1]
+  sscl_freeze_strategy: conservative
+  sscl_unfreeze_decoder_layers: 2

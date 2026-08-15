@@ -69,6 +69,7 @@ def test_lwdetr_keypoint_forward_outputs() -> None:
         torch.zeros(2, batch_size, num_queries, 4),  # ref_unsigmoid
         torch.zeros(batch_size, num_queries, hidden_dim),  # hs_enc
         torch.zeros(batch_size, num_queries, 4),  # ref_enc
+        None,  # [ProtoGuidance] 第 5 位：原型 logits（未启用时为 None）
         torch.zeros(2, batch_size, num_queries, 17, hidden_dim),  # keypoint_hs
         torch.zeros(batch_size, num_queries, 17, 8),  # enc_kp_predictions
         torch.zeros(batch_size, num_queries, 17, hidden_dim),  # unused keypoint encoder hidden state
@@ -200,6 +201,7 @@ def test_lwdetr_default_detection_contract_unchanged() -> None:
         torch.zeros(1, batch_size, num_queries, 4),
         torch.zeros(batch_size, num_queries, hidden_dim),
         torch.zeros(batch_size, num_queries, 4),
+        None,  # [ProtoGuidance] 第 5 位：原型 logits（未启用时为 None）
     )
 
     model = LWDETR(

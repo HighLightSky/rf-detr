@@ -132,3 +132,67 @@ class TestNamespaceFieldOwnership:
         tc = TrainConfig(dataset_dir="/tmp")
         ns = _namespace_from_configs(mc, tc)
         assert ns.num_select == expected_num_select
+
+    def test_proto_guidance_and_prototype_logit_fields_forward(self) -> None:
+        """ProtoGuidance / PrototypeLogit 字段必须穿过 config-to-namespace 桥接层。"""
+        mc = RFDETRBaseConfig(
+            num_classes=80,
+            prototype_logit_enabled=True,
+            prototype_logit_target_classes=[1, 3],
+            prototype_logit_max_slots=3,
+            prototype_logit_alpha=0.2,
+            prototype_logit_margin=0.15,
+            prototype_logit_temperature=0.4,
+            proto_guidance_enabled=True,
+            proto_guidance_artifacts_path="/tmp/proto_guidance.pt",
+            proto_guidance_fusion_mode="simple",
+            proto_guidance_num_slots=7,
+            proto_guidance_target_classes=[0, 2, 4],
+            proto_guidance_tau_p=0.2,
+            proto_guidance_lambda_pos_init=0.25,
+            proto_guidance_lambda_pos_max=1.5,
+            proto_guidance_gamma_content_init=0.3,
+            proto_guidance_gamma_content_max=1.2,
+            proto_guidance_gate_bias_init=-1.5,
+            proto_guidance_w_v_init=0.4,
+            proto_guidance_w_t_init=0.6,
+            proto_guidance_warmup_epochs=1.5,
+            proto_guidance_position_enabled=True,
+            proto_guidance_content_enabled=True,
+            proto_guidance_aux_loss_enabled=True,
+            proto_guidance_aux_loss_weight=2.0,
+            proto_guidance_visual_ema_update=True,
+            proto_guidance_visual_ema_momentum=0.95,
+            proto_guidance_monitor_log_interval=17,
+        )
+        tc = TrainConfig(dataset_dir="/tmp", proto_guidance_freeze_all_except_proto=True)
+        ns = _namespace_from_configs(mc, tc)
+
+        assert ns.prototype_logit_enabled is True
+        assert ns.prototype_logit_target_classes == [1, 3]
+        assert ns.prototype_logit_max_slots == 3
+        assert ns.prototype_logit_alpha == pytest.approx(0.2)
+        assert ns.prototype_logit_margin == pytest.approx(0.15)
+        assert ns.prototype_logit_temperature == pytest.approx(0.4)
+        assert ns.proto_guidance_enabled is True
+        assert ns.proto_guidance_artifacts_path == "/tmp/proto_guidance.pt"
+        assert ns.proto_guidance_fusion_mode == "simple"
+        assert ns.proto_guidance_num_slots == 7
+        assert ns.proto_guidance_target_classes == [0, 2, 4]
+        assert ns.proto_guidance_tau_p == pytest.approx(0.2)
+        assert ns.proto_guidance_lambda_pos_init == pytest.approx(0.25)
+        assert ns.proto_guidance_lambda_pos_max == pytest.approx(1.5)
+        assert ns.proto_guidance_gamma_content_init == pytest.approx(0.3)
+        assert ns.proto_guidance_gamma_content_max == pytest.approx(1.2)
+        assert ns.proto_guidance_gate_bias_init == pytest.approx(-1.5)
+        assert ns.proto_guidance_w_v_init == pytest.approx(0.4)
+        assert ns.proto_guidance_w_t_init == pytest.approx(0.6)
+        assert ns.proto_guidance_warmup_epochs == pytest.approx(1.5)
+        assert ns.proto_guidance_position_enabled is True
+        assert ns.proto_guidance_content_enabled is True
+        assert ns.proto_guidance_aux_loss_enabled is True
+        assert ns.proto_guidance_aux_loss_weight == pytest.approx(2.0)
+        assert ns.proto_guidance_visual_ema_update is True
+        assert ns.proto_guidance_visual_ema_momentum == pytest.approx(0.95)
+        assert ns.proto_guidance_monitor_log_interval == 17
+        assert ns.proto_guidance_freeze_all_except_proto is True

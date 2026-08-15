@@ -563,6 +563,60 @@ class SetCriterion(nn.Module):
             losses["class_error"] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
         return losses
 
+    def loss_proto_labels(
+        self,
+        outputs: dict[str, Any],
+        targets: list[dict[str, Tensor]],
+        indices: list[tuple[Tensor, Tensor]],
+        num_boxes: Tensor,
+    ) -> dict[str, Tensor]:
+        """[ProtoGuidance] 原型分类辅助损失：对 enc 选中 query 的原型 logits 做 sigmoid focal loss。
+
+        仅在 ``outputs`` 含 ``pred_proto_logits`` 时生效（仅 enc_outputs 分支携带该键，
+        主层与 aux 层返回空字典自动跳过，由 forward 的 losses 循环安全遍历）。
+        复用 enc 分支的 Hungarian ``indices``——token/box 与 ``pred_logits`` 同序，
+        只是分数来源不同——把梯度直接送达原型余弦打分分支
+        （proj_token/proj_v/proj_t/w_v/w_t），绕开 top-k 离散选择，是防 no-op 的主武器。
+
+        Args:
+            outputs: 模型输出字典（含 ``pred_proto_logits`` ``[bs, Q, C_fg]``）。
+            targets: 每图 GT 列表。
+            indices: enc 分支 Hungarian 匹配结果。
+            num_boxes: 归一化分母（GT 框总数）。
+
+        Returns:
+            ``{"loss_proto_labels": focal 损失}``；无 ``pred_proto_logits`` 键时返回空字典。
+        """
+        if "pred_proto_logits" not in outputs:
+            return {}
+        src_logits = outputs["pred_proto_logits"]
+        bs, q_len, num_classes_fg = src_logits.shape
+        idx = self._get_src_permutation_idx(indices)
+        target_classes_o = torch.cat([t["labels"][j] for t, (_, j) in zip(targets, indices)], dim=0)
+        target_classes_o = target_classes_o.clamp(0, num_classes_fg - 1)
+
+        # 前景类 one-hot（无 background 列）：仅匹配位置置 GT 类，
+        # 未匹配位置保持全零 = 背景（高级索引赋值，避免 scatter 索引越界）
+        target_classes_onehot = torch.zeros(
+            [bs, q_len, num_classes_fg],
+            dtype=src_logits.dtype,
+            layout=src_logits.layout,
+            device=src_logits.device,
+        )
+        if target_classes_o.numel() > 0:
+            target_classes_onehot[idx[0], idx[1], target_classes_o] = 1.0
+        loss_ce = (
+            sigmoid_focal_loss(
+                src_logits,
+                target_classes_onehot,
+                num_boxes,
+                alpha=self.focal_alpha,
+                gamma=2,
+            )
+            * src_logits.shape[1]
+        )
+        return {"loss_proto_labels": loss_ce}
+
     @torch.no_grad()
     def loss_cardinality(
         self,
@@ -799,6 +853,8 @@ class SetCriterion(nn.Module):
             "boxes": self.loss_boxes,
             "masks": self.loss_masks,
             "keypoints": self.loss_keypoints,
+            # [ProtoGuidance] 原型分类辅助损失（仅 enc_outputs 携带 pred_proto_logits 时产出）
+            "proto_labels": self.loss_proto_labels,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)

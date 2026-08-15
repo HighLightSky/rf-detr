@@ -256,6 +256,9 @@ class Transformer(nn.Module):
         self.bbox_reparam = bbox_reparam
 
         self._export = False
+        # [ProtoGuidance] 多模态原型引导模块；由 LWDETR 构建并挂载
+        # （默认 None = 原版行为，top-k 恒等于线性分数）。
+        self.proto_guidance: "ProtoGuidance | None" = None
 
     def export(self) -> None:
         self._export = True
@@ -356,6 +359,12 @@ class Transformer(nn.Module):
             )
             # group detr for first stage
             refpoint_embed_ts_parts, memory_ts_parts, boxes_ts_parts = [], [], []
+            # [ProtoGuidance] 原型引导相关的逐组记录（选中类别/原型 logits/线性 logits 与 top-k）
+            selected_class_ts_parts: list[Tensor] = []
+            proto_logits_ts_parts: list[Tensor] = []
+            linear_logits_ts_parts: list[Tensor] = []
+            topk_ts_parts: list[Tensor] = []
+            linear_topk_ts_parts: list[Tensor] = []
             group_detr = self.group_detr if self.training else 1
             for g_idx in range(group_detr):
                 output_memory_gidx = self.enc_output_norm[g_idx](self.enc_output[g_idx](output_memory))
@@ -375,8 +384,32 @@ class Transformer(nn.Module):
                         self.enc_out_bbox_embed[g_idx](output_memory_gidx) + output_proposals
                     )
 
+                # [ProtoGuidance] 位置引导：select_score = linear_score + lambda * proto_score
+                # （residual 形式保留原始 objectness，避免纯相似度把背景纹理抬进 top-k）。
+                linear_score_gidx = enc_outputs_class_unselected_gidx.max(-1)[0]
+                proto_logits_gidx = None
+                selected_class_gidx = None
+                if self.proto_guidance is not None:
+                    proto_logits_gidx, proto_score_gidx, selected_class_gidx = self.proto_guidance.position_score(
+                        output_memory_gidx
+                    )
+                    if self.proto_guidance.position_enabled:
+                        select_score_gidx = (
+                            linear_score_gidx + self.proto_guidance.lambda_pos_effective() * proto_score_gidx
+                        )
+                    else:
+                        select_score_gidx = linear_score_gidx
+                else:
+                    select_score_gidx = linear_score_gidx
+
                 topk = min(self.num_queries, enc_outputs_class_unselected_gidx.shape[-2])
-                topk_proposals_gidx = torch.topk(enc_outputs_class_unselected_gidx.max(-1)[0], topk, dim=1)[1]  # bs, nq
+                topk_proposals_gidx = torch.topk(select_score_gidx, topk, dim=1)[1]  # bs, nq
+
+                # [ProtoGuidance] 记录选中索引与纯线性分数的 top-k（detach，供监控对比 overlap）
+                if proto_logits_gidx is not None:
+                    topk_ts_parts.append(topk_proposals_gidx)
+                    linear_topk_gidx = torch.topk(linear_score_gidx.detach(), topk, dim=1)[1]  # bs, nq
+                    linear_topk_ts_parts.append(linear_topk_gidx)
 
                 refpoint_embed_gidx_undetach = torch.gather(
                     enc_outputs_coord_unselected_gidx, 1, topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, 4)
@@ -389,6 +422,24 @@ class Transformer(nn.Module):
                     output_memory_gidx, 1, topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, self.d_model)
                 )
 
+                # [ProtoGuidance] 记录选中 query 的关联类别与原型/线性 logits（供内容增强/辅助损失/监控）
+                if proto_logits_gidx is not None and selected_class_gidx is not None:
+                    num_classes_fg = proto_logits_gidx.shape[-1]
+                    selected_class_ts_gidx = torch.gather(selected_class_gidx, 1, topk_proposals_gidx)  # bs, nq
+                    proto_logits_ts_gidx = torch.gather(
+                        proto_logits_gidx,
+                        1,
+                        topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, num_classes_fg),
+                    )  # bs, nq, C
+                    linear_logits_ts_gidx = torch.gather(
+                        enc_outputs_class_unselected_gidx,
+                        1,
+                        topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, enc_outputs_class_unselected_gidx.shape[-1]),
+                    )  # bs, nq, C+1
+                    selected_class_ts_parts.append(selected_class_ts_gidx)
+                    proto_logits_ts_parts.append(proto_logits_ts_gidx)
+                    linear_logits_ts_parts.append(linear_logits_ts_gidx)
+
                 refpoint_embed_ts_parts.append(refpoint_embed_gidx)
                 memory_ts_parts.append(tgt_undetach_gidx)
                 boxes_ts_parts.append(refpoint_embed_gidx_undetach)
@@ -397,6 +448,16 @@ class Transformer(nn.Module):
             # (bs, nq, d)
             memory_ts = torch.cat(memory_ts_parts, dim=1)
             boxes_ts = torch.cat(boxes_ts_parts, dim=1)
+            # [ProtoGuidance] 跨组拼接（与 memory_ts 同序），无模块时为 None
+            selected_class_ts = (
+                torch.cat(selected_class_ts_parts, dim=1) if selected_class_ts_parts else None
+            )  # bs, nq*G
+            proto_logits_ts = torch.cat(proto_logits_ts_parts, dim=1) if proto_logits_ts_parts else None  # bs, nq*G, C
+            linear_logits_ts = (
+                torch.cat(linear_logits_ts_parts, dim=1) if linear_logits_ts_parts else None
+            )  # bs, nq*G, C+1
+            topk_ts = torch.cat(topk_ts_parts, dim=1) if topk_ts_parts else None  # bs, nq*G
+            linear_topk_ts = torch.cat(linear_topk_ts_parts, dim=1) if linear_topk_ts_parts else None  # bs, nq*G
 
         enc_kp_predictions = None
         init_kp_ref_xy = None
@@ -440,6 +501,32 @@ class Transformer(nn.Module):
                     refpoint_embed_ts_subset = refpoint_embed_ts_subset + refpoint_embed_ts
 
                 refpoint_embed = torch.concat([refpoint_embed_ts_subset, refpoint_embed_subset], dim=-2)
+
+                # [ProtoGuidance] 内容引导：对 two-stage 选中的 query（tgt 前 ts_len 段）
+                # 用其关联类别的多槽位原型做 gated 交叉注意力注入类别先验；
+                # 未选中段（尾部 query）保持原 Embedding 不变。
+                if self.proto_guidance is not None and selected_class_ts is not None:
+                    tgt = torch.cat(
+                        [
+                            self.proto_guidance.enhance_content(tgt[:, :ts_len], selected_class_ts),
+                            tgt[:, ts_len:],
+                        ],
+                        dim=1,
+                    )
+                    # [ProtoGuidance] 汇总监控统计（全 detach，经 out["proto_stats"] 供训练监控）
+                    if (
+                        proto_logits_ts is not None
+                        and linear_logits_ts is not None
+                        and topk_ts is not None
+                        and linear_topk_ts is not None
+                    ):
+                        self.proto_guidance.collect_stats(
+                            proto_logits_ts,
+                            linear_logits_ts,
+                            topk_ts,
+                            linear_topk_ts,
+                            selected_class_ts,
+                        )
 
             # Insert register tokens per group
             original_num_queries_per_group = None
@@ -529,8 +616,10 @@ class Transformer(nn.Module):
                 return_values.append(boxes_ts)
             else:
                 return_values.append(boxes_ts.sigmoid())
+            # [ProtoGuidance] 选中 query 的原型 logits（[bs, nq*G, C]；无模块时为 None）
+            return_values.append(proto_logits_ts)
         else:
-            return_values.extend([None, None])
+            return_values.extend([None, None, None])
 
         if self.use_grouppose_keypoints:
             return_values.append(keypoint_hs)

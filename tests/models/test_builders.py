@@ -11,6 +11,7 @@ module-level pytestmark.
 """
 
 import pytest
+import torch
 
 from rfdetr.config import (
     RFDETRBaseConfig,
@@ -77,6 +78,33 @@ class TestBuildModelFromConfig:
         mc = RFDETRSegNanoConfig()
         model = build_model_from_config(mc)
         assert model.segmentation_head is not None, "Expected segmentation_head to be created for RFDETRSegNanoConfig"
+
+    def test_proto_guidance_module_created_when_enabled(self, tmp_path) -> None:
+        """ProtoGuidance 配置必须传到 LWDETR 并构建引导模块。"""
+        from rfdetr.sscl.proto_guidance.artifacts import save_proto_artifacts
+
+        mc = RFDETRBaseConfig(
+            num_classes=80,
+            proto_guidance_enabled=True,
+            proto_guidance_artifacts_path=str(tmp_path / "proto.pt"),
+            proto_guidance_num_slots=4,
+        )
+        save_proto_artifacts(
+            mc.proto_guidance_artifacts_path,
+            visual_prototypes=torch.randn(mc.num_classes, mc.proto_guidance_num_slots, mc.hidden_dim),
+            valid_slots=torch.ones(mc.num_classes, mc.proto_guidance_num_slots, dtype=torch.bool),
+            text_prototypes=torch.randn(mc.num_classes, 768),
+            class_names=[f"c{i}" for i in range(mc.num_classes)],
+            meta={"dataset": "test"},
+        )
+
+        model = build_model_from_config(mc)
+        assert model.transformer.proto_guidance is not None
+        assert model.transformer.proto_guidance.visual_bank.prototypes.shape == (
+            mc.num_classes,
+            mc.proto_guidance_num_slots,
+            mc.hidden_dim,
+        )
 
     def test_drop_path_uses_train_config_value(self) -> None:
         """Non-default TrainConfig.drop_path must reach the model builder path."""

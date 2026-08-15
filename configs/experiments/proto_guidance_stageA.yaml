@@ -1,0 +1,54 @@
+# [ProtoGuidance] 阶段 A 冷启动：冻结除原型模块外全部参数，只训新模块
+# 目的：原型投影/融合/gate 先在 RF-DETR hidden space 产生有意义分数（sanity），
+# 不看 AP。判断标准：loss_proto_labels_enc 快速下降、原型参数梯度范数正常即通过。
+# 用法: python src/scripts/train.py -c configs/experiments/proto_guidance_stageA.yaml
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 640
+  gradient_checkpointing: true
+  pretrain_weights: output/0813-SHWX-rfdetr-medium-baseline-精细标注/checkpoint_best_total.pth
+  freeze_encoder: true            # 阶段 A 冻结 DINOv2 backbone
+  # --- 多模态原型引导：位置 + 辅助损失（冷启动验证打分分支） ---
+  proto_guidance_enabled: true
+  proto_guidance_artifacts_path: data/proto_guidance_shwx.pt
+  proto_guidance_fusion_mode: simple
+  proto_guidance_num_slots: 10
+  proto_guidance_position_enabled: true
+  proto_guidance_content_enabled: false
+  proto_guidance_aux_loss_enabled: true
+  proto_guidance_aux_loss_weight: 1.0
+  proto_guidance_warmup_epochs: 1.0
+  proto_guidance_lambda_pos_init: 0.05
+  proto_guidance_lambda_pos_max: 1.0
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_file: yolo
+  output_dir: output/0814-SHWX-ProtoGuidance-StageA
+  epochs: 3
+  batch_size: 32
+  grad_accum_steps: 2
+  num_workers: 12
+  lr: 1e-4
+  lr_encoder: 1e-4
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  lr_drop: 3
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 1
+  use_ema: false
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+  sscl_freeze_strategy: conservative
+  sscl_unfreeze_decoder_layers: 1
+  # 阶段 A 冷启动：除原型模块外全部冻结（跳过 decoder/norm/class_embed 解冻分支）
+  proto_guidance_freeze_all_except_proto: true

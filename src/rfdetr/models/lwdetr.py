@@ -140,6 +140,26 @@ class LWDETR(nn.Module):
         prototype_logit_alpha: float = 0.1,
         prototype_logit_margin: float = 0.05,
         prototype_logit_temperature: float = 0.1,
+        # [ProtoGuidance] 多模态原型引导模块参数（默认全关 = 原版行为）
+        proto_guidance_enabled: bool = False,
+        proto_guidance_artifacts_path: str | None = None,
+        proto_guidance_fusion_mode: str = "simple",
+        proto_guidance_num_slots: int = 10,
+        proto_guidance_target_classes: list[int] | None = None,
+        proto_guidance_tau_p: float = 0.1,
+        proto_guidance_lambda_pos_init: float = 0.05,
+        proto_guidance_lambda_pos_max: float = 1.0,
+        proto_guidance_gamma_content_init: float = 0.05,
+        proto_guidance_gamma_content_max: float = 1.0,
+        proto_guidance_gate_bias_init: float = -2.944,
+        proto_guidance_w_v_init: float = 0.3,
+        proto_guidance_w_t_init: float = 0.7,
+        proto_guidance_warmup_epochs: float = 2.0,
+        proto_guidance_position_enabled: bool = True,
+        proto_guidance_content_enabled: bool = False,
+        proto_guidance_aux_loss_enabled: bool = False,
+        proto_guidance_visual_ema_update: bool = False,
+        proto_guidance_visual_ema_momentum: float = 0.99,
     ) -> None:
         """Initializes the model.
 
@@ -180,6 +200,35 @@ class LWDETR(nn.Module):
                 alpha=prototype_logit_alpha,
                 margin=prototype_logit_margin,
                 temperature=prototype_logit_temperature,
+            )
+        # [ProtoGuidance] 多模态原型引导模块：挂在 transformer 上
+        # （位置打分在 two-stage 循环内、内容增强在 tgt 构造后，均在 Transformer 内部）。
+        # 离线产物缺失时 build 返回 None，保持原版行为。
+        self.transformer.proto_guidance = None
+        if proto_guidance_enabled:
+            from rfdetr.sscl.proto_guidance import ProtoGuidance
+
+            self.transformer.proto_guidance = ProtoGuidance.build(
+                num_classes=num_classes - 1,
+                hidden_dim=hidden_dim,
+                artifacts_path=proto_guidance_artifacts_path,
+                fusion_mode=proto_guidance_fusion_mode,
+                num_slots=proto_guidance_num_slots,
+                target_classes=proto_guidance_target_classes,
+                tau_p=proto_guidance_tau_p,
+                lambda_pos_init=proto_guidance_lambda_pos_init,
+                lambda_pos_max=proto_guidance_lambda_pos_max,
+                gamma_content_init=proto_guidance_gamma_content_init,
+                gamma_content_max=proto_guidance_gamma_content_max,
+                gate_bias_init=proto_guidance_gate_bias_init,
+                w_v_init=proto_guidance_w_v_init,
+                w_t_init=proto_guidance_w_t_init,
+                warmup_epochs=proto_guidance_warmup_epochs,
+                position_enabled=proto_guidance_position_enabled,
+                content_enabled=proto_guidance_content_enabled,
+                aux_loss_enabled=proto_guidance_aux_loss_enabled,
+                visual_ema_update=proto_guidance_visual_ema_update,
+                visual_ema_momentum=proto_guidance_visual_ema_momentum,
             )
         query_dim = 4
         self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
@@ -539,9 +588,11 @@ class LWDETR(nn.Module):
             cross_attn_srcs=cross_attn_srcs,
         )
         if self.use_grouppose_keypoints:
-            hs, ref_unsigmoid, hs_enc, ref_enc, keypoint_hs, enc_kp_predictions, _ = transformer_outputs
+            hs, ref_unsigmoid, hs_enc, ref_enc, proto_logits_ts, keypoint_hs, enc_kp_predictions, _ = (
+                transformer_outputs
+            )
         else:
-            hs, ref_unsigmoid, hs_enc, ref_enc = transformer_outputs[:4]
+            hs, ref_unsigmoid, hs_enc, ref_enc, proto_logits_ts = transformer_outputs[:5]
             keypoint_hs = None
             enc_kp_predictions = None
 
@@ -615,6 +666,12 @@ class LWDETR(nn.Module):
             # [QNorm-Obj] QNorm 监控统计挂载到输出（已 detach，供训练监控读取）
             if qnorm_stats is not None:
                 out["qnorm_stats"] = qnorm_stats
+            # [ProtoGuidance] 原型引导监控统计挂载到输出（已 detach，
+            # 由 module_model 的监控回调读取；无模块或非 two_stage 时不存在）
+            if self.transformer.proto_guidance is not None:
+                pg_stats = self.transformer.proto_guidance.last_stats
+                if pg_stats is not None:
+                    out["proto_stats"] = pg_stats
             # [SSCL] 暴露 decoder 最后一层的 hidden states，供 SSCL 对比学习
             # 提取 matched foreground query features。hs 已在上述 class_embed/bbox_embed
             # 计算中产生，仅多一次引用存储，不增加任何前向计算量。
@@ -662,12 +719,18 @@ class LWDETR(nn.Module):
 
             if hs is not None:
                 out["enc_outputs"] = {"pred_logits": cls_enc, "pred_boxes": ref_enc}
+                # [ProtoGuidance] 选中 query 的原型分类 logits（与 pred_logits 同序同匹配，
+                # 供 criterion 的 loss_proto_labels 辅助损失复用 enc 的 Hungarian indices）
+                if proto_logits_ts is not None:
+                    out["enc_outputs"]["pred_proto_logits"] = proto_logits_ts
                 if self.segmentation_head is not None:
                     out["enc_outputs"]["pred_masks"] = masks_enc
                 if keypoints_enc is not None:
                     out["enc_outputs"]["pred_keypoints"] = keypoints_enc
             else:
                 out = {"pred_logits": cls_enc, "pred_boxes": ref_enc}
+                if proto_logits_ts is not None:
+                    out["pred_proto_logits"] = proto_logits_ts
                 if self.segmentation_head is not None:
                     out["pred_masks"] = masks_enc
                 if keypoints_enc is not None:
@@ -690,9 +753,11 @@ class LWDETR(nn.Module):
             cross_attn_srcs=cross_attn_srcs,
         )
         if self.use_grouppose_keypoints:
-            hs, ref_unsigmoid, hs_enc, ref_enc, keypoint_hs, enc_kp_predictions, _ = transformer_outputs
+            hs, ref_unsigmoid, hs_enc, ref_enc, proto_logits_ts, keypoint_hs, enc_kp_predictions, _ = (
+                transformer_outputs
+            )
         else:
-            hs, ref_unsigmoid, hs_enc, ref_enc = transformer_outputs[:4]
+            hs, ref_unsigmoid, hs_enc, ref_enc, proto_logits_ts = transformer_outputs[:5]
             keypoint_hs = None
             enc_kp_predictions = None
 
@@ -911,6 +976,26 @@ def build_model(args: "BuilderArgs") -> LWDETR | tuple[Any, None, None]:
         prototype_logit_alpha=getattr(args, "prototype_logit_alpha", 0.1),
         prototype_logit_margin=getattr(args, "prototype_logit_margin", 0.05),
         prototype_logit_temperature=getattr(args, "prototype_logit_temperature", 0.1),
+        # [ProtoGuidance] 多模态原型引导参数（默认全关 = 原版行为）
+        proto_guidance_enabled=getattr(args, "proto_guidance_enabled", False),
+        proto_guidance_artifacts_path=getattr(args, "proto_guidance_artifacts_path", None),
+        proto_guidance_fusion_mode=getattr(args, "proto_guidance_fusion_mode", "simple"),
+        proto_guidance_num_slots=getattr(args, "proto_guidance_num_slots", 10),
+        proto_guidance_target_classes=getattr(args, "proto_guidance_target_classes", []),
+        proto_guidance_tau_p=getattr(args, "proto_guidance_tau_p", 0.1),
+        proto_guidance_lambda_pos_init=getattr(args, "proto_guidance_lambda_pos_init", 0.05),
+        proto_guidance_lambda_pos_max=getattr(args, "proto_guidance_lambda_pos_max", 1.0),
+        proto_guidance_gamma_content_init=getattr(args, "proto_guidance_gamma_content_init", 0.05),
+        proto_guidance_gamma_content_max=getattr(args, "proto_guidance_gamma_content_max", 1.0),
+        proto_guidance_gate_bias_init=getattr(args, "proto_guidance_gate_bias_init", -2.944),
+        proto_guidance_w_v_init=getattr(args, "proto_guidance_w_v_init", 0.3),
+        proto_guidance_w_t_init=getattr(args, "proto_guidance_w_t_init", 0.7),
+        proto_guidance_warmup_epochs=getattr(args, "proto_guidance_warmup_epochs", 2.0),
+        proto_guidance_position_enabled=getattr(args, "proto_guidance_position_enabled", True),
+        proto_guidance_content_enabled=getattr(args, "proto_guidance_content_enabled", False),
+        proto_guidance_aux_loss_enabled=getattr(args, "proto_guidance_aux_loss_enabled", False),
+        proto_guidance_visual_ema_update=getattr(args, "proto_guidance_visual_ema_update", False),
+        proto_guidance_visual_ema_momentum=getattr(args, "proto_guidance_visual_ema_momentum", 0.99),
     )
     return model
 
@@ -930,6 +1015,15 @@ def build_criterion_and_postprocessors(args: "BuilderArgs") -> tuple[SetCriterio
         weight_dict["loss_keypoints_findable"] = getattr(args, "keypoint_findable_loss_coef", 0.0)
         weight_dict["loss_keypoints_visible"] = getattr(args, "keypoint_visible_loss_coef", 0.0)
         weight_dict["loss_keypoints_nll"] = getattr(args, "keypoint_nll_loss_coef", 0.0)
+    # [ProtoGuidance] 原型分类辅助损失：权重注入必须在 aux_weight_dict 展开（下方
+    # two_stage 的 _enc 后缀批量生成）之前，否则 loss_proto_labels_enc 缺失、
+    # 辅助损失被总 loss 聚合静默丢弃。enc 循环对 losses 逐项计算时，
+    # loss_proto_labels 仅在 outputs 含 pred_proto_logits 时产出（aux 层自动跳过）。
+    proto_aux_loss_enabled = getattr(args, "proto_guidance_enabled", False) and getattr(
+        args, "proto_guidance_aux_loss_enabled", False
+    )
+    if proto_aux_loss_enabled:
+        weight_dict["loss_proto_labels"] = getattr(args, "proto_guidance_aux_loss_weight", 1.0)
     # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}
@@ -944,6 +1038,8 @@ def build_criterion_and_postprocessors(args: "BuilderArgs") -> tuple[SetCriterio
         losses.append("masks")
     if has_keypoints:
         losses.append("keypoints")
+    if proto_aux_loss_enabled:
+        losses.append("proto_labels")
 
     sum_group_losses = getattr(args, "sum_group_losses", False)
     # [分类损失均衡化] P0/P1 参数与类别统计：每个 rank 读同一 JSON，天然 DDP 一致；

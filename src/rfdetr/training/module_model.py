@@ -411,12 +411,17 @@ class RFDETRModelModule(LightningModule):
             self._setup_semantic_head()
         if self.train_config.qnorm_obj_enabled:
             self._setup_qnorm_obj()
-        if (self.train_config.sscl_enabled or self.train_config.semantic_head_enabled) and (
-            self.train_config.sscl_freeze_strategy == "conservative"
-        ):
+        if (
+            self.train_config.sscl_enabled
+            or self.train_config.semantic_head_enabled
+            or self.model_config.proto_guidance_enabled
+        ) and (self.train_config.sscl_freeze_strategy == "conservative"):
             self._apply_sscl_freeze()
         if self.train_config.sscl_enabled:
             self._setup_sscl()
+        # [ProtoGuidance] 监控器装配（模块本体已在 LWDETR 构建；此处只建监控与回调）
+        if self.model_config.proto_guidance_enabled:
+            self._setup_proto_guidance_monitor()
 
         # torch.compile is opt-in: set model_config.compile=True to enable.
         # Only enabled on CUDA; MPS and CPU do not benefit from compilation.
@@ -624,9 +629,12 @@ class RFDETRModelModule(LightningModule):
         """应用 SSCL 保守冻结策略。
 
         冻结：backbone、encoder 主体、bbox 头、early decoder layers、 refpoint_embed、query_feat、enc_out_class_embed。 解冻：decoder
-        末尾若干层、decoder 最终 LayerNorm、分类头 class_embed、 语义头（SemHead）与 QNorm-Obj 附加模块参数（若装配）。
+        末尾若干层、decoder 最终 LayerNorm、分类头 class_embed、 语义头（SemHead）、QNorm-Obj 与原型引导（ProtoGuidance）附加模块参数（若装配）。
 
         该策略保证 SSCL 只通过 decoder 最后一层重塑 query 特征空间， 不扰动主干与目标定位能力。
+
+        [ProtoGuidance] ``proto_guidance_freeze_all_except_proto=True``（阶段 A 冷启动） 时跳过 decoder/norm/class_embed
+        解冻，仅新模块参数可训练。
         """
         model = self.model
         # 先冻结全部参数
@@ -635,16 +643,19 @@ class RFDETRModelModule(LightningModule):
         decoder_layers = model.transformer.decoder.layers
         num_decoder_layers = len(decoder_layers)
         unfreeze_layers = min(int(self.train_config.sscl_unfreeze_decoder_layers), num_decoder_layers)
-        for layer in decoder_layers[-unfreeze_layers:]:
-            for param in layer.parameters():
+        # [ProtoGuidance] 阶段 A 冷启动：除原型模块外全部冻结（跳过下述解冻分支）
+        freeze_all_except_proto = bool(self.train_config.proto_guidance_freeze_all_except_proto)
+        if not freeze_all_except_proto:
+            for layer in decoder_layers[-unfreeze_layers:]:
+                for param in layer.parameters():
+                    param.requires_grad = True
+            # 解冻 decoder 最终 LayerNorm（作用于最后一层输出，含可训练仿射参数）
+            if getattr(model.transformer.decoder, "norm", None) is not None:
+                for param in model.transformer.decoder.norm.parameters():
+                    param.requires_grad = True
+            # 解冻分类头
+            for param in model.class_embed.parameters():
                 param.requires_grad = True
-        # 解冻 decoder 最终 LayerNorm（作用于最后一层输出，含可训练仿射参数）
-        if getattr(model.transformer.decoder, "norm", None) is not None:
-            for param in model.transformer.decoder.norm.parameters():
-                param.requires_grad = True
-        # 解冻分类头
-        for param in model.class_embed.parameters():
-            param.requires_grad = True
         # [SemHead] 语义参数纳入可训练（冻结全部后这里按配置恢复，与"先全冻结
         # 再选择性解冻"的既有策略一致）：α 由 alpha_enabled+learnable 决定，
         # θ 在 frozen_threshold_classes 上保持冻结（novel 类样本太少学不准，
@@ -664,8 +675,16 @@ class RFDETRModelModule(LightningModule):
             for param in model.qnorm_obj.parameters():
                 param.requires_grad = True
             logger.info(f"[QNormObj] QNorm 参数可训练性恢复完成：{model.qnorm_obj.describe_freeze()}")
+        # [ProtoGuidance] 原型引导模块参数纳入可训练（新模块默认学习，warmup
+        # 控制注入强度；阶段 A 时此处是唯一可训练参数来源）
+        proto_guidance = getattr(model.transformer, "proto_guidance", None)
+        if proto_guidance is not None:
+            for param in proto_guidance.parameters():
+                param.requires_grad = True
+            logger.info(f"[ProtoGuidance] 原型引导参数可训练性恢复完成：{proto_guidance.describe_freeze()}")
         logger.info(
-            "[SSCL] 冻结策略已应用：仅 decoder 末尾 %d/%d 层 + decoder norm + class_embed + 附加模块参数可训练",
+            "[SSCL] 冻结策略已应用：%s（decoder 末尾 %d/%d 层 + decoder norm + class_embed + 附加模块参数可训练）",
+            "阶段 A 冷启动（仅原型模块）" if freeze_all_except_proto else "标准保守策略",
             unfreeze_layers,
             num_decoder_layers,
         )
@@ -794,13 +813,17 @@ class RFDETRModelModule(LightningModule):
             n_unmatched += int(stats["n_unmatched"])
         if not query_parts:
             empty = torch.empty(0, dtype=torch.long, device=outputs["pred_logits"].device)
-            return empty, empty, {
-                "hn_count": 0.0,
-                "hn_fill_rate": 0.0,
-                "n_unmatched_avg": float(n_unmatched) / max(1, len(indices)),
-                "hn_score_mean": 0.0,
-                "hn_iou_mean": 0.0,
-            }
+            return (
+                empty,
+                empty,
+                {
+                    "hn_count": 0.0,
+                    "hn_fill_rate": 0.0,
+                    "n_unmatched_avg": float(n_unmatched) / max(1, len(indices)),
+                    "hn_score_mean": 0.0,
+                    "hn_iou_mean": 0.0,
+                },
+            )
         batch_stats = {
             "hn_count": float(n_selected) / len(indices),
             "hn_fill_rate": float(n_band) / max(1, n_unmatched),
@@ -845,7 +868,9 @@ class RFDETRModelModule(LightningModule):
         hn_logits = logits[batch_idx, query_idx][:, class_idx]
         hardest_logit = hn_logits.max(dim=-1).values
         logit_temp = float(cfg.sscl_hard_neg_logit_temperature)
-        logit_loss = F.softplus((hardest_logit - float(cfg.sscl_hard_neg_logit_margin)) / logit_temp).mean() * logit_temp
+        logit_loss = (
+            F.softplus((hardest_logit - float(cfg.sscl_hard_neg_logit_margin)) / logit_temp).mean() * logit_temp
+        )
 
         proto_loss = logit_loss.new_zeros(())
         if (
@@ -936,6 +961,84 @@ class RFDETRModelModule(LightningModule):
         hidden_dim = int(self.model_config.hidden_dim)
         model.qnorm_obj = QNormObjectness.build(cfg, num_classes, hidden_dim)
         logger.info(f"[QNormObj] 已装配：{model.qnorm_obj.describe_freeze()}")
+
+    def _setup_proto_guidance_monitor(self) -> None:
+        """装配原型引导监控（模块本体已在 LWDETR 构建）。
+
+        创建 ``ProtoGuidanceMonitor`` 并把采样回调注册进 criterion 的单槽回调： 若已有回调（SSCL/语义监控），组合包装；否则直接注册。采样节流 由
+        ``proto_guidance_monitor_log_interval`` 控制。
+        """
+        from rfdetr.sscl import ProtoGuidanceMonitor
+
+        model = self.model
+        proto_guidance = getattr(model.transformer, "proto_guidance", None)
+        if proto_guidance is None:
+            logger.warning("[ProtoGuidance] 模块未装配（离线产物缺失？），跳过监控装配。")
+            return
+        cfg = self.train_config
+        num_classes = int(model.class_embed.out_features) - 1
+        # 监控日志的类别名（与语义头解析一致）：优先配置，否则 SHWX 提示词表，再退化 c{id}
+        if cfg.class_names:
+            class_names = list(cfg.class_names)
+        else:
+            try:
+                from rfdetr.sscl.prompts import SHWX_CLASS_NAMES
+
+                class_names = [SHWX_CLASS_NAMES.get(c, f"c{c}") for c in range(num_classes)]
+            except Exception:
+                class_names = [f"c{c}" for c in range(num_classes)]
+        watch_classes = proto_guidance.target_classes or list(range(num_classes))
+        self._proto_guidance_monitor = ProtoGuidanceMonitor(
+            class_names=class_names,
+            watch_classes=watch_classes,
+        )
+
+        # 组合注册（set_sscl_loss_fn 是单槽）：已有回调时包装，先执行既有逻辑
+        existing = getattr(self.criterion, "_sscl_loss_fn", None)
+        if existing is not None:
+            proto_cb = self._proto_guidance_monitor_callback
+
+            def combined_with_proto(
+                outputs: dict[str, Any],
+                targets: list[dict[str, Tensor]],
+                indices: list[tuple[Tensor, Tensor]],
+            ) -> dict[str, Tensor]:
+                """组合回调：先执行既有逻辑（SSCL 损失/语义监控），再更新原型监控。"""
+                merged = dict(existing(outputs, targets, indices))
+                proto_cb(outputs, targets, indices)
+                return merged
+
+            self.criterion.set_sscl_loss_fn(combined_with_proto)
+        else:
+            self.criterion.set_sscl_loss_fn(self._proto_guidance_monitor_callback)
+        logger.info(
+            f"[ProtoGuidance] 监控已装配（watch 类 {watch_classes}，"
+            f"节流 {self.model_config.proto_guidance_monitor_log_interval} 步）"
+        )
+
+    def _proto_guidance_monitor_callback(
+        self,
+        outputs: dict[str, Any],
+        targets: list[dict[str, Tensor]],
+        indices: list[tuple[Tensor, Tensor]],
+    ) -> dict[str, Tensor]:
+        """原型引导监控回调，在 criterion forward() 内被调用（复用 Hungarian indices）。
+
+        Args:
+            outputs: 模型输出字典，须包含 ``"proto_stats"``。
+            targets: 目标字典列表。
+            indices: criterion 中已计算的 Hungarian matching 结果。
+
+        Returns:
+            空字典（监控回调不产生损失）。
+        """
+        stats = outputs.get("proto_stats")
+        if stats is None:
+            return {}
+        interval = int(self.model_config.proto_guidance_monitor_log_interval)
+        if self.global_step % interval == 0:
+            self._proto_guidance_monitor.update(stats)
+        return {}
 
     def _semantic_monitor_callback(
         self,
@@ -1147,6 +1250,11 @@ class RFDETRModelModule(LightningModule):
         # 每个 epoch 开始时清理 GPU 缓存，释放碎片化的显存
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        # [ProtoGuidance] 注入当前 epoch 驱动 lambda/gamma 的 warmup 线性调度
+        # （getattr 链保证无 model 属性的 mock 场景安全）
+        proto_guidance = getattr(getattr(getattr(self, "model", None), "transformer", None), "proto_guidance", None)
+        if proto_guidance is not None:
+            proto_guidance.current_epoch = float(self.current_epoch)
 
     def training_step(self, batch: tuple[Any, Any], batch_idx: int) -> Tensor | dict[str, Any]:
         """Compute loss for one training step and log metrics.
@@ -1449,18 +1557,33 @@ class RFDETRModelModule(LightningModule):
         在 no_grad 下**只读取** α/θ 的 ``.grad`` 范数喂给 SemanticMonitor，绝不置空： PTL 自动优化路径在 optimizer.step() 前依赖这些梯度更新 α/θ，清空会导致
         语义参数永远不更新。梯度累积（accumulate_grad_batches>1）时读取的是当前 累计梯度，用于监控"是否在学"仍具代表性。仅在语义头启用时执行。
         """
+        # [SemHead] 语义头梯度范数（独立于 proto：语义头未装配时不影响其他监控）
         monitor = getattr(self, "_semantic_monitor", None)
         semantic_residual = getattr(self.model, "semantic_residual", None)
-        if monitor is None or semantic_residual is None:
-            return
-        with torch.no_grad():
-            alpha_grad = semantic_residual.alpha.grad
-            theta_grad = semantic_residual.theta.grad
-            if alpha_grad is not None:
-                monitor.update_grad_norms(alpha_grad.detach(), theta_grad.detach() if theta_grad is not None else None)
-            else:
-                # 无梯度（冻结参数）时也上报，便于监控确认冻结生效
-                monitor.update_grad_norms(None, None)
+        if monitor is not None and semantic_residual is not None:
+            with torch.no_grad():
+                alpha_grad = semantic_residual.alpha.grad
+                theta_grad = semantic_residual.theta.grad
+                if alpha_grad is not None:
+                    monitor.update_grad_norms(
+                        alpha_grad.detach(), theta_grad.detach() if theta_grad is not None else None
+                    )
+                else:
+                    # 无梯度（冻结参数）时也上报，便于监控确认冻结生效
+                    monitor.update_grad_norms(None, None)
+        # [ProtoGuidance] 原型引导模块逐参数梯度范数采集（冻结参数应恒 0，
+        # 与语义头同模式：no_grad 只读不置空）
+        proto_monitor = getattr(self, "_proto_guidance_monitor", None)
+        proto_guidance = getattr(getattr(getattr(self, "model", None), "transformer", None), "proto_guidance", None)
+        if proto_monitor is not None and proto_guidance is not None:
+            grad_norms: dict[str, float] = {}
+            for name, param in proto_guidance.named_parameters():
+                if param.grad is not None:
+                    grad_norms[name.replace(".", "_")] = float(param.grad.detach().norm().item())
+                elif param.requires_grad:
+                    grad_norms[name.replace(".", "_")] = 0.0
+            if grad_norms:
+                proto_monitor.update_grad_norms(grad_norms)
 
     def on_train_epoch_end(self) -> None:
         """Step epoch-interval (non-plateau) schedulers on the manual-optimization path.
@@ -1476,6 +1599,10 @@ class RFDETRModelModule(LightningModule):
         hn_monitor = getattr(self, "_hard_neg_monitor", None)
         if hn_monitor is not None:
             hn_monitor.on_train_epoch_end(self)
+        # [ProtoGuidance] 原型引导监控 epoch 级聚合输出到 train/proto/*
+        proto_monitor = getattr(self, "_proto_guidance_monitor", None)
+        if proto_monitor is not None:
+            proto_monitor.on_train_epoch_end(self)
         if self.automatic_optimization or self._lr_scheduler_interval != "epoch":
             return
         scheduler = self._current_lr_scheduler()

@@ -1,0 +1,56 @@
+# [ProtoGuidance] E2-full：E2 同开关 + 全量微调（freeze_strategy: none）
+# 与 conservative 版对比，回答"冻结策略是否限制新模块生效"：
+# - 若 E2-full 显著优于 E2（topk_overlap 更低/AP 更高）→ decoder/backbone 需要
+#   更大容量适应新 query 分布，后续实验线切换为全量微调；
+# - 若两者接近 → conservative 足够，保留省显存/防扰乱的保守策略。
+# 注意：全量微调需更大显存（backbone 参与训练），batch 调小或 grad_accum 调大。
+# 用法: python src/scripts/train.py -c configs/experiments/proto_guidance_E2_full.yaml
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 640
+  gradient_checkpointing: true
+  pretrain_weights: output/0805-SHWX-data-expand-rfdetr-baseline/checkpoint_best_total.pth
+  # --- 多模态原型引导：位置 + 辅助损失（与 E2 一致） ---
+  proto_guidance_enabled: true
+  proto_guidance_artifacts_path: data/proto_guidance_shwx.pt
+  proto_guidance_fusion_mode: simple
+  proto_guidance_num_slots: 10
+  proto_guidance_position_enabled: true
+  proto_guidance_content_enabled: false
+  proto_guidance_aux_loss_enabled: true
+  proto_guidance_aux_loss_weight: 1.0
+  proto_guidance_warmup_epochs: 2.0
+  proto_guidance_lambda_pos_init: 0.05
+  proto_guidance_lambda_pos_max: 1.0
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_file: yolo
+  output_dir: output/0814-SHWX-ProtoGuidance-E2-full
+  epochs: 18
+  batch_size: 16          # 全量微调显存更大，batch 减半
+  grad_accum_steps: 4     # 有效 batch 保持 64
+  num_workers: 12
+  lr: 1e-5
+  lr_encoder: 1e-5
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  lr_drop: 18
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 1
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+  class_balanced_sampling: true
+  class_balanced_class_ids: [0, 1]
+  # 全量微调：不冻结任何参数（新模块参数默认可训练）
+  sscl_freeze_strategy: none

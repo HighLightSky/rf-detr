@@ -38,6 +38,7 @@ def test_lwdetr_default_detection_forward_after_backbone_change() -> None:
         torch.zeros(1, batch_size, num_queries, hidden_dim),
         torch.zeros(batch_size, num_queries, hidden_dim),
         torch.zeros(batch_size, num_queries, hidden_dim),
+        None,  # [ProtoGuidance] 第 5 位：原型 logits（未启用时为 None）
     )
     transformer.return_value = transformer_out
 

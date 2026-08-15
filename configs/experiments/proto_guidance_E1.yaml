@@ -1,0 +1,53 @@
+# [ProtoGuidance] E1：只加位置引导（position residual score，无辅助损失）
+# 预期：topk_overlap≈1.0、proj_token 梯度弱——复现"无辅助损失时位置分支 no-op"风险，
+# 为 E2 提供对照。若 E1 直接有明显效果（overlap<0.98），说明原型分数天然有判别力。
+# 用法: python src/scripts/train.py -c configs/experiments/proto_guidance_E1.yaml
+# 前置: 先运行 stage0 离线脚本生成原型产物（data/proto_guidance_shwx.pt）
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 640
+  gradient_checkpointing: true
+  pretrain_weights: output/0814-SHWX-ProtoGuidance-StageA/checkpoint_best_total.pth
+  # --- 多模态原型引导：仅位置分支 ---
+  proto_guidance_enabled: true
+  proto_guidance_artifacts_path: data/proto_guidance_shwx.pt
+  proto_guidance_fusion_mode: simple
+  proto_guidance_num_slots: 10
+  proto_guidance_position_enabled: true
+  proto_guidance_content_enabled: false
+  proto_guidance_aux_loss_enabled: false
+  proto_guidance_warmup_epochs: 2.0
+  proto_guidance_lambda_pos_init: 0.05
+  proto_guidance_lambda_pos_max: 1.0
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_file: yolo
+  output_dir: output/0814-SHWX-ProtoGuidance-E1
+  epochs: 18
+  batch_size: 32
+  grad_accum_steps: 2
+  num_workers: 12
+  lr: 1e-5
+  lr_encoder: 1e-5
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  lr_drop: 18
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 1
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+  class_balanced_sampling: true
+  class_balanced_class_ids: [0, 1]
+  sscl_freeze_strategy: conservative
+  sscl_unfreeze_decoder_layers: 2

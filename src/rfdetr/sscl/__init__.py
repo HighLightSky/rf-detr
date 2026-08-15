@@ -40,6 +40,13 @@ from rfdetr.sscl.fsem import (
 from rfdetr.sscl.hard_neg_monitor import HardNegMonitor
 from rfdetr.sscl.hard_neg_selection import select_hard_negatives_for_image
 from rfdetr.sscl.projection import ProjectionHead
+from rfdetr.sscl.proto_guidance import (
+    ProtoGuidance,
+    ProtoGuidanceMonitor,
+    load_proto_artifacts,
+    save_proto_artifacts,
+    validate_proto_artifacts,
+)
 from rfdetr.sscl.prototype_bank import PrototypeBank, SlotPrototypeBank
 from rfdetr.sscl.prototype_logit import PrototypeLogitCalibrator
 from rfdetr.sscl.semantic_head import SemanticResidual, attach_from_checkpoint
@@ -66,6 +73,11 @@ __all__ = [
     "SemanticResidual",
     "SemanticMonitor",
     "FSemProjection",
+    "ProtoGuidance",
+    "ProtoGuidanceMonitor",
+    "save_proto_artifacts",
+    "load_proto_artifacts",
+    "validate_proto_artifacts",
     "ChannelStats",
     "attach_from_checkpoint",
     "build_semantic_similarity_matrix",

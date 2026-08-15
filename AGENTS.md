@@ -24,7 +24,7 @@ As an AI agent contributing to RF-DETR, you are responsible for:
 
 2. **Adhering to code quality standards**
 
-    - Run `pre-commit run --all-files` before every commit
+    - **禁止运行 `pre-commit run --all-files`**（会对整个仓库产生大量无关格式改动，见 [Code Quality & Linting](#code-quality--linting)）
     - Follow type hint and docstring requirements
     - Prefer direct project imports; conventional third-party aliases are allowed
 
@@ -94,9 +94,6 @@ uv run --no-sync pytest src/ tests/ -n 1 -m "not gpu" --ignore=tests/run_smoke_a
 
 # GPU tests (requires GPU; mirrors CI)
 uv run --no-sync pytest tests/ -m gpu -n 2 --reruns 1 --only-rerun "OutOfMemoryError" --cov=rfdetr --cov-report=xml --timeout=600 --durations=20
-
-# Pre-commit checks (ALWAYS run before committing)
-pre-commit run --all-files
 ```
 
 ### Testing Principles
@@ -106,7 +103,6 @@ pre-commit run --all-files
 >
 > - ⚠️ **During development:** Tests may fail as you work through TDD cycle
 > - ✅ **Before opening PR:** Final commit MUST have all tests passing
-> - ✅ **Before each commit:** Run `pre-commit run --all-files`
 
 **Test-Driven Development:**
 
@@ -130,13 +126,13 @@ See [CI Testing](.github/CONTRIBUTING.md#ci-testing) in CONTRIBUTING.md for deta
 
 ### Command
 
-```bash
-# Always run full pre-commit (not individual tools)
-pre-commit run --all-files
-```
-
-> [!TIP]
-> Pre-commit hooks will auto-format many issues. Review changes and re-stage files.
+> [!WARNING]
+> **禁止运行 `pre-commit run --all-files`。**
+> `--all-files` 会让所有自动修复钩子扫描**整个仓库**：
+> prettier 会重排所有 yaml/toml（破坏手工对齐的注释列）、ruff 会按字母序重排所有文件的 import、
+> docformatter 会重排所有 docstring——产生与本次改动无关的大规模格式 diff。
+> 若确需运行 pre-commit，只对本次改动的文件执行：`pre-commit run --files <本次改动文件>`；
+> 提交时钩子会自动只检查暂存文件，无需手动全仓扫描。
 
 **Configuration Files:**
 
@@ -298,9 +294,8 @@ result = subprocess.run(
     - Bug fixes: Write test first, then fix
     - Features: Test all major use cases
     - Run: `uv run --no-sync pytest src/ tests/ -n 2 -m "not gpu" --ignore=tests/run_smoke_all_models.py --timeout=240 --durations=50`
-5. **Quality checks:** `pre-commit run --all-files`
-6. **Build (if needed):** `uv build`
-7. **Commit:** Pre-commit hooks run automatically
+5. **Build (if needed):** `uv build`
+6. **Commit:** Pre-commit hooks run automatically on staged files only（不要手动运行 `pre-commit run --all-files`）
 
 ### Adding New Model Variants
 

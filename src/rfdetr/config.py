@@ -525,6 +525,75 @@ class ModelConfig(BaseConfig):
     prototype_logit_temperature: float = Field(default=0.1, gt=0.0)
     """视觉原型相对证据的平滑温度。"""
 
+    # ------------------------------------------------------------------
+    # [ProtoGuidance] 多模态原型引导 query selection / content enhancement（默认全关）
+    # 见 docs/改进方案-dinov2-proto/RF-DETR-DINOv2多模态原型引导方案.md
+    # 放 ModelConfig 而非 TrainConfig：影响模型前向（top-k 选择），推理/评估必须
+    # 与训练一致，且 from_checkpoint 从 checkpoint 的 args 重建模型时字段无损往返。
+    # ------------------------------------------------------------------
+    proto_guidance_enabled: bool = False
+    """多模态原型引导总开关（E1 起启用；子开关见下方 *_position/*_content 等）。"""
+
+    proto_guidance_artifacts_path: PathLikeStr | None = None
+    """离线原型产物路径（stage0_build_proto_guidance.py 产出 .pt 文件）。"""
+
+    proto_guidance_fusion_mode: Literal["simple", "gated"] = "simple"
+    """原型融合模式：v1 仅支持 simple（加权归一化融合）；gated 未实现。"""
+
+    proto_guidance_num_slots: int = Field(default=10, ge=1)
+    """每类视觉子原型槽位数 M（可 5/1 消融；离线脚本产物须与此一致）。"""
+
+    proto_guidance_target_classes: list[int] = Field(default_factory=list)
+    """位置打分 max 集合（空 = 全部类别；selected_class 始终全类 argmax）。"""
+
+    proto_guidance_tau_p: float = Field(default=0.1, gt=0.0)
+    """原型相似度温度（缩放 cosine logits）。"""
+
+    proto_guidance_lambda_pos_init: float = Field(default=0.05, ge=0.0)
+    """位置 residual 权重初始值（近恒等起步，warmup 至上限）。"""
+
+    proto_guidance_lambda_pos_max: float = Field(default=1.0, ge=0.0)
+    """位置 residual 权重上限（warmup 目标；topk_overlap 长期≈1 时上调）。"""
+
+    proto_guidance_gamma_content_init: float = Field(default=0.05, ge=0.0)
+    """内容注入强度初始值（近恒等起步）。"""
+
+    proto_guidance_gamma_content_max: float = Field(default=1.0, ge=0.0)
+    """内容注入强度上限（warmup 目标）。"""
+
+    proto_guidance_gate_bias_init: float = -2.944
+    """内容 gate bias 初始值（logit 空间，默认 logit(0.05) 保留梯度不饱和）。"""
+
+    proto_guidance_w_v_init: float = 0.3
+    """融合时视觉原型权重初始值。"""
+
+    proto_guidance_w_t_init: float = 0.7
+    """融合时文本原型权重初始值（少样本早期文本作稳定锚）。"""
+
+    proto_guidance_warmup_epochs: float = Field(default=2.0, ge=0.0)
+    """lambda/gamma 线性 warmup 的 epoch 数（0 = 直接到上限）。"""
+
+    proto_guidance_position_enabled: bool = True
+    """位置引导子开关（E1；关闭时 top-k 恒等于原版）。"""
+
+    proto_guidance_content_enabled: bool = False
+    """内容引导子开关（E3 打开；关闭时 tgt 原样通过）。"""
+
+    proto_guidance_aux_loss_enabled: bool = False
+    """原型分类辅助损失子开关（E2 打开；配合 criterion loss_proto_labels）。"""
+
+    proto_guidance_aux_loss_weight: float = Field(default=1.0, ge=0.0)
+    """原型分类辅助损失权重。"""
+
+    proto_guidance_visual_ema_update: bool = False
+    """训练期是否用 GT 框特征 EMA 更新视觉原型（扩展项，实验默认关）。"""
+
+    proto_guidance_visual_ema_momentum: float = 0.99
+    """训练期视觉原型 EMA 更新动量。"""
+
+    proto_guidance_monitor_log_interval: int = Field(default=100, ge=1)
+    """原型引导监控的采样节流步数（每 N 步采样一次）。"""
+
     compile: bool = False
     fused_optimizer: bool = True
     positional_encoding_size: int
@@ -586,6 +655,35 @@ class ModelConfig(BaseConfig):
         if default_pe == default_resolution // default_patch_size:
             self.positional_encoding_size = self.resolution // self.patch_size
 
+        return self
+
+    @model_validator(mode="after")
+    def validate_proto_guidance(self) -> "ModelConfig":
+        """[ProtoGuidance] 多模态原型引导字段校验。
+
+        启用时必须提供离线产物路径；关闭时要求产物路径为空，避免误配。
+        """
+        if self.proto_guidance_enabled and not self.proto_guidance_artifacts_path:
+            raise ValueError(
+                "proto_guidance_enabled=True 时必须提供 proto_guidance_artifacts_path"
+                "（stage0_build_proto_guidance.py 产出的 .pt 文件）。"
+            )
+        if not self.proto_guidance_enabled and self.proto_guidance_artifacts_path:
+            raise ValueError("proto_guidance_artifacts_path 仅在 proto_guidance_enabled=True 时使用，当前模块未启用。")
+        if self.proto_guidance_enabled:
+            invalid = [c for c in self.proto_guidance_target_classes if not 0 <= int(c) < self.num_classes]
+            if invalid:
+                raise ValueError(f"proto_guidance_target_classes 含非法类别索引: {invalid}")
+            if self.proto_guidance_lambda_pos_max < self.proto_guidance_lambda_pos_init:
+                raise ValueError(
+                    "proto_guidance_lambda_pos_max 必须 >= lambda_pos_init，"
+                    f"收到 {self.proto_guidance_lambda_pos_max} < {self.proto_guidance_lambda_pos_init}。"
+                )
+            if self.proto_guidance_gamma_content_max < self.proto_guidance_gamma_content_init:
+                raise ValueError(
+                    "proto_guidance_gamma_content_max 必须 >= gamma_content_init，"
+                    f"收到 {self.proto_guidance_gamma_content_max} < {self.proto_guidance_gamma_content_init}。"
+                )
         return self
 
     @model_validator(mode="after")
@@ -1248,6 +1346,8 @@ class TrainConfig(BaseConfig):
     - ``"none"``: 不冻结任何参数，保持全量微调（从预训练直接开始训练时使用）。"""
     sscl_unfreeze_decoder_layers: int = 1
     """保守冻结策略下解冻 decoder 末尾层数。1=旧行为，仅解冻最后一层；2/3 可用于扩大 SSCL 微调容量。"""
+    proto_guidance_freeze_all_except_proto: bool = False
+    """[ProtoGuidance] 阶段 A 冷启动专用：除原型引导模块外冻结全部参数 （跳过 decoder/norm/class_embed 的解冻分支）。实验阶段由 stageA 配方启用。"""
     sscl_prototype_enabled: bool = False
     """是否启用类别原型库锚定的 SSCL（原型模式）。开启时正样本为本类原型、 负样本为全部类别原型，每个样本恒有正负锚点，摆脱 batch 内同类样本不足 导致的零损失问题。"""
     sscl_prototype_momentum: float = 0.99
@@ -1609,21 +1709,13 @@ class TrainConfig(BaseConfig):
                 f"收到 {self.sscl_hard_neg_iou_low} > {self.sscl_hard_neg_iou_high}。"
             )
         if self.sscl_hard_neg_loss_lambda < 0.0:
-            raise ValueError(
-                f"sscl_hard_neg_loss_lambda 必须 >= 0，收到 {self.sscl_hard_neg_loss_lambda}。"
-            )
+            raise ValueError(f"sscl_hard_neg_loss_lambda 必须 >= 0，收到 {self.sscl_hard_neg_loss_lambda}。")
         if self.sscl_hard_neg_logit_temperature <= 0.0:
-            raise ValueError(
-                "sscl_hard_neg_logit_temperature 必须 > 0，"
-                f"收到 {self.sscl_hard_neg_logit_temperature}。"
-            )
+            raise ValueError(f"sscl_hard_neg_logit_temperature 必须 > 0，收到 {self.sscl_hard_neg_logit_temperature}。")
         if self.sscl_hard_neg_proto_lambda < 0.0:
             raise ValueError(f"sscl_hard_neg_proto_lambda 必须 >= 0，收到 {self.sscl_hard_neg_proto_lambda}。")
         if self.sscl_hard_neg_proto_temperature <= 0.0:
-            raise ValueError(
-                "sscl_hard_neg_proto_temperature 必须 > 0，"
-                f"收到 {self.sscl_hard_neg_proto_temperature}。"
-            )
+            raise ValueError(f"sscl_hard_neg_proto_temperature 必须 > 0，收到 {self.sscl_hard_neg_proto_temperature}。")
         if self.sscl_hard_neg_target_classes is not None:
             invalid = [c for c in self.sscl_hard_neg_target_classes if c < 0]
             if invalid:
@@ -1634,15 +1726,11 @@ class TrainConfig(BaseConfig):
     def validate_sscl_multislot_prototype(self) -> "TrainConfig":
         """多 slot 原型字段的基础校验。"""
         if self.sscl_unfreeze_decoder_layers < 1:
-            raise ValueError(
-                f"sscl_unfreeze_decoder_layers 必须 >= 1，收到 {self.sscl_unfreeze_decoder_layers}。"
-            )
+            raise ValueError(f"sscl_unfreeze_decoder_layers 必须 >= 1，收到 {self.sscl_unfreeze_decoder_layers}。")
         if self.sscl_prototype_max_slots < 1:
             raise ValueError(f"sscl_prototype_max_slots 必须 >= 1，收到 {self.sscl_prototype_max_slots}。")
         if self.sscl_prototype_group_weight < 1.0:
-            raise ValueError(
-                f"sscl_prototype_group_weight 必须 >= 1.0，收到 {self.sscl_prototype_group_weight}。"
-            )
+            raise ValueError(f"sscl_prototype_group_weight 必须 >= 1.0，收到 {self.sscl_prototype_group_weight}。")
         if self.sscl_prototype_multi_slot_classes is not None:
             invalid = [c for c in self.sscl_prototype_multi_slot_classes if c < 0]
             if invalid:
