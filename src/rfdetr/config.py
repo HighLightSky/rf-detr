@@ -1397,6 +1397,14 @@ class TrainConfig(BaseConfig):
     """难负样本与前景原型余弦相似度的软上界。"""
     sscl_hard_neg_proto_temperature: float = 0.1
     """难负样本原型排斥的 softplus 温度。"""
+    sscl_hard_neg_start_epoch: int = 0
+    """难负样本抑制开始生效的 epoch（从 0 起计），独立于 ``sscl_start_epoch``。
+
+    与 SSCL 对比损失解耦，可在 SSCL 已运行若干 epoch、匹配质量稳定后再引入
+    难例抑制。早期未匹配 query 的高分多为训练噪声，过早抑制会把真阳误判为
+    难负样本（E4-hard-neg 实验中抑制从 epoch 0 全强度施加导致 MS recall
+    从 0.7568 暴跌至 0.5340 的教训）。
+    """
     # ------------------------------------------------------------------
     # [分类损失均衡化] 正样本类均衡 IA-BCE + 居中截断 Logit Adjustment（默认全部关闭）
     # 见 docs/改进方案-SSCL/RF-DETR分类损失均衡化改进方案.md
@@ -1720,6 +1728,10 @@ class TrainConfig(BaseConfig):
             invalid = [c for c in self.sscl_hard_neg_target_classes if c < 0]
             if invalid:
                 raise ValueError(f"sscl_hard_neg_target_classes 含非法类别索引: {invalid}")
+        if self.sscl_hard_neg_start_epoch < 0:
+            raise ValueError(
+                f"sscl_hard_neg_start_epoch 必须 >= 0，收到 {self.sscl_hard_neg_start_epoch}。"
+            )
         return self
 
     @model_validator(mode="after")

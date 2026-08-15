@@ -1303,11 +1303,19 @@ class RFDETRModelModule(LightningModule):
         # [SSCL] 起始 epoch 门控：在 sscl_start_epoch 之前将 SSCL 相关权重置 0，
         # 让常规检测损失先训练若干 epoch 收敛基类，再按策略从指定 epoch 开始
         # 施加语义对比约束。使用副本而非修改 self.criterion.weight_dict，
-        # 避免污染后续 step 的权重。难负样本抑制挂在 SSCL 配置域下，同步门控。
+        # 避免污染后续 step 的权重。难负样本抑制独立门控
+        # （sscl_hard_neg_start_epoch），可与 SSCL 解耦晚启动。
         if "loss_sscl" in weight_dict and self.current_epoch < self.train_config.sscl_start_epoch:
             weight_dict = {
                 **weight_dict,
                 "loss_sscl": 0.0,
+            }
+        if (
+            "loss_sscl_hard_neg" in weight_dict
+            and self.current_epoch < self.train_config.sscl_hard_neg_start_epoch
+        ):
+            weight_dict = {
+                **weight_dict,
                 "loss_sscl_hard_neg": 0.0,
             }
         loss: Tensor = torch.stack([loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict]).sum()
@@ -1399,6 +1407,13 @@ class RFDETRModelModule(LightningModule):
             weight_dict = {
                 **weight_dict,
                 "loss_sscl": 0.0,
+            }
+        if (
+            "loss_sscl_hard_neg" in weight_dict
+            and self.current_epoch < self.train_config.sscl_hard_neg_start_epoch
+        ):
+            weight_dict = {
+                **weight_dict,
                 "loss_sscl_hard_neg": 0.0,
             }
         if not getattr(self.criterion, "supports_loss_normalizer_override", False):
