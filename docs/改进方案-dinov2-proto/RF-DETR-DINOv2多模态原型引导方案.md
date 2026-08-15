@@ -115,7 +115,7 @@ topk(linear_score)
 建议改为 residual scoring：
 
 ```text
-proto_logits = tau_p * cosine(norm_proto_query(output_memory_gidx), norm(P_mm))
+proto_logits = cosine(norm_proto_query(output_memory_gidx), norm(P_mm)) / tau_p
 proto_score  = max(proto_logits over target classes)
 
 select_score = linear_score + lambda_pos * proto_score
@@ -169,30 +169,31 @@ tgt = tgt + gate * CrossAttn(tgt, prototype_slots, prototype_slots)
 
 ### 1.4 SSCL 原型升级
 
-保留现有 SSCL 主体，但将其原型锚点升级为 DINOv2/多模态原型参与的稳定类别锚：
+需要明确区分 ProtoGuidance 与 SSCL 的两类视觉统计量。当前实现中二者不共享
+原始向量，也不应直接做逐元素对齐：
+
+| 模块 | 来源 | 空间 | 更新 | 作用 |
+| --- | --- | --- | --- | --- |
+| ProtoGuidance | 冻结 RF-DETR projector 的 P4 GT 框区域池化后聚类 | encoder hidden space | 默认离线固定 | top-k 位置和 decoder content 先验 |
+| SSCL | decoder 最后一层 Hungarian matched foreground query | 可选 projection space | 训练期 EMA 或 instance-to-instance | decoder 类间分离 |
+
+在 SSCL prototype 模式关闭时（当前 E4 配置即为此情况），SSCL 根本没有视觉原型库，
+只有 matched query 的 instance-to-instance 对比学习。CLIP 在 SSCL 中只提供类别语义
+相似度矩阵，用于放大易混类别负样本，不是 SSCL 视觉原型来源。
+
+两者需要统一的是类别索引、类别名称、prompt/数据集版本和诊断口径；不需要统一的是
+特征维度和每个类别的具体向量。若要做跨空间一致化，先比较两个空间的类别余弦关系
+矩阵，而不是强制向量相等：
 
 ```text
-matched decoder query feature
-    ↓
-projection head
-    ↓
-与类别原型做对比：正样本 = 本类原型，负样本 = 易混类原型/其他类原型
+R_proto  = cosine(P_proto[c], P_proto[c'])
+R_sscl   = cosine(P_sscl[c], P_sscl[c'])
+L_rel    = MSE(R_proto, R_sscl)   # 可选，仅在两者都已判别时启用
 ```
 
-第一版有两种稳妥选择：
-
-| 方式 | 说明 | 优点 | 风险 |
-| --- | --- | --- | --- |
-| A. DINOv2 原型初始化 SSCL EMA bank | 用 DINOv2/多模态原型初始化现有原型库，训练中继续 EMA 更新 | 适配现有代码最小 | 原型可能逐步漂向少样本噪声 |
-| B. 冻结多模态原型 + 可学习投影到 SSCL 空间 | 原型作为冻结 anchor，SSCL projection 学会对齐 | anchor 稳定，少样本不污染 | 新投影需要额外训练信号 |
-
-建议首版采用 A+B 的折中：
-
-```text
-P_sscl = normalize(beta * P_ema + (1 - beta) * proj_mm_to_sscl(P_mm))
-```
-
-`beta` 可 warmup，从更信任冻结原型逐步过渡到任务 EMA 原型。
+只有在离线 probe 证明 ProtoGuidance 原型本身可分、SSCL prototype bank 已稳定时，
+才考虑用一个很小的关系蒸馏项或用 ProtoGuidance 原型初始化 SSCL bank。不能在当前
+原型塌缩状态下直接共享，因为这会把错误方向传播到 decoder。
 
 ---
 

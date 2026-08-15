@@ -73,7 +73,7 @@ def _make_transformer(**overrides: object) -> Transformer:
 
 
 def _make_proto_guidance(**overrides: object) -> ProtoGuidance:
-    """构造测试用 ProtoGuidance（随机初始化）。"""
+    """构造测试用 ProtoGuidance，并注入有效的随机离线原型。"""
     kwargs: dict[str, object] = {
         "num_classes": _C,
         "hidden_dim": _D,
@@ -82,7 +82,15 @@ def _make_proto_guidance(**overrides: object) -> ProtoGuidance:
         "warmup_epochs": 0.0,  # 直接到上限，便于控制 lambda
     }
     kwargs.update(overrides)
-    return ProtoGuidance(**kwargs)  # type: ignore[arg-type]
+    module = ProtoGuidance(**kwargs)  # type: ignore[arg-type]
+    generator = torch.Generator().manual_seed(7)
+    with torch.no_grad():
+        module.visual_bank.prototypes.copy_(
+            torch.randn(_C, _M, _D, generator=generator)
+        )
+        module.visual_bank.slot_valid_mask.fill_(True)
+        module.P_t_clip.copy_(torch.randn(_C, 4, generator=generator))
+    return module
 
 
 def _forward(transformer: Transformer) -> tuple:

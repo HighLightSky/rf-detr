@@ -63,7 +63,7 @@ from rfdetr.sscl.prompts import load_class_prompts  # noqa: E402
 # 均可通过 --model 显式覆盖。
 _DEFAULT_CLIP_MODEL = os.environ.get(
     "CLIP_MODEL",
-    "/home/liu/wzt/Ruiyingshizong/AeroGen/ckpt/clip/clip-vit-large-patch14",
+    "data/clip/clip-vit-large-patch14",
 )
 
 

@@ -8,7 +8,8 @@ model:
   num_classes: 25
   resolution: 640
   gradient_checkpointing: true
-  pretrain_weights: output/0814-SHWX-ProtoGuidance-StageA/checkpoint_best_total.pth
+  # 从不含塌缩 ProtoGuidance 状态的 detector baseline 启动
+  pretrain_weights: output/0813-SHWX-rfdetr-medium-baseline-精细标注/checkpoint_best_total.pth
   # --- 多模态原型引导：位置 + 辅助损失 ---
   proto_guidance_enabled: true
   proto_guidance_artifacts_path: data/proto_guidance_shwx.pt
@@ -21,12 +22,12 @@ model:
   proto_guidance_warmup_epochs: 2.0
   proto_guidance_lambda_pos_init: 0.05
   proto_guidance_lambda_pos_max: 3.0  # v2增强
-  model.proto_guidance_tau_p: 0.5  # v2增强
+  proto_guidance_tau_p: 0.2  # v2增强，按 cosine / tau_p 缩放
 
 train:
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
   dataset_file: yolo
-  output_dir: output/0814-SHWX-ProtoGuidance-E2
+  output_dir: output/0815-SHWX-ProtoGuidance-E2-fixed
   epochs: 18
   batch_size: 32
   grad_accum_steps: 2

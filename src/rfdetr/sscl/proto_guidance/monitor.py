@@ -117,6 +117,13 @@ class ProtoGuidanceMonitor:
         ent = self._mean_of("proto_logits_entropy_mean")
         if ent is not None:
             metrics[f"{_PREFIX}/proto_logits_entropy_mean"] = float(ent.mean().item())
+        margin = self._mean_of("proto_margin_mean")
+        if margin is not None:
+            metrics[f"{_PREFIX}/proto_margin_mean"] = float(margin.mean().item())
+        for name in ("offdiag_cos_mean", "offdiag_cos_std", "offdiag_cos_max", "effective_rank"):
+            geometry = self._mean_of(f"prototype_{name}")
+            if geometry is not None:
+                metrics[f"{_PREFIX}/prototype_{name}"] = float(geometry.mean().item())
 
         # --- 选中类别分布（逐 watch 类 + 总体） ---
         hist = self._sum_of("selected_class_hist")

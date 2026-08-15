@@ -362,6 +362,8 @@ class Transformer(nn.Module):
             # [ProtoGuidance] 原型引导相关的逐组记录（选中类别/原型 logits/线性 logits 与 top-k）
             selected_class_ts_parts: list[Tensor] = []
             proto_logits_ts_parts: list[Tensor] = []
+            proto_score_ts_parts: list[Tensor] = []
+            proto_confidence_ts_parts: list[Tensor] = []
             linear_logits_ts_parts: list[Tensor] = []
             topk_ts_parts: list[Tensor] = []
             linear_topk_ts_parts: list[Tensor] = []
@@ -394,8 +396,12 @@ class Transformer(nn.Module):
                         output_memory_gidx
                     )
                     if self.proto_guidance.position_enabled:
+                        proto_position_score_gidx = self.proto_guidance.calibrate_position_score(
+                            proto_score_gidx, linear_score_gidx
+                        )
                         select_score_gidx = (
-                            linear_score_gidx + self.proto_guidance.lambda_pos_effective() * proto_score_gidx
+                            linear_score_gidx
+                            + self.proto_guidance.lambda_pos_effective() * proto_position_score_gidx
                         )
                     else:
                         select_score_gidx = linear_score_gidx
@@ -431,6 +437,17 @@ class Transformer(nn.Module):
                         1,
                         topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, num_classes_fg),
                     )  # bs, nq, C
+                    proto_score_ts_gidx = torch.gather(
+                        proto_score_gidx,
+                        1,
+                        topk_proposals_gidx,
+                    )  # bs, nq
+                    proto_confidence_gidx = self.proto_guidance.class_confidence(proto_logits_gidx)
+                    proto_confidence_ts_gidx = torch.gather(
+                        proto_confidence_gidx,
+                        1,
+                        topk_proposals_gidx,
+                    )  # bs, nq
                     linear_logits_ts_gidx = torch.gather(
                         enc_outputs_class_unselected_gidx,
                         1,
@@ -438,6 +455,8 @@ class Transformer(nn.Module):
                     )  # bs, nq, C+1
                     selected_class_ts_parts.append(selected_class_ts_gidx)
                     proto_logits_ts_parts.append(proto_logits_ts_gidx)
+                    proto_score_ts_parts.append(proto_score_ts_gidx)
+                    proto_confidence_ts_parts.append(proto_confidence_ts_gidx)
                     linear_logits_ts_parts.append(linear_logits_ts_gidx)
 
                 refpoint_embed_ts_parts.append(refpoint_embed_gidx)
@@ -453,6 +472,10 @@ class Transformer(nn.Module):
                 torch.cat(selected_class_ts_parts, dim=1) if selected_class_ts_parts else None
             )  # bs, nq*G
             proto_logits_ts = torch.cat(proto_logits_ts_parts, dim=1) if proto_logits_ts_parts else None  # bs, nq*G, C
+            proto_score_ts = torch.cat(proto_score_ts_parts, dim=1) if proto_score_ts_parts else None  # bs, nq*G
+            proto_confidence_ts = (
+                torch.cat(proto_confidence_ts_parts, dim=1) if proto_confidence_ts_parts else None
+            )  # bs, nq*G
             linear_logits_ts = (
                 torch.cat(linear_logits_ts_parts, dim=1) if linear_logits_ts_parts else None
             )  # bs, nq*G, C+1
@@ -508,7 +531,11 @@ class Transformer(nn.Module):
                 if self.proto_guidance is not None and selected_class_ts is not None:
                     tgt = torch.cat(
                         [
-                            self.proto_guidance.enhance_content(tgt[:, :ts_len], selected_class_ts),
+                            self.proto_guidance.enhance_content(
+                                tgt[:, :ts_len],
+                                selected_class_ts,
+                                proto_confidence_ts,
+                            ),
                             tgt[:, ts_len:],
                         ],
                         dim=1,
@@ -526,6 +553,7 @@ class Transformer(nn.Module):
                             topk_ts,
                             linear_topk_ts,
                             selected_class_ts,
+                            proto_score_ts,
                         )
 
             # Insert register tokens per group

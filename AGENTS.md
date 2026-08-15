@@ -244,6 +244,13 @@ from tqdm.auto import tqdm  # NOT: from tqdm import tqdm
 - Import handled lazily via `__getattr__` in `src/rfdetr/platform/models.py`
 - Raises `ImportError` if package not installed
 
+**Prototype Guidance 与 SSCL 原型边界：**
+
+- ProtoGuidance 原型来自离线 RF-DETR projector 的 P4 GT 框区域特征，并与 CLIP 文本原型融合，服务 encoder two-stage query selection 和 decoder content residual。
+- SSCL 的视觉特征来自 decoder 最后一层 Hungarian matched query；只有 `sscl_prototype_enabled=True` 时才会建立 projection-space EMA prototype bank，关闭时使用 instance-to-instance SSCL。
+- 两者必须统一类别索引和数据集语义，但不要直接比较或拼接不同特征空间的向量；跨空间一致性应比较类别关系矩阵。
+- ProtoGuidance 的原型 logits 使用 `cosine / tau_p`，辅助损失只对 matched foreground 做类别均衡 CE，避免未匹配 query 的背景负样本导致原型塌缩。
+
 **Subprocess Usage:**
 
 ```python

@@ -40,12 +40,16 @@ from rfdetr.sscl.proto_guidance.fusion import (
     build_fusion,
 )
 from rfdetr.sscl.prototype_bank import SlotPrototypeBank
+from rfdetr.sscl.prototype_diagnostics import prototype_geometry
 from rfdetr.utilities.logger import get_logger
 
 logger = get_logger()
 
 # 采样节流区间默认值（与 semantic_monitor_log_interval 同量级）
 DEFAULT_MONITOR_INTERVAL = 100
+
+# margin 标准差相对线性 objectness 的目标比例；给 top-k 留出稳定主干。
+POSITION_SCORE_STD_RATIO = 0.1
 
 
 def _lerp(start: float, end: float, t: float) -> float:
@@ -64,7 +68,7 @@ class ProtoGuidance(nn.Module):
         num_slots: 每类视觉子原型槽位数 M。
         target_classes: 位置打分 max 集合；空列表 = 全部类别
             （``selected_class`` 始终在全部类别上 argmax）。
-        tau_p: 原型相似度温度（缩放 logits）。
+        tau_p: 原型相似度温度（``cosine / tau_p``）。
         lambda_pos_init: 位置 residual 权重初始值。
         lambda_pos_max: 位置 residual 权重上限（warmup 目标）。
         gamma_content_init: 内容注入强度初始值。
@@ -294,8 +298,8 @@ class ProtoGuidance(nn.Module):
 
         Returns:
             ``(proto_logits, proto_score, selected_class)``：
-            - ``proto_logits``: ``[bs, N, C]``（``tau_p * cosine``，多槽位取 max）；
-            - ``proto_score``: ``[bs, N]``（在 ``target_classes`` 上取 max）；
+            - ``proto_logits``: ``[bs, N, C]``（``cosine / tau_p``，多槽位取 max）；
+            - ``proto_score``: ``[bs, N]``（目标类别与最强竞争类别的 cosine margin）；
             - ``selected_class``: ``[bs, N]``（全部类别上 argmax，供内容增强）。
         """
         p_mm, valid = self.fused_prototypes()  # [C, M, d], [C, M]
@@ -304,22 +308,61 @@ class ProtoGuidance(nn.Module):
         sim = torch.einsum("bnd,cmd->bncm", token_h, p_mm)
         sim = sim.masked_fill(~valid.unsqueeze(0).unsqueeze(0), torch.finfo(sim.dtype).min)
         class_sim = sim.max(dim=-1).values  # [bs, N, C]
-        proto_logits = self.tau_p * class_sim
-        selected_class = proto_logits.argmax(dim=-1)  # [bs, N]
+        class_valid = valid.any(dim=-1)
+        class_sim = class_sim.masked_fill(
+            ~class_valid.view(1, 1, -1),
+            -1.0,
+        )
+        proto_logits = class_sim / self.tau_p
+        selected_class = class_sim.argmax(dim=-1)  # [bs, N]
 
         if self.target_classes:
-            score_logits = proto_logits[..., self.target_classes]
+            target_ids = torch.as_tensor(self.target_classes, device=mem_gidx.device)
+            target_top = class_sim.index_select(-1, target_ids).max(dim=-1).values
+            competitor_mask = torch.ones(
+                self.num_classes, dtype=torch.bool, device=mem_gidx.device
+            )
+            competitor_mask[target_ids] = False
+            if bool(competitor_mask.any()):
+                competitor_top = class_sim[..., competitor_mask].max(dim=-1).values
+                proto_score = target_top - competitor_top
+            else:
+                proto_score = target_top
         else:
-            score_logits = proto_logits
-        proto_score = score_logits.max(dim=-1).values  # [bs, N]
+            top_values = class_sim.topk(min(2, self.num_classes), dim=-1).values
+            proto_score = top_values[..., 0]
+            if self.num_classes > 1:
+                proto_score = proto_score - top_values[..., 1]
         return proto_logits, proto_score, selected_class
 
-    def enhance_content(self, tgt_q: Tensor, selected_class: Tensor) -> Tensor:
+    def class_confidence(self, proto_logits: Tensor) -> Tensor:
+        """把原型分类概率转换为去除类别数影响的置信度。"""
+        probabilities = F.softmax(proto_logits, dim=-1)
+        max_probability = probabilities.max(dim=-1).values
+        uniform = 1.0 / max(proto_logits.shape[-1], 1)
+        return ((max_probability - uniform) / (1.0 - uniform)).clamp(0.0, 1.0)
+
+    def calibrate_position_score(self, proto_score: Tensor, linear_score: Tensor) -> Tensor:
+        """将 margin 居中并缩放到线性 objectness 的标准差。"""
+        if proto_score.shape != linear_score.shape:
+            raise ValueError("proto_score 与 linear_score 的形状必须一致。")
+        proto_centered = proto_score - proto_score.mean(dim=-1, keepdim=True)
+        proto_std = proto_centered.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
+        linear_std = linear_score.detach().std(dim=-1, keepdim=True, unbiased=False)
+        return proto_centered / proto_std * linear_std * POSITION_SCORE_STD_RATIO
+
+    def enhance_content(
+        self,
+        tgt_q: Tensor,
+        selected_class: Tensor,
+        confidence: Tensor | None = None,
+    ) -> Tensor:
         """用关联类别的多槽位原型增强内容查询（gate 残差）。
 
         Args:
             tgt_q: 内容查询 ``[bs, Q, d]``（two-stage 选中的部分）。
             selected_class: 每个查询关联的类别 ``[bs, Q]``。
+            confidence: 原型分类置信度 ``[bs, Q]``；为空时兼容旧行为。
 
         Returns:
             增强后的内容查询（形状不变）。``content_enabled=False`` 时原样返回。
@@ -333,8 +376,11 @@ class ProtoGuidance(nn.Module):
         ctx = _content_context(tgt_q, p_q, valid_q)  # [bs, Q, d]
         gate_in = torch.cat([tgt_q, ctx], dim=-1)
         gate = torch.sigmoid(self.gate_mlp(gate_in))  # [bs, Q, 1]
-        self._last_gate = gate.squeeze(-1).detach()
         gamma = self.gamma_content_effective()
+        if confidence is not None:
+            confidence = confidence.to(dtype=gate.dtype).clamp(0.0, 1.0).unsqueeze(-1)
+            gate = gate * confidence
+        self._last_gate = gate.squeeze(-1).detach()
         return tgt_q + gamma * gate * ctx
 
     def update_visual_ema(self, features: list[Tensor], boxes: list[Tensor], labels: list[Tensor]) -> None:
@@ -387,6 +433,7 @@ class ProtoGuidance(nn.Module):
         topk_indices: Tensor,
         linear_topk_indices: Tensor,
         selected_class: Tensor,
+        proto_score_ts: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """汇总一次前向的监控统计（全 detach，供 monitor 消费）。
 
@@ -403,26 +450,40 @@ class ProtoGuidance(nn.Module):
             ``selected_class_hist``/``gate_mean``，均为 ``[bs]`` 或标量张量）。
         """
         stats: dict[str, Tensor] = {}
-        bs, q_len, _ = proto_logits_ts.shape
+        bs = proto_logits_ts.shape[0]
 
         # top-k 重叠率：合并分数与纯线性分数选中的 token 交集比例（逐图）
-        overlap = (topk_indices == linear_topk_indices).float().mean(dim=-1)  # [bs]
+        overlap = (
+            topk_indices.unsqueeze(-1) == linear_topk_indices.unsqueeze(-2)
+        ).any(dim=-1).float().mean(dim=-1)  # [bs]
         stats["topk_overlap"] = overlap
         stats["proto_selected_ratio"] = 1.0 - overlap
 
-        # 有效 lambda：lambda * std(proto_score) / std(linear_score)，量级匹配判断
-        proto_score = proto_logits_ts.max(dim=-1).values  # [bs, Q]
+        # 有效 lambda：按实际注入后的标准差计算，包含 margin 校准比例。
+        proto_score = (
+            proto_score_ts if proto_score_ts is not None else proto_logits_ts.max(dim=-1).values
+        )
         linear_score = linear_logits_ts.max(dim=-1).values  # [bs, Q]
-        proto_std = proto_score.std(dim=-1)  # [bs]
-        linear_std = linear_score.std(dim=-1)  # [bs]
-        lam_eff = self.lambda_pos_effective() * proto_std / (linear_std + 1e-6)
+        calibrated = self.calibrate_position_score(proto_score, linear_score)
+        lam_eff = (
+            self.lambda_pos_effective()
+            * calibrated.std(dim=-1, unbiased=False)
+            / (linear_score.std(dim=-1, unbiased=False) + 1e-6)
+        )
         stats["lambda_effective"] = lam_eff
 
-        # 判别性：选中 query 原型 logits 的 max 与熵（逐图均值）
-        stats["proto_logits_pmax_mean"] = proto_score.mean(dim=-1)
+        # 判别性：选中 query 原型 logits 的 max、熵和 cosine margin。
+        stats["proto_logits_pmax_mean"] = proto_logits_ts.max(dim=-1).values.mean(dim=-1)
         softmax_p = F.softmax(proto_logits_ts, dim=-1)
         entropy = -(softmax_p * softmax_p.clamp_min(1e-12).log()).sum(dim=-1)
         stats["proto_logits_entropy_mean"] = entropy.mean(dim=-1)
+        stats["proto_margin_mean"] = proto_score.mean(dim=-1)
+
+        with torch.no_grad():
+            fused_prototypes, valid = self.fused_prototypes()
+            geometry = prototype_geometry(fused_prototypes, valid)
+        for name, value in geometry.items():
+            stats[f"prototype_{name}"] = value.to(dtype=torch.float32)
 
         # 类别分布：所有选中 query 的关联类别直方图 [C]
         hist = torch.bincount(selected_class.clamp(0, self.num_classes - 1).flatten(), minlength=self.num_classes)

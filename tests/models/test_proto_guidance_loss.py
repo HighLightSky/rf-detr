@@ -112,3 +112,49 @@ class TestLossProtoLabels:
         ]
         assert float(loss_high.item()) < float(loss_flat.item())
         assert q_len > 0  # 防止未使用变量告警
+
+    def test_unmatched_background_logits_do_not_affect_loss(self) -> None:
+        """辅助分类只监督 matched foreground，未匹配 query 不应主导优化。"""
+        criterion = _make_criterion()
+        outputs, targets, indices, num_boxes = _make_inputs()
+        baseline = criterion.loss_proto_labels(outputs, targets, indices, num_boxes)[
+            "loss_proto_labels"
+        ]
+        matched = {
+            (batch_idx, int(query_idx))
+            for batch_idx, (src_idx, _) in enumerate(indices)
+            for query_idx in src_idx
+        }
+        with torch.no_grad():
+            for batch_idx in range(outputs["pred_proto_logits"].shape[0]):
+                for query_idx in range(outputs["pred_proto_logits"].shape[1]):
+                    if (batch_idx, query_idx) not in matched:
+                        outputs["pred_proto_logits"][batch_idx, query_idx].fill_(100.0)
+
+        changed = criterion.loss_proto_labels(outputs, targets, indices, num_boxes)[
+            "loss_proto_labels"
+        ]
+
+        assert torch.allclose(changed, baseline)
+
+    def test_loss_is_class_balanced(self) -> None:
+        """重复某一类别的 matched 样本不应改变各类别等权的辅助损失。"""
+        criterion = _make_criterion(num_classes=2)
+        logits = torch.tensor([[[2.0, -1.0], [-0.5, 1.0], [2.0, -1.0]]])
+        outputs = {"pred_proto_logits": logits}
+        targets = [{"labels": torch.tensor([0, 1]), "boxes": torch.rand(2, 4)}]
+        indices = [(torch.tensor([0, 1]), torch.tensor([0, 1]))]
+        base = criterion.loss_proto_labels(outputs, targets, indices, torch.tensor(2.0))[
+            "loss_proto_labels"
+        ]
+
+        repeated_targets = [{"labels": torch.tensor([0, 1, 0]), "boxes": torch.rand(3, 4)}]
+        repeated_indices = [(torch.tensor([0, 1, 2]), torch.tensor([0, 1, 2]))]
+        repeated = criterion.loss_proto_labels(
+            outputs,
+            repeated_targets,
+            repeated_indices,
+            torch.tensor(3.0),
+        )["loss_proto_labels"]
+
+        assert torch.allclose(repeated, base)

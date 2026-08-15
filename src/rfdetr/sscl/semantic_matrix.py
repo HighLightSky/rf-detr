@@ -5,7 +5,7 @@
 # ------------------------------------------------------------------------
 """CLIP 类别语义相似度矩阵的构建、保存、加载与验证。
 
-本模块在训练前离线运行：使用 CLIP 文本编码器对每个类别的多个 prompt 编码取平均，得到类别文本向量，再计算两两余弦相似度，构成类别语义 相似度矩阵。该矩阵后续用于 SSCL 损失中对易混类别对施加更强的分离约束。
+本模块在训练前离线运行：使用 CLIP 文本编码器的 EOS/pooler 表征对每个类别的多个 prompt 编码取平均，得到类别文本向量，再计算两两余弦相似度，构成类别语义相似度矩阵。该矩阵后续用于 SSCL 损失中对易混类别对施加更强的分离约束。
 
 CLIP 只参与本模块的离线计算，不参与在线训练或推理。
 """
@@ -51,7 +51,7 @@ def encode_class_text_embeddings(
     """使用 CLIP 文本编码器将每个类别的 prompt 编码为文本向量。
 
     对每个类别的所有 prompt 逐条编码后取平均作为该类别的文本向量。
-    每个 prompt 的向量在投影后先做 L2 归一化再取平均（与
+    每个 prompt 的 EOS/pooler 向量在投影后先做 L2 归一化再取平均（与
     ``build_semantic_similarity_matrix`` 的内部约定一致），但最终返回的
     类别均值向量**不再整体归一化**——留给调用方决定（语义相似度矩阵
     需要归一化后算余弦；f_sem 投影训练时会在损失内部归一化）。
@@ -98,15 +98,14 @@ def encode_class_text_embeddings(
             return_tensors="pt",
         ).to(device)
         with torch.no_grad():
-            # 使用 text encoder 输出并执行 mean-pooling + 归一化，
-            # 与 CLIP 图像-文本对比训练时的 text feature 提取方式一致。
-            last_hidden_state = clip.text_model(
+            # 使用 CLIP 训练时的 EOS/pooler 表征，避免把 prompt 模板词平均成
+            # 所有类别共有的方向。
+            text_outputs = clip.text_model(
                 input_ids=text_inputs["input_ids"],
                 attention_mask=text_inputs["attention_mask"],
-            ).last_hidden_state
-            # 仅对真实 token（非 pad）求均值，再经投影头映射到对比空间
-            attention_mask = text_inputs["attention_mask"].unsqueeze(-1)
-            pooled = (last_hidden_state * attention_mask).sum(dim=1) / attention_mask.sum(dim=1)
+                return_dict=True,
+            )
+            pooled = text_outputs.pooler_output
             text_embed = clip.text_projection(pooled)
             text_embed = F.normalize(text_embed, dim=-1)
         class_vector = text_embed.mean(dim=0)  # 多 prompt 取平均

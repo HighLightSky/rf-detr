@@ -730,10 +730,12 @@ class RFDETRModelModule(LightningModule):
         # 作为预热让锚点在 SSCL 生效前就绪；验证阶段 self.training 为 False 天然门控。
         if self.training and getattr(self.sscl_loss, "prototype_mode", False):
             self.sscl_loss.update_prototypes(features.detach(), labels)
-            model_for_prototype = getattr(self.model, "_orig_mod", self.model)
-            calibrator = getattr(model_for_prototype, "prototype_logit_calibrator", None)
-            if calibrator is not None:
-                calibrator.sync_from_bank(self.sscl_loss.prototype_bank)
+            model_for_prototype = getattr(self, "model", None)
+            if model_for_prototype is not None:
+                model_for_prototype = getattr(model_for_prototype, "_orig_mod", model_for_prototype)
+                calibrator = getattr(model_for_prototype, "prototype_logit_calibrator", None)
+                if calibrator is not None:
+                    calibrator.sync_from_bank(self.sscl_loss.prototype_bank)
         return {"loss_sscl": loss, **hn_result}
 
     def _extract_matched_query_features(

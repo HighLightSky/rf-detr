@@ -48,6 +48,7 @@ from rfdetr.sscl.proto_guidance import (
     validate_proto_artifacts,
 )
 from rfdetr.sscl.prototype_bank import PrototypeBank, SlotPrototypeBank
+from rfdetr.sscl.prototype_diagnostics import prototype_geometry, prototype_relation_alignment
 from rfdetr.sscl.prototype_logit import PrototypeLogitCalibrator
 from rfdetr.sscl.semantic_head import SemanticResidual, attach_from_checkpoint
 from rfdetr.sscl.semantic_matrix import (
@@ -66,6 +67,8 @@ __all__ = [
     "BaseClassDistillLoss",
     "PrototypeBank",
     "SlotPrototypeBank",
+    "prototype_geometry",
+    "prototype_relation_alignment",
     "PrototypeLogitCalibrator",
     "ProjectionHead",
     "HardNegMonitor",

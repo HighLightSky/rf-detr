@@ -89,19 +89,30 @@ class TestPositionScore:
         assert proto_logits.dtype == mem.dtype
 
     def test_target_classes_limits_score(self) -> None:
-        """target_classes 限定 proto_score 的 max 集合（同一模块对比）。"""
+        """target_classes 限定位置证据来源，且分数保持有限。"""
         module = _make_module(target_classes=[])  # 全类
         mem = torch.randn(_B, _N, _D)
-        proto_logits, proto_score_all, _ = module.position_score(mem)
+        _, proto_score_all, _ = module.position_score(mem)
         assert proto_score_all.shape == (_B, _N)
         # 限定 [0,1]：临时改 target_classes（同一投影，结果可比）
         module.target_classes = [0, 1]
         _, proto_score_subset, _ = module.position_score(mem)
-        # 与全类 logits 的子集 max 一致（target_classes 限定正确生效）
-        subset_score = proto_logits[..., [0, 1]].max(dim=-1).values
-        assert torch.allclose(proto_score_subset, subset_score, atol=1e-6)
-        # 数学性质：子集 max <= 全类 max
-        assert torch.all(proto_score_subset <= proto_score_all + 1e-6)
+        assert torch.isfinite(proto_score_subset).all()
+        assert not torch.allclose(proto_score_subset, proto_score_all)
+
+    def test_temperature_uses_inverse_scaling(self) -> None:
+        """更小温度应放大分类 logits，但不改变位置 margin 和预测类别。"""
+        module = _init_from_artifacts(_make_module(tau_p=0.1), _make_artifacts())
+        warmer = _init_from_artifacts(_make_module(tau_p=0.2), _make_artifacts())
+        warmer.load_state_dict(module.state_dict(), strict=False)
+        memory = torch.randn(_B, _N, _D)
+
+        logits_cold, score_cold, class_cold = module.position_score(memory)
+        logits_warm, score_warm, class_warm = warmer.position_score(memory)
+
+        assert torch.allclose(logits_cold, logits_warm * 2.0, atol=1e-5)
+        assert torch.allclose(score_cold, score_warm, atol=1e-6)
+        assert torch.equal(class_cold, class_warm)
 
 
 class TestNearIdentity:
@@ -129,6 +140,25 @@ class TestNearIdentity:
         out = module.enhance_content(tgt, selected)
         rel = (out - tgt).norm(dim=-1).mean() / (tgt.norm(dim=-1).mean() + 1e-6)
         assert float(rel) < 0.03
+
+    def test_content_confidence_zero_is_identity(self) -> None:
+        """原型分类无置信度时，即使内容分支开启也不得注入原型方向。"""
+        module = _init_from_artifacts(
+            _make_module(
+                content_enabled=True,
+                gamma_content_init=1.0,
+                gamma_content_max=1.0,
+                warmup_epochs=0.0,
+            ),
+            _make_artifacts(),
+        )
+        tgt = torch.randn(_B, 8, _D)
+        selected = torch.randint(0, _C, (_B, 8))
+        confidence = torch.zeros(_B, 8)
+
+        enhanced = module.enhance_content(tgt, selected, confidence)
+
+        assert torch.equal(enhanced, tgt)
 
     def test_warmup_interpolation(self) -> None:
         """warmup 插值：epoch 0 → init，epoch >= warmup → max。"""
@@ -223,3 +253,19 @@ class TestCollectStats:
         assert float(stats["topk_overlap"].mean()) == pytest.approx(1.0)
         assert stats["selected_class_hist"].shape == (_C,)
         assert all(v.dtype == torch.float32 for v in stats.values())
+
+    def test_overlap_is_set_intersection_not_rank_equality(self) -> None:
+        """top-k 顺序变化但集合相同时，重叠率仍应为 1。"""
+        module = _init_from_artifacts(_make_module(), _make_artifacts())
+        proto_logits = torch.randn(1, 4, _C)
+        linear_logits = torch.randn(1, 4, _C + 1)
+        topk = torch.tensor([[1, 2, 3, 4]])
+        linear_topk = torch.tensor([[4, 3, 2, 1]])
+        selected = torch.randint(0, _C, (1, 4))
+
+        stats = module.collect_stats(proto_logits, linear_logits, topk, linear_topk, selected)
+
+        assert float(stats["topk_overlap"].item()) == pytest.approx(1.0)
+        assert float(stats["proto_selected_ratio"].item()) == pytest.approx(0.0)
+        assert "prototype_offdiag_cos_mean" in stats
+        assert "prototype_effective_rank" in stats
