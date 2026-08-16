@@ -1226,6 +1226,40 @@ class TrainConfig(BaseConfig):
     eval_masks_head_resolution: bool = False
     aug_config: Optional[Dict[str, Any]] = None
     mosaic_p: float = Field(default=0.0, ge=0.0, le=1.0, description="Mosaic 增强触发概率，0 表示关闭。")
+    patch_paste_enabled: bool = Field(
+        default=False,
+        description="正/负样本补丁粘贴增强开关（仅训练侧，默认关闭）。",
+    )
+    patch_paste_dir: PathLikeStr | None = Field(
+        default=None,
+        description="补丁池根目录（含 manifest.json），由 build_fsc_patch_pool.py 生成；"
+        "相对路径自动解析到项目根。",
+    )
+    patch_paste_prob: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="补丁粘贴触发概率（还需宿主图含 target_classes 类才真正粘贴）。",
+    )
+    patch_paste_max_patches: int = Field(
+        default=2,
+        ge=1,
+        description="每图最多粘贴补丁数，实际张数在 [1, max] 均匀采样。",
+    )
+    patch_paste_target_classes: list[int] = Field(
+        default_factory=lambda: [24],
+        description="宿主硬约束：仅含这些类中任一类的训练图才允许粘贴补丁。",
+    )
+    patch_paste_neg_ratio: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="负样本占单图补丁的比例（0=全正样本，1=全负样本）。",
+    )
+    patch_paste_scale_range: tuple[float, float] = Field(
+        default=(0.8, 1.5),
+        description="补丁相对宿主原图的缩放范围（粘贴在原始分辨率上，下游 resize 适配）。",
+    )
     class_balanced_sampling: bool = Field(
         default=False,
         description=(

@@ -360,6 +360,26 @@ class RFDETRDataModule(LightningDataModule):
                 raw_train_dataset = build_dataset("train", ns, resolution)
                 self._enable_raw_cache_if_requested(raw_train_dataset, "train", resolution)
                 self._dataset_train = raw_train_dataset
+                # [PatchPaste] 正/负样本补丁粘贴增强：包在裸数据集内层、mosaic 外层，
+                # 宿主约束必须在原始 detections 上判断（mosaic 合成图会污染判断）。
+                if getattr(self.train_config, "patch_paste_enabled", False):
+                    pool_dir = getattr(self.train_config, "patch_paste_dir", None)
+                    if not pool_dir:
+                        raise ValueError(
+                            "patch_paste_enabled=True 但 patch_paste_dir 未配置"
+                            "（先运行 src/scripts/build_fsc_patch_pool.py 生成补丁池）"
+                        )
+                    from rfdetr.datasets.patch_paste import PatchPasteDataset
+
+                    self._dataset_train = PatchPasteDataset(
+                        self._dataset_train,
+                        manifest_path=Path(pool_dir) / "manifest.json",
+                        p=float(self.train_config.patch_paste_prob),
+                        max_patches=int(self.train_config.patch_paste_max_patches),
+                        target_classes=list(self.train_config.patch_paste_target_classes or []),
+                        neg_ratio=float(self.train_config.patch_paste_neg_ratio),
+                        scale_range=tuple(self.train_config.patch_paste_scale_range),
+                    )
                 # 如果配置了 mosaic 增强，包装训练数据集
                 mosaic_p = getattr(self.train_config, "mosaic_p", 0.0)
                 if mosaic_p > 0:
