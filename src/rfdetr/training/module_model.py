@@ -869,10 +869,29 @@ class RFDETRModelModule(LightningModule):
 
         hn_logits = logits[batch_idx, query_idx][:, class_idx]
         hardest_logit = hn_logits.max(dim=-1).values
+        # [FSC 精准抑制] 按类覆盖 margin/lambda：每个难例取目标类内 argmax 的类别，
+        # 用该类专属的 margin（默认全局值）。给高真阳量类（如 FSC）放宽抑制，
+        # 避免把定位偏差的真阳一起压掉（E4-hard-neg -22pt / +FSC -9pt 教训）。
+        hardest_idx = hn_logits.argmax(dim=-1)  # [K] 索引到 class_idx
+        hardest_class = class_idx[hardest_idx]  # [K] 实际目标类别
+        margins = torch.full(
+            (num_foreground,),
+            float(cfg.sscl_hard_neg_logit_margin),
+            device=logits.device,
+        )
+        for c, m in (cfg.sscl_hard_neg_target_logit_margins or {}).items():
+            if 0 <= int(c) < num_foreground:
+                margins[int(c)] = float(m)
+        margin_q = margins[hardest_class]
+        lambdas = torch.ones(num_foreground, device=logits.device)
+        for c, l in (cfg.sscl_hard_neg_target_loss_lambdas or {}).items():
+            if 0 <= int(c) < num_foreground:
+                lambdas[int(c)] = float(l)
+        lambda_q = lambdas[hardest_class]
         logit_temp = float(cfg.sscl_hard_neg_logit_temperature)
         logit_loss = (
-            F.softplus((hardest_logit - float(cfg.sscl_hard_neg_logit_margin)) / logit_temp).mean() * logit_temp
-        )
+            F.softplus((hardest_logit - margin_q) / logit_temp) * logit_temp * lambda_q
+        ).mean()
 
         proto_loss = logit_loss.new_zeros(())
         if (

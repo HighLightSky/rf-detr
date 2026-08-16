@@ -1423,6 +1423,17 @@ class TrainConfig(BaseConfig):
     """难负样本 logit 抑制损失权重。"""
     sscl_hard_neg_logit_margin: float = -1.5
     """目标前景 logit 的软上界；高于该值的难负样本会被额外惩罚。"""
+    sscl_hard_neg_target_logit_margins: dict[int, float] = Field(
+        default_factory=dict,
+        description="按类覆盖 logit 抑制 margin：{类别: margin}。未列出的类别用 "
+        "``sscl_hard_neg_logit_margin`` 默认值。用于给高真阳量类（如 FSC）单独"
+        "放宽抑制，避免把定位偏差的真阳一起压掉（E4-hard-neg -22pt / +FSC -9pt 教训）。",
+    )
+    sscl_hard_neg_target_loss_lambdas: dict[int, float] = Field(
+        default_factory=dict,
+        description="按类覆盖 logit 抑制权重：{类别: lambda}。未列出的类别用 "
+        "``sscl_hard_neg_loss_lambda`` 默认值（最终损失仍乘 weight_dict 中的全局权重）。",
+    )
     sscl_hard_neg_logit_temperature: float = 1.0
     """难负样本 logit 抑制的 softplus 温度。"""
     sscl_hard_neg_proto_lambda: float = 0.05
@@ -1766,6 +1777,19 @@ class TrainConfig(BaseConfig):
             raise ValueError(
                 f"sscl_hard_neg_start_epoch 必须 >= 0，收到 {self.sscl_hard_neg_start_epoch}。"
             )
+        for c, v in (self.sscl_hard_neg_target_logit_margins or {}).items():
+            if int(c) < 0:
+                raise ValueError(f"sscl_hard_neg_target_logit_margins 含非法类别索引: {c}")
+            if v > 0:
+                raise ValueError(
+                    f"sscl_hard_neg_target_logit_margins 的类别 {c} 取值为 {v}，"
+                    "margin 是 logit 软上界，必须 <= 0"
+                )
+        for c, v in (self.sscl_hard_neg_target_loss_lambdas or {}).items():
+            if int(c) < 0:
+                raise ValueError(f"sscl_hard_neg_target_loss_lambdas 含非法类别索引: {c}")
+            if v < 0:
+                raise ValueError(f"sscl_hard_neg_target_loss_lambdas 的类别 {c} 取值为 {v}，必须 >= 0")
         return self
 
     @model_validator(mode="after")
