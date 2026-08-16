@@ -6,7 +6,7 @@ test:
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
   resolution: 1024
   checkpoint: output/0816-SHWX-ProtoGuidance-E4-hardneg-fsc/checkpoint_best_total.pth
-  output_dir: /tmp/fsc_b_thresh_out
+  output_dir: output/0816-SHWX-ProtoGuidance-E4-hardneg-fsc-thresh
   conf_threshold: 0.25
   class_conf_thresholds: {0: 0.35, 2: 0.30, 3: 0.30, 7: 0.50, 10: 0.55, 16: 0.45, 17: 0.40, 18: 0.60, 22: 0.50}
   device: cuda:0
