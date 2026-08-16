@@ -2,10 +2,10 @@
 # 用法: python src/scripts/test.py -c configs/experiments/test_shwx.yaml
 test:
   dataset: shwx # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-large
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
   resolution: 1024
-  checkpoint: output/0815-SHWX-ProtoGuidance-E4-hard-neg-noMS/checkpoint_best_total.pth
-  output_dir: output/0815-SHWX-ProtoGuidance-E4-hard-neg-noMS-test-large
+  checkpoint: output/0816-SHWX-ProtoGuidance-1024+FSC/checkpoint_best_total.pth
+  output_dir: output/0816-SHWX-ProtoGuidance-1024+FSC
   conf_threshold: 0.25 # 全局置信度阈值
   class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}；可整段贴入 calibrate_thresholds 产物
   device: cuda:0 # 无 CUDA 时自动回退 CPU

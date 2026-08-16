@@ -8,14 +8,14 @@
 model:
   variant: medium # nano/small/medium/large/large_deprecated
   num_classes: 25
-  resolution: 640 # 与既往 medium 实验一致（medium 默认 576，旧脚本显式 640）
+  resolution: 1024 # 与既往 medium 实验一致（medium 默认 576，旧脚本显式 640）
   gradient_checkpointing: true
   freeze_encoder: false # 0805 对比实验证明全量微调更优（ship Recall 0.42 -> 0.80）
 
 train:
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
   dataset_file: yolo
-  output_dir: output/0813-SHWX-rfdetr-medium-baseline-精细标注
+  output_dir: output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024
   epochs: 120
   batch_size: 16
   grad_accum_steps: 4 # 有效 batch = 64（与既往 medium 实验一致）

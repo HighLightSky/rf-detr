@@ -4,10 +4,10 @@
 model:
   variant: medium
   num_classes: 25
-  resolution: 640
+  resolution: 1024
   gradient_checkpointing: true
   # 从不含塌缩 ProtoGuidance 状态的 detector baseline 启动
-  pretrain_weights: output/0813-SHWX-rfdetr-medium-baseline-精细标注/checkpoint_best_total.pth
+  pretrain_weights: output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024/checkpoint_best_total.pth
   # --- 多模态原型引导：全开（位置 + 辅助损失 + 内容增强） ---
   proto_guidance_enabled: true
   proto_guidance_artifacts_path: data/proto_guidance_shwx.pt
@@ -27,8 +27,8 @@ model:
 train:
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
   dataset_file: yolo
-  output_dir: output/0815-SHWX-ProtoGuidance-E4-hard-neg-noMS
-  epochs: 18
+  output_dir: output/0816-SHWX-ProtoGuidance-1024+FSC
+  epochs: 20
   batch_size: 16
   grad_accum_steps: 4
   num_workers: 6
@@ -36,7 +36,7 @@ train:
   lr_encoder: 1e-5
   weight_decay: 1e-4
   clip_max_norm: 0.1
-  lr_drop: 18
+  lr_drop: 16
   warmup_epochs: 0.0
   tensorboard: true
   wandb: false

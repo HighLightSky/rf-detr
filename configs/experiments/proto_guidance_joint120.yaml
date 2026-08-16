@@ -13,7 +13,7 @@
 model:
   variant: medium
   num_classes: 25
-  resolution: 1024
+  resolution: 640
   gradient_checkpointing: true
   freeze_encoder: false
   # --- 多模态原型引导：弱注入全开（位置 + 辅助损失 + 内容） ---
@@ -32,10 +32,11 @@ model:
   proto_guidance_gamma_content_max: 0.3
   proto_guidance_tau_p: 0.2
 
+
 train:
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
   dataset_file: yolo
-  output_dir: output/0815-SHWX-ProtoGuidance-joint120-1024
+  output_dir: output/0815-SHWX-ProtoGuidance-joint120-640
   epochs: 120
   batch_size: 8 # 1024 下 640 的 batch16 按面积比缩到 8；OOM 时降到 6 并调 accum
   grad_accum_steps: 8 # 有效 batch = 64，与 baseline 一致
