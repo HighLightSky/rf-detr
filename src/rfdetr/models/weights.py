@@ -41,6 +41,25 @@ _PE_KEY_SUFFIX = "embeddings.position_embeddings"
 _QUERY_PARAM_SUFFIXES: tuple[str, ...] = ("refpoint_embed.weight", "query_feat.weight")
 
 
+def _pad_query_rows(tensor: Tensor, target_rows: int) -> Tensor:
+    """把 query 参数张量补齐到目标行数（新增槽位随机初始化）。
+
+    Args:
+        tensor: checkpoint 中的 query 参数张量（行数可能少于模型期望）。
+        target_rows: 模型期望的行数（``num_queries * group_detr``）。
+
+    Returns:
+        补齐后的张量：少于目标行数时在末尾追加 ``N(0,1)`` 随机行
+        （与 ``nn.Embedding`` 默认初始化一致，新增槽位由训练重新学习）；
+        已达标时原样返回。
+    """
+    if tensor.shape[0] >= target_rows:
+        return tensor
+    extra = target_rows - tensor.shape[0]
+    random_rows = torch.randn(extra, tensor.shape[1], dtype=tensor.dtype, device=tensor.device)
+    return torch.cat([tensor, random_rows], dim=0)
+
+
 def _slice_query_param_per_group(
     tensor: Tensor,
     ckpt_num_queries: int,
@@ -63,9 +82,11 @@ def _slice_query_param_per_group(
       keep the first ``target_num_queries`` slots of each retained group.
     * ``group_detr`` decrease (``target_group_detr < ckpt_group_detr``) →
       drop tail groups; retained groups stay pretrained.
-    * Either dimension expands, or one shrinks while the other expands →
-      return whatever per-group sub-tensor can be built (``min(target, ckpt)`` along each axis). The result has fewer
-      rows than the model expects, so ``load_state_dict`` will raise a shape mismatch immediately.
+    * Either dimension expands (``num_queries`` 或 ``group_detr`` 增大) →
+      keep the pretrained slots per retained group, and pad the remainder
+      with random rows (``N(0,1)``，与 ``nn.Embedding`` 默认初始化一致) so the
+      result exactly matches the model's expected row count. 新增槽位在训练中
+      重新学习，避免 ``load_state_dict`` 因形状不匹配直接报错。
 
     When the tensor's flat length disagrees with ``ckpt_num_queries * ckpt_group_detr`` (corrupt or unexpected
     checkpoint shape), fall back to the legacy flat slice so loading continues with the same behavior the codebase had
@@ -115,7 +136,11 @@ def _slice_query_param_per_group(
     keep_groups = min(target_group_detr, ckpt_group_detr)
     keep_per_group = min(target_num_queries, ckpt_num_queries)
     pieces = [tensor[g * ckpt_num_queries : g * ckpt_num_queries + keep_per_group] for g in range(keep_groups)]
-    return torch.cat(pieces, dim=0)
+    result = torch.cat(pieces, dim=0)
+    # [query 扩展] 补齐到目标行数（新增槽位随机初始化，见函数 docstring）
+    if result.shape[0] < target_num_queries * target_group_detr:
+        result = _pad_query_rows(result, target_num_queries * target_group_detr)
+    return result
 
 
 def _filter_intentional_keys(keys: list[str]) -> list[str]:
@@ -482,6 +507,19 @@ def load_pretrain_weights(
                 # groups 1+ when num_queries decreases. Legacy checkpoints predate
                 # multi-group training, so in practice they are all group_detr == 1.
                 checkpoint["model"][name] = tensor[: mc.num_queries * mc.group_detr]
+            # [query 扩展] 补齐到模型期望行数（新增槽位随机初始化），
+            # 避免 load_state_dict 对形状不匹配的键抛 RuntimeError。
+            expected_rows = mc.num_queries * mc.group_detr
+            if checkpoint["model"][name].shape[0] < expected_rows:
+                original_rows = checkpoint["model"][name].shape[0]
+                checkpoint["model"][name] = _pad_query_rows(checkpoint["model"][name], expected_rows)
+                logger.warning(
+                    "load_pretrain_weights: query 参数 %s 从 %d 行扩展到 %d 行"
+                    "（num_queries 增大），新增槽位随机初始化。",
+                    name,
+                    original_rows,
+                    expected_rows,
+                )
 
     checkpoint["model"] = remap_projector_to_cross_attn(checkpoint["model"], nn_model)
 

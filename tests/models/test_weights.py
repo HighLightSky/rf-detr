@@ -713,21 +713,49 @@ class TestSliceQueryParamPerGroup:
         tgt_g: int,
         expected_labels: list[int],
     ) -> None:
-        """Min(target, ckpt) along each axis produces the correct per-group prefix."""
+        """Min(target, ckpt) along each axis produces the correct per-group prefix.
+
+        扩展情形（target > ckpt）时保留预训练前缀，行数补齐到 target 形状，
+        断言只检查前缀标签。
+        """
         from rfdetr.models.weights import _slice_query_param_per_group
 
         tensor = _labelled_query_tensor(num_queries=ckpt_nq, group_detr=ckpt_g)
         out = _slice_query_param_per_group(tensor, ckpt_nq, ckpt_g, tgt_nq, tgt_g)
-        assert out[:, 0].int().tolist() == expected_labels
+        assert out.shape == (tgt_nq * tgt_g, 2)
+        assert out[: len(expected_labels), 0].int().tolist() == expected_labels
 
-    def test_num_queries_expansion_returns_smaller_tensor(self):
-        """When target > ckpt, return min-per-group; load_state_dict will reject."""
+    def test_num_queries_expansion_pads_to_target_shape(self):
+        """When target > ckpt, keep pretrained prefix and pad random rows to target shape."""
         from rfdetr.models.weights import _slice_query_param_per_group
 
         tensor = _labelled_query_tensor(num_queries=4, group_detr=3)
         out = _slice_query_param_per_group(tensor, 4, 3, target_num_queries=8, target_group_detr=3)
-        # min(4, 8) = 4 per group, all 3 groups → 12 rows == input length.
-        assert out.shape == (12, 2)
+        # 每组保留前 4 行（标签 0-3/100-103/200-203），补齐到 8×3=24 行。
+        assert out.shape == (24, 2)
+        assert out[:12, 0].int().tolist() == [0, 1, 2, 3, 100, 101, 102, 103, 200, 201, 202, 203]
+        # 补齐行是随机初始化（与 nn.Embedding N(0,1) 一致），有限值。
+        assert torch.isfinite(out[12:]).all()
+
+    def test_group_expansion_pads_to_target_shape(self):
+        """group_detr 增大时同样补齐到目标行数。"""
+        from rfdetr.models.weights import _slice_query_param_per_group
+
+        tensor = _labelled_query_tensor(num_queries=4, group_detr=2)
+        out = _slice_query_param_per_group(tensor, 4, 2, target_num_queries=4, target_group_detr=4)
+        assert out.shape == (16, 2)
+        assert out[:8, 0].int().tolist() == [0, 1, 2, 3, 100, 101, 102, 103]
+
+    def test_pad_query_rows_helper(self):
+        """补齐助手：短张量追加随机行，达标张量原样返回。"""
+        from rfdetr.models.weights import _pad_query_rows
+
+        t = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+        padded = _pad_query_rows(t, 5)
+        assert padded.shape == (5, 2)
+        assert padded[:3].equal(t)
+        assert torch.isfinite(padded[3:]).all()
+        assert _pad_query_rows(t, 3) is t
 
     @pytest.mark.parametrize(
         "ckpt_nq,ckpt_g,tgt_nq,tgt_g",
