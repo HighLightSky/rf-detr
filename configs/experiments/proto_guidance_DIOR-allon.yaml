@@ -1,0 +1,103 @@
+# [ProtoGuidance] DIOR 多模态原型全开实验
+# 目的：在 DIOR-rfdetr 上验证多模态原型（视觉原型 + CLIP 文本原型）是否有用。
+# 配方完全参照 SHWX 最优配方 proto_guidance_E4-hardneg-fsc.yaml，按 DIOR 适配：
+#   - 类别 20 类（0 基索引与基线 checkpoint 一致，见 0726 训练 config class_names）；
+#   - 语义矩阵用"新方法"（CLIP EOS/pooler 表征，commit 65f92bdc）重新生成；
+#   - 易混/难负类根据新矩阵 top 相似对选取，小样本类根据实例数选取。
+# 基线: output/0804重标注之前的实验/0726-DIOR-rfdetr_medium（640 分辨率，20 类）。
+# 用法: python src/scripts/train.py -c configs/experiments/proto_guidance_DIOR-allon.yaml
+model:
+  variant: medium
+  num_classes: 20
+  resolution: 640            # 与基线一致（0726 基线 640），不改变输入分布
+  gradient_checkpointing: true
+  # 从 DIOR 基线（20 类 checkpoint）续训；ProtoGuidance 等新模块零初始化加载（strict=False）
+  pretrain_weights: output/0804重标注之前的实验/0726-DIOR-rfdetr_medium/checkpoint_best_total.pth
+  # --- 多模态原型引导：全开（位置 + 辅助损失 + 内容增强），配方同 E4-hardneg-fsc ---
+  proto_guidance_enabled: true
+  proto_guidance_artifacts_path: data/proto_guidance_dior.pt   # 由 stage0_build_proto_guidance_dior.py 产出
+  proto_guidance_fusion_mode: simple
+  proto_guidance_num_slots: 10
+  proto_guidance_position_enabled: true
+  proto_guidance_content_enabled: true
+  proto_guidance_aux_loss_enabled: true
+  proto_guidance_aux_loss_weight: 1.0
+  proto_guidance_warmup_epochs: 2.0
+  proto_guidance_lambda_pos_init: 0.05
+  proto_guidance_lambda_pos_max: 1.0
+  proto_guidance_gamma_content_init: 0.05
+  proto_guidance_gamma_content_max: 1.0
+  proto_guidance_tau_p: 0.2
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/DIOR-rfdetr
+  dataset_file: roboflow        # DIOR-rfdetr 为 COCO 格式（_annotations.coco.json）
+  output_dir: output/0818-DIOR-ProtoGuidance-allon
+  epochs: 20
+  batch_size: 16
+  grad_accum_steps: 4
+  num_workers: 6
+  lr: 1e-5
+  lr_encoder: 1e-5
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  lr_drop: 16
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 1
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+  class_balanced_sampling: true
+  # DIOR 小样本类（train 实例数最少的 5 类，0 基）：
+  #   9=golffield(237), 17=trainstation(246), 6=dam(252), 8=Expressway-toll-station(292), 14=stadium(293)
+  class_balanced_class_ids: [9, 17, 6, 8, 14]
+
+  # --- FSC 补丁粘贴：SHWX 专有（FSC=发射车 类 24），DIOR 无对应类别，关闭 ---
+  patch_paste_enabled: false
+  patch_paste_dir: data/fsc_patch_pool
+  patch_paste_prob: 0.5
+  patch_paste_max_patches: 2
+  patch_paste_target_classes: [24]
+  patch_paste_neg_ratio: 0.5
+
+  # --- SSCL 配置：沿用 E4 配方（实例级对比，prototype bank 关闭） ---
+  sscl_enabled: true
+  sscl_semantic_matrix_path: data/semantic_matrix_dior.pt   # 新方法（EOS/pooler）重新生成
+  sscl_matrix_normalize: minmax
+  sscl_lambda: 0.02
+  sscl_tau: 0.1
+  sscl_rho: 0.3
+  sscl_omega_max: 2.0
+  # 易混类组（新矩阵 top-4 平均混淆，0 基）：
+  #   12=overpass(0.824), 7=Expressway-Service-area(0.814), 10=groundtrackfield(0.812), 14=stadium(0.806)
+  sscl_anchor_classes: [12, 7, 10, 14]
+  sscl_confusing_classes: [12, 7, 10, 14]
+  sscl_start_epoch: 0
+  sscl_freeze_strategy: conservative
+  sscl_unfreeze_decoder_layers: 2
+  sscl_prototype_enabled: false
+
+  # --- 难负样本抑制：DIOR 高混淆类（矩阵相似对 ≥0.82 涉及的高混淆类） ---
+  sscl_hard_neg_enabled: true
+  sscl_hard_neg_topk: 5
+  sscl_hard_neg_score_thresh: -0.7
+  sscl_hard_neg_log_interval: 100
+  # 12=overpass, 7=Expressway-Service-area, 10=groundtrackfield, 14=stadium
+  sscl_hard_neg_target_classes: [12, 7, 10, 14]
+  sscl_hard_neg_iou_low: 0.0
+  sscl_hard_neg_iou_high: 0.15
+  sscl_hard_neg_loss_lambda: 0.3
+  sscl_hard_neg_logit_margin: -1.5
+  # DIOR 无 FSC 类，不需要逐类覆盖 margin/lambda
+  sscl_hard_neg_logit_temperature: 1.0
+  sscl_hard_neg_proto_lambda: 0.05
+  sscl_hard_neg_proto_margin: 0.1
+  sscl_hard_neg_proto_temperature: 0.1

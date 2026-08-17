@@ -5,7 +5,9 @@
 # ------------------------------------------------------------------------
 """CLIP 类别语义相似度矩阵的构建、保存、加载与验证。
 
-本模块在训练前离线运行：使用 CLIP 文本编码器的 EOS/pooler 表征对每个类别的多个 prompt 编码取平均，得到类别文本向量，再计算两两余弦相似度，构成类别语义相似度矩阵。该矩阵后续用于 SSCL 损失中对易混类别对施加更强的分离约束。
+本模块在训练前离线运行：使用 CLIP 文本编码器的 EOS/pooler 表征对每个类别的
+多个 prompt 编码取平均，得到类别文本向量，再计算两两余弦相似度，构成类别
+语义相似度矩阵。该矩阵后续用于 SSCL 损失中对易混类别对施加更强的分离约束。
 
 CLIP 只参与本模块的离线计算，不参与在线训练或推理。
 """
@@ -13,6 +15,7 @@ CLIP 只参与本模块的离线计算，不参与在线训练或推理。
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -25,21 +28,35 @@ logger = get_logger()
 # 默认 CLIP 模型名称（HuggingFace），首次运行会自动下载权重
 DEFAULT_CLIP_MODEL_NAME = "openai/clip-vit-large-patch14"
 
-# 本机离线缓存的 CLIP 权重路径（网络不可用时的备选；与 build_semantic_matrix.py 一致）
-_LOCAL_CLIP_CACHE_PATH = "/home/liu/wzt/Ruiyingshizong/AeroGen/ckpt/clip/clip-vit-large-patch14"
+# 仓库内 CLIP 权重缓存目录（相对本文件定位仓库根目录，与运行时的 cwd 无关）。
+# 与 build_semantic_matrix.py 的默认 --model 指向一致（data/clip/clip-vit-large-patch14）。
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_LOCAL_CLIP_CACHE_PATH = str(_REPO_ROOT / "data" / "clip" / "clip-vit-large-patch14")
+
+# 旧机器上的遗留缓存路径（仅作兜底；新机器优先使用仓库内 data/clip/ 缓存）
+_LEGACY_CLIP_CACHE_PATH = "/home/liu/wzt/Ruiyingshizong/AeroGen/ckpt/clip/clip-vit-large-patch14"
 
 
 def _resolve_clip_model(model_name: str) -> str:
-    """解析 CLIP 模型：优先使用本地离线缓存路径（若存在）。
+    """解析 CLIP 模型路径：显式本地路径优先，其次仓库内缓存，最后原样返回。
+
+    优先级（均为本地目录时）：
+    1. 调用方显式传入的本地目录路径（如 ``--model data/clip/...``）；
+    2. 仓库内缓存 ``data/clip/clip-vit-large-patch14``（推荐，离线可用）；
+    3. 旧机器遗留缓存路径（兜底，仅旧环境存在）；
+    4. 都不是本地目录时返回 ``model_name`` 原样（交给 HF 下载或报错）。
 
     Args:
         model_name: 调用方传入的模型名或路径。
 
     Returns:
-        本地缓存路径（当它存在时），否则原样返回 ``model_name``。
+        解析后的本地路径；无本地路径可用时原样返回 ``model_name``。
     """
-    if os.path.exists(_LOCAL_CLIP_CACHE_PATH):
-        return _LOCAL_CLIP_CACHE_PATH
+    if os.path.isdir(model_name):
+        return model_name
+    for candidate in (_LOCAL_CLIP_CACHE_PATH, _LEGACY_CLIP_CACHE_PATH):
+        if os.path.isdir(candidate):
+            return candidate
     return model_name
 
 
@@ -84,8 +101,19 @@ def encode_class_text_embeddings(
     from transformers import AutoTokenizer, CLIPModel
 
     logger.info(f"加载 CLIP 模型: {model_name}（设备: {device}）")
-    clip = CLIPModel.from_pretrained(model_name).to(device).eval()
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    try:
+        clip = CLIPModel.from_pretrained(model_name).to(device).eval()
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+    except Exception as exc:
+        raise RuntimeError(
+            "CLIP 模型加载失败！"
+            f"\n  模型路径: {model_name}"
+            f"\n  建议检查：1) 仓库内缓存 {_LOCAL_CLIP_CACHE_PATH} 是否存在且完整"
+            "（可用 build_semantic_matrix.py --model 指定其他本地路径）；"
+            "2) 显式传入的 --model/model_name 路径是否正确；"
+            "3) 若依赖在线下载，请确认网络可用（当前默认离线模式 HF_HUB_OFFLINE=1）。"
+            f"\n  原始错误: {exc}"
+        ) from exc
 
     class_vectors: list[torch.Tensor] = []
     for class_id in sorted(class_prompts.keys()):
