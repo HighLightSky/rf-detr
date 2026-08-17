@@ -288,7 +288,7 @@ top-k 是离散选择——位置分支的梯度若只依赖"改变选择→影�
 
 对 enc 分支 Hungarian 匹配到的前景 token：
 
-$$ \mathcal{L}_{\mathrm{proto}} = \frac{1}{|C_{\mathrm{act}}|} \sum_{c \in C_{\mathrm{act}}} \frac{1}{|\mathcal{M}_c|} \sum_{i \in \mathcal{M}_c} \mathrm{CE}\big( \mathrm{proto\_logits}_i / \tau_p, \; y_i \big) $$
+$$ \mathcal{L}_{\mathrm{proto}} = \frac{1}{|C_{\mathrm{act}}|} \sum_{c \in C_{\mathrm{act}}} \frac{1}{|\mathcal{M}_c|} \sum_{i \in \mathcal{M}_c} \mathrm{CE}\big( \mathrm{proto\_logits}_i, \; y_i \big) $$
 
 - $\mathcal{M}_c$：GT 标签为 $c$ 的匹配 token 集合；$C_{\mathrm{act}}$：当前 batch 出现的
   类别集；
