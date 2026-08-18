@@ -10,3 +10,8 @@ predict:
   output_dir: output/xxxx-SHWX-实验名/predict # 输出 labels/ + visualization/
   image: null # 通常由 --image 命令行提供；也可在此给默认路径
   class_names: shwx # 类别名来源：内置名 shwx/dior，或 {label: 名称} 字典
+  reason_plugin:
+    enabled: false # 默认关闭；仅改为 true 时启用插件
+    checkpoint: null # 插件 checkpoint 路径，例如 output/reason_plugin.pth
+    class_ids: [24] # 需要重打分的类别；null 表示全部类别
+    conf_low: null # 候选框下限；null 使用插件 checkpoint 内置值

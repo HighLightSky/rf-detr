@@ -72,6 +72,11 @@ test:                               # test.py 消费
   batch_size: 32
   num_workers: 12
   output_dir: output/xxx-eval       # 测试输出目录（报告/混淆矩阵/FP·FN）；省略=数据集内置 exp_output_dir
+  reason_plugin:                    # FFT 一致性插件；默认关闭
+    enabled: false                  # true 时普通图和大图裁窗均启用
+    checkpoint: null                # 已训练插件 checkpoint 路径
+    class_ids: [24]                 # 重打分类别；null 表示全部类别
+    conf_low: null                  # 候选框下限；null 使用插件内置值
   la_bias:                          # 推理侧 Logit Adjustment；省略=关闭
     counts_path: output/xxx/class_counts.json
     k: 1.0
@@ -86,6 +91,11 @@ predict:                            # predict.py 消费
   output_dir: output/xxx/predict
   image: null                       # 通常由 --image 提供
   class_names: shwx                 # 内置名 shwx/dior，或 {label: 名称} 字典
+  reason_plugin:                    # FFT 一致性插件，默认关闭
+    enabled: false                  # true 才会加载并执行插件
+    checkpoint: null                # 插件 checkpoint 路径
+    class_ids: [24]                 # 重打分类别；null 表示全部类别
+    conf_low: null                  # 候选框下限；null 使用插件内置值
 ```
 
 ### 透传规则

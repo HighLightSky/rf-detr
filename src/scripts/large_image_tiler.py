@@ -50,6 +50,9 @@ class LargeImageTiler:
         device: 推理设备。
         batch_size: 边界检测器 GPU 批量大小。
         num_workers: 边界检测器预取 worker 数。
+        reason_plugin: 可选的已加载 FFT 一致性插件；用于裁窗目标检测。
+        reason_class_ids: 插件重打分的类别；``None`` 表示全部类别。
+        reason_conf_low: 插件低置信候选下限；``None`` 使用插件内置值。
     """
 
     def __init__(
@@ -66,6 +69,9 @@ class LargeImageTiler:
         device: str = "cuda:0",
         batch_size: int = 8,
         num_workers: int = 4,
+        reason_plugin: Any | None = None,
+        reason_class_ids: tuple[int, ...] | None = None,
+        reason_conf_low: float | None = None,
     ) -> None:
         from rfdetr import RFDETR
 
@@ -80,6 +86,9 @@ class LargeImageTiler:
         self.device = device
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.reason_plugin = reason_plugin
+        self.reason_class_ids = reason_class_ids
+        self.reason_conf_low = reason_conf_low
 
         # nano 边界检测器只加载一次（所有大图共用）
         print(f"[i] 加载大图边界检测器: {self.boundary_checkpoint}")
@@ -168,6 +177,9 @@ class LargeImageTiler:
                 self.detector_model,
                 crops_rgb,
                 self.detector_conf,
+                reason_plugin=self.reason_plugin,
+                reason_class_ids=self.reason_class_ids,
+                reason_conf_low=self.reason_conf_low,
             )
             for det, (crop_x0, crop_y0, _, _) in zip(detections, crop_offsets, strict=False):
                 for xyxy, score, class_id in zip(det.xyxy, det.confidence, det.class_id, strict=False):

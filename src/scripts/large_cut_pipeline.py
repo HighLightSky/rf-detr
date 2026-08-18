@@ -289,13 +289,24 @@ def predict_batched_letterbox(
     return results
 
 
-def infer_detector_on_crops(model, crops_rgb: list[np.ndarray], conf: float) -> list:
+def infer_detector_on_crops(
+    model,
+    crops_rgb: list[np.ndarray],
+    conf: float,
+    *,
+    reason_plugin=None,
+    reason_class_ids: tuple[int, ...] | None = None,
+    reason_conf_low: float | None = None,
+) -> list:
     """对一组裁窗批量运行目标检测器。
 
     Args:
         model: 已加载的 RFDETR 实例（目标检测器，如 SHWX 25 类）。
         crops_rgb: RGB 裁窗列表（任意尺寸，内部自动 resize 到模型分辨率）。
         conf: 置信度阈值。
+        reason_plugin: 可选的已加载 FFT 一致性插件。
+        reason_class_ids: 插件重打分的类别；``None`` 表示全部类别。
+        reason_conf_low: 插件低置信候选下限；``None`` 使用插件内置值。
 
     Returns:
         ``model.predict`` 的 Detections 列表（与 ``crops_rgb`` 一一对应，
@@ -303,7 +314,19 @@ def infer_detector_on_crops(model, crops_rgb: list[np.ndarray], conf: float) -> 
     """
     if not crops_rgb:
         return []
-    detections = model.predict(crops_rgb, threshold=conf, include_source_image=False)
+    predict_kwargs = {
+        "threshold": conf,
+        "include_source_image": False,
+    }
+    if reason_plugin is not None:
+        predict_kwargs.update(
+            {
+                "reason_plugin": reason_plugin,
+                "reason_class_ids": reason_class_ids,
+                "reason_conf_low": reason_conf_low,
+            }
+        )
+    detections = model.predict(crops_rgb, **predict_kwargs)
     if not isinstance(detections, list):
         detections = [detections]
     return detections

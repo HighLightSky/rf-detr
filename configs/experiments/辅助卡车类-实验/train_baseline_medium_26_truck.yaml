@@ -12,8 +12,8 @@ train:
   dataset_file: yolo
   output_dir: output/0818-SHWX-medium-baseline-26class-truck-1024
   epochs: 120
-  batch_size: 32
-  grad_accum_steps: 2
+  batch_size: 16
+  grad_accum_steps: 4
   num_workers: 6
   lr: 1e-4
   lr_encoder: 1.5e-4

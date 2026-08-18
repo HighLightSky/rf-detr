@@ -27,6 +27,11 @@
       output_dir: output/xxx/predict
       image: null              # 通常由 --image 命令行提供
       class_names: shwx        # 内置名 shwx/shwx_truck/dior，或 {label: 名称} 字典
+      reason_plugin:
+        enabled: false         # 默认关闭；开启后才加载插件 checkpoint
+        checkpoint: null       # 插件 checkpoint 路径
+        class_ids: [24]        # 需要重打分的类别；null 表示全部类别
+        conf_low: null         # 候选框下限；null 使用插件 checkpoint 内置值
 """
 
 from __future__ import annotations
@@ -79,6 +84,57 @@ def _resolve_class_names(value) -> dict[int, str]:
     if value == "shwx_truck":
         return {label: SHWX_TRUCK_CLASS_NAMES[cid] for label, cid in enumerate(sorted(SHWX_TRUCK_CLASS_NAMES))}
     return _DEFAULT_CLASS_NAMES
+
+
+def _build_reason_plugin_kwargs(predict_cfg: dict[str, object]) -> dict[str, object]:
+    """根据 ``predict.reason_plugin`` 配置构造模型推理参数。
+
+    插件默认关闭。关闭时返回空字典，确保调用方不会加载插件或改变普通推理流程。
+
+    Args:
+        predict_cfg: yaml ``predict`` 段解析后的配置。
+
+    Returns:
+        可直接展开传给 ``RFDETR.predict`` 的插件参数。
+
+    Raises:
+        ValueError: 插件开启但缺少 checkpoint，或类别/阈值参数格式错误。
+    """
+    raw_config = predict_cfg.get("reason_plugin")
+    if raw_config is None:
+        return {}
+    if not isinstance(raw_config, dict):
+        raise ValueError("predict.reason_plugin 必须是字典配置")
+    if not bool(raw_config.get("enabled", False)):
+        return {}
+
+    checkpoint = raw_config.get("checkpoint")
+    if not checkpoint:
+        raise ValueError("predict.reason_plugin.enabled=true 时必须设置 checkpoint")
+
+    class_ids = raw_config.get("class_ids", [24])
+    if class_ids is not None:
+        if not isinstance(class_ids, (list, tuple)):
+            raise ValueError("predict.reason_plugin.class_ids 必须是整数列表或 null")
+        try:
+            class_ids = tuple(int(class_id) for class_id in class_ids)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("predict.reason_plugin.class_ids 必须只包含整数") from exc
+
+    conf_low = raw_config.get("conf_low")
+    if conf_low is not None:
+        try:
+            conf_low = float(conf_low)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("predict.reason_plugin.conf_low 必须是数字或 null") from exc
+        if not 0.0 <= conf_low <= 1.0:
+            raise ValueError("predict.reason_plugin.conf_low 必须位于 [0, 1]")
+
+    return {
+        "reason_plugin": checkpoint,
+        "reason_class_ids": class_ids,
+        "reason_conf_low": conf_low,
+    }
 
 
 def _parse_args() -> argparse.Namespace:
@@ -229,6 +285,7 @@ def _infer_image(
     model: RFDETR,
     image_path: Path,
     conf_threshold: float,
+    reason_plugin_kwargs: dict[str, object] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, tuple[int, int]]:
     """对单张图片执行推理。
 
@@ -236,6 +293,7 @@ def _infer_image(
         model: 已加载的 RFDETR 实例（任意尺寸，nano/small/medium/large）。
         image_path: 图像路径。
         conf_threshold: 置信度阈值。
+        reason_plugin_kwargs: 已解析的插件参数；为空时关闭插件。
 
     Returns:
         ``(xyxy_array, score_array, class_id_array, image_bgr, (width, height))`` 元组：
@@ -248,7 +306,13 @@ def _infer_image(
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     width, height = image_bgr.shape[1], image_bgr.shape[0]
 
-    detections = model.predict(image_rgb, threshold=conf_threshold, include_source_image=False)
+    predict_kwargs: dict[str, object] = {
+        "threshold": conf_threshold,
+        "include_source_image": False,
+    }
+    if reason_plugin_kwargs:
+        predict_kwargs.update(reason_plugin_kwargs)
+    detections = model.predict(image_rgb, **predict_kwargs)
     if detections is None or len(detections) == 0:
         xyxy_array = np.empty((0, 4), dtype=np.float32)
         score_array = np.empty((0,), dtype=np.float32)
@@ -319,6 +383,9 @@ def main() -> None:
         raise SystemExit("缺少 --image 参数（或 yaml 的 predict.image）: 请输入图片路径或目录")
 
     class_names = _resolve_class_names(predict_cfg.get("class_names", "shwx"))
+    reason_plugin_kwargs = _build_reason_plugin_kwargs(predict_cfg)
+    if reason_plugin_kwargs:
+        print(f"[i] 启用 FFT 一致性插件: {reason_plugin_kwargs['reason_plugin']}")
 
     image_paths = _collect_image_paths(image_arg)
     # 传入的是文件 → 单图模式（详细打印）；传入的是目录 → 批量模式（逐张一行进度）
@@ -335,6 +402,7 @@ def main() -> None:
             model,
             image_path,
             conf_threshold,
+            reason_plugin_kwargs,
         )
         label_path, vis_path = _save_results(
             image_path,

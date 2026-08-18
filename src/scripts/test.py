@@ -29,6 +29,11 @@
       num_workers: 12
       use_fp16: false
       output_dir: output/xxx-eval       # 测试输出目录；省略=数据集内置 exp_output_dir
+      reason_plugin:                    # FFT 一致性插件；省略=关闭
+        enabled: false
+        checkpoint: null
+        class_ids: [24]
+        conf_low: null
       la_bias:                          # 推理侧 LA bias；省略=关闭
         counts_path: output/xxx/class_counts.json
         k: 1.0
@@ -121,6 +126,8 @@ def main() -> None:
         la_fields = {f.name for f in dataclasses.fields(eval_lib.LaBiasCfg)}
         la_bias_cfg = eval_lib.LaBiasCfg(**{k: v for k, v in la_bias_section.items() if k in la_fields})
 
+    reason_plugin_cfg = eval_lib.ReasonPluginCfg.from_config(test_cfg.get("reason_plugin"))
+
     # 大图切分测试配置：边界检测器（nano）只加载一次，大图走裁切推理
     large_image_cfg: eval_lib.LargeImageCfg | None = None
     if test_cfg.get("large_image_min_side") or test_cfg.get("boundary_checkpoint"):
@@ -146,6 +153,7 @@ def main() -> None:
         save_fp_fn=bool(test_cfg.get("save_fp_fn", True)),
         save_yolo_preds=bool(test_cfg.get("save_yolo_preds", False)),
         la_bias=la_bias_cfg,
+        reason_plugin_cfg=reason_plugin_cfg,
         resolution=int(test_cfg["resolution"]) if test_cfg.get("resolution") else None,
         large_image_cfg=large_image_cfg,
     )

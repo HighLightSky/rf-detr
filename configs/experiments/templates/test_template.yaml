@@ -26,6 +26,12 @@ test:
   gpu_util_sample_interval: 0.5
   use_fp16: false # FP16 推理加速（对精度敏感时保持 false）
 
+  reason_plugin: # FFT 一致性插件；默认关闭
+    enabled: false # true 时普通图和大图裁窗均启用
+    checkpoint: null # 已训练插件 checkpoint 路径
+    class_ids: [24] # 重打分类别；null 表示全部类别
+    conf_low: null # 候选框下限；null 使用插件 checkpoint 内置值
+
   # 推理侧 Logit Adjustment（P1 配套，须与训练侧参数一致）
   la_bias: # 省略 / 置 null = 关闭
     counts_path: output/xxxx-SHWX-实验名/class_counts.json

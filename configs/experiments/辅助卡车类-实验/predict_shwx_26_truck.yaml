@@ -6,3 +6,8 @@ predict:
   output_dir: output/0820-SHWX-ProtoGuidance-E4-hardneg-fsc-26class-truck-predict
   image: null
   class_names: shwx_truck
+  reason_plugin:
+    enabled: false
+    checkpoint: null
+    class_ids: [24]
+    conf_low: null

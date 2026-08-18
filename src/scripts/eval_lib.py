@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import cv2
+import numpy as np
 import torch
 import torchvision.transforms.functional as F  # noqa: N812
 from torch.utils.data import DataLoader, Dataset
@@ -274,6 +275,65 @@ class InferenceCfg:
     prefetch_factor: int = 3
     gpu_util_sample_interval: float = 0.5
     use_fp16: bool = False
+
+
+@dataclass(frozen=True)
+class ReasonPluginCfg:
+    """测试侧 FFT 一致性插件配置。
+
+    Attributes:
+        checkpoint: 已训练插件 checkpoint 路径。
+        class_ids: 需要重打分的类别；``None`` 表示全部类别。
+        conf_low: 低置信候选下限；``None`` 使用 checkpoint 内置值。
+    """
+
+    checkpoint: str | Path
+    class_ids: tuple[int, ...] | None = (24,)
+    conf_low: float | None = None
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any] | None) -> ReasonPluginCfg | None:
+        """解析 ``test.reason_plugin`` 配置；未配置或关闭时返回 ``None``。
+
+        Args:
+            config: yaml 中的插件配置段。
+
+        Returns:
+            启用后的插件配置，或 ``None``。
+
+        Raises:
+            ValueError: 配置类型、checkpoint、类别或阈值不合法。
+        """
+        if config is None:
+            return None
+        if not isinstance(config, Mapping):
+            raise ValueError("test.reason_plugin 必须是字典配置")
+        if not bool(config.get("enabled", False)):
+            return None
+
+        checkpoint = config.get("checkpoint")
+        if not checkpoint:
+            raise ValueError("test.reason_plugin.enabled=true 时必须设置 checkpoint")
+
+        class_ids = config.get("class_ids", [24])
+        if class_ids is not None:
+            if not isinstance(class_ids, (list, tuple)):
+                raise ValueError("test.reason_plugin.class_ids 必须是整数列表或 null")
+            try:
+                class_ids = tuple(int(class_id) for class_id in class_ids)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("test.reason_plugin.class_ids 必须只包含整数") from exc
+
+        conf_low = config.get("conf_low")
+        if conf_low is not None:
+            try:
+                conf_low = float(conf_low)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("test.reason_plugin.conf_low 必须是数字或 null") from exc
+            if not 0.0 <= conf_low <= 1.0:
+                raise ValueError("test.reason_plugin.conf_low 必须位于 [0, 1]")
+
+        return cls(checkpoint=checkpoint, class_ids=class_ids, conf_low=conf_low)
 
 
 @dataclass
@@ -875,6 +935,77 @@ class _GpuUtilMonitor:
         return sum(self._samples) / len(self._samples)
 
 
+def _rescore_reason_candidates(
+    reason_plugin: Any,
+    class_embed_weight: torch.Tensor,
+    class_names: list[str],
+    source_image: np.ndarray,
+    boxes: np.ndarray,
+    scores: np.ndarray,
+    class_ids: np.ndarray,
+    conf_threshold: float,
+    class_conf_thresholds: Mapping[int, float] | None,
+    device: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """在最终阈值筛选前，对批量推理的一张图执行插件重打分。
+
+    不同类别可能设置不同阈值，因此按最终阈值将插件目标类别分组。每组只修改
+    对应类别的候选分数，其他类别保持基线分数，随后由调用方统一执行逐类筛选。
+
+    Args:
+        reason_plugin: 已加载的 FFT 一致性插件。
+        class_embed_weight: 冻结检测器的类别嵌入矩阵。
+        class_names: 按类别索引排序的类别名称。
+        source_image: 当前图像的原始 RGB uint8 数组。
+        boxes: 候选框像素坐标数组。
+        scores: 候选框置信度数组。
+        class_ids: 候选类别数组。
+        conf_threshold: 默认最终置信度阈值。
+        class_conf_thresholds: 可选逐类阈值表。
+        device: 插件推理设备。
+
+    Returns:
+        保持原候选顺序的 ``(boxes, scores, class_ids)``；仅目标类别的低分
+        候选分数可能被修改。
+    """
+    if boxes.size == 0:
+        return boxes, scores, class_ids
+
+    configured_ids = reason_plugin.config.reason_class_ids
+    present_ids = {int(class_id) for class_id in class_ids}
+    target_ids = present_ids if configured_ids is None else present_ids.intersection(configured_ids)
+    if not target_ids:
+        return boxes, scores, class_ids
+
+    adjusted_scores = scores.astype(np.float32, copy=True)
+    threshold_groups: dict[float, list[int]] = {}
+    for class_id in target_ids:
+        threshold = (
+            float(class_conf_thresholds.get(class_id, conf_threshold)) if class_conf_thresholds else conf_threshold
+        )
+        threshold_groups.setdefault(threshold, []).append(class_id)
+
+    for target_conf, grouped_ids in threshold_groups.items():
+        out_boxes, out_scores, out_class_ids = reason_plugin.predict_detections(
+            source_image=source_image,
+            candidate_boxes=boxes,
+            candidate_scores=adjusted_scores,
+            candidate_classes=class_ids,
+            class_names=class_names,
+            class_embed_weight=class_embed_weight,
+            device=device,
+            target_conf=target_conf,
+            reason_class_ids=tuple(grouped_ids),
+            filter_final=False,
+        )
+        if out_boxes.shape != boxes.shape or not np.array_equal(out_class_ids, class_ids):
+            raise RuntimeError("reason_plugin 在未筛选模式下必须保持候选框顺序与类别不变")
+        group_mask = np.isin(class_ids, grouped_ids)
+        adjusted_scores[group_mask] = out_scores[group_mask]
+
+    return boxes, adjusted_scores, class_ids
+
+
 def predict_batched_to_records(
     model: RFDETR,
     image_paths: list[Path],
@@ -889,6 +1020,9 @@ def predict_batched_to_records(
     prefetch_factor: int = 3,
     gpu_util_sample_interval: float = 0.5,
     use_fp16: bool = False,
+    reason_plugin: Any | None = None,
+    reason_class_embed: torch.Tensor | None = None,
+    reason_class_names: list[str] | None = None,
 ) -> tuple[list[BoxRecord], float, float | None, int]:
     """批量流水线推理：多进程预取解码 + GPU 批量前向，返回预测框与测速结果。
 
@@ -922,6 +1056,9 @@ def predict_batched_to_records(
         prefetch_factor: 每个 worker 在内存中预取的数据批数。
         gpu_util_sample_interval: 后台采样 GPU 利用率的时间间隔（秒）。
         use_fp16: 用 FP16 张量核加速推理。
+        reason_plugin: 可选的已加载 FFT 一致性插件；``None`` 时保持普通批量推理。
+        reason_class_embed: 插件交叉注意力使用的冻结检测器类别嵌入矩阵。
+        reason_class_names: 按类别索引排序的名称，用于插件调用。
 
     Returns:
         ``(pred_records, steady_throughput, gpu_util, timed_images)``：
@@ -929,6 +1066,8 @@ def predict_batched_to_records(
         （img/s）；``gpu_util`` 为推理期间 GPU 平均利用率（%），采样失败时为
         ``None``；``timed_images`` 为参与稳态计时（剔除预热批）的图像数。
     """
+    if reason_plugin is not None and (reason_class_embed is None or reason_class_names is None):
+        raise ValueError("reason_plugin 需要 reason_class_embed 和 reason_class_names")
     resolution = int(model.model.resolution)
 
     # [分类损失均衡化] 可选推理侧 LA bias：由 class_counts.json 按训练侧同配方
@@ -1013,7 +1152,39 @@ def predict_batched_to_records(
             results = model.model.postprocess(predictions, target_sizes=target_sizes)
 
             # 收集预测框（每张测试图只推理一遍，全部收集）
-            for stem, result in zip(stems, results):
+            for stem, rgb_tensor, result in zip(stems, rgb_tensors, results):
+                if reason_plugin is not None:
+                    source_image = np.ascontiguousarray(rgb_tensor.permute(1, 2, 0).numpy())
+                    boxes, scores, class_ids = _rescore_reason_candidates(
+                        reason_plugin,
+                        reason_class_embed,
+                        reason_class_names,
+                        source_image,
+                        result["boxes"].float().cpu().numpy(),
+                        result["scores"].float().cpu().numpy(),
+                        result["labels"].long().cpu().numpy(),
+                        conf_threshold,
+                        class_conf_thresholds,
+                        device,
+                    )
+                    per_class_thr = np.asarray(
+                        [class_conf_thresholds.get(int(label), conf_threshold) for label in class_ids]
+                        if class_conf_thresholds
+                        else conf_threshold,
+                        dtype=np.float32,
+                    )
+                    keep = scores > per_class_thr
+                    for xyxy, class_id, score in zip(boxes[keep], class_ids[keep], scores[keep]):
+                        pred_records.append(
+                            BoxRecord(
+                                image_id=stem,
+                                class_id=int(class_id),
+                                xyxy=tuple(float(v) for v in xyxy),
+                                score=float(score),
+                            )
+                        )
+                    continue
+
                 # 逐类阈值：命中 class_conf_thresholds 的类用类阈值，否则回退全局阈值
                 if class_conf_thresholds:
                     per_class_thr = torch.tensor(
@@ -1100,6 +1271,7 @@ def run_evaluation(
     save_fp_fn: bool = True,
     save_yolo_preds: bool = False,
     la_bias: LaBiasCfg | None = None,
+    reason_plugin_cfg: ReasonPluginCfg | None = None,
     resolution: int | None = None,
     large_image_cfg: LargeImageCfg | None = None,
 ) -> None:
@@ -1116,6 +1288,7 @@ def run_evaluation(
         save_fp_fn: 是否保存 FP/FN 可视化。
         save_yolo_preds: 是否输出 YOLO 格式预测框（每图一个 txt，供归因脚本使用）。
         la_bias: 推理侧 LA bias 配置（``None`` 表示不生效）。
+        reason_plugin_cfg: FFT 一致性插件配置；``None`` 时保持普通测试流程。
         resolution: 可选：推理输入分辨率。构造参数优先于 checkpoint 记录的
             ``model_config``（例如 nano 以 704 训练时强制 704 推理）；
             ``None`` 用 checkpoint 记录的分辨率。
@@ -1178,6 +1351,44 @@ def run_evaluation(
     attach_from_checkpoint(model.model.model, _ckpt_sd.get("model", _ckpt_sd))
     del _ckpt_sd
 
+    # 插件在完整评测中只加载一次。批量普通图与大图裁窗共用同一实例，避免重复
+    # 读取 checkpoint；插件始终使用 float32，以兼容其内部 FFT 与频域 MLP。
+    reason_plugin = None
+    reason_class_embed: torch.Tensor | None = None
+    reason_class_names: list[str] | None = None
+    if reason_plugin_cfg is not None:
+        from rfdetr.reasoning import PluginLoader
+
+        plugin_path = Path(reason_plugin_cfg.checkpoint)
+        if not plugin_path.exists():
+            raise FileNotFoundError(f"reason_plugin checkpoint 不存在: {plugin_path}")
+        reason_plugin = PluginLoader.load(plugin_path)
+        if reason_plugin.num_classes != dataset.num_classes:
+            raise ValueError(
+                "reason_plugin 的 num_classes 与测试数据集不一致: "
+                f"{reason_plugin.num_classes} != {dataset.num_classes}"
+            )
+        reason_plugin.config.reason_class_ids = reason_plugin_cfg.class_ids
+        if reason_plugin_cfg.conf_low is not None:
+            reason_plugin.config.conf_low = reason_plugin_cfg.conf_low
+        reason_plugin = reason_plugin.to(device).float().eval()
+        class_embed = getattr(model.model.model, "class_embed", None)
+        if class_embed is None or not hasattr(class_embed, "weight"):
+            raise RuntimeError("reason_plugin 需要检测器的 class_embed.weight")
+        reason_class_embed = class_embed.weight.detach().to(device=device, dtype=torch.float32)
+        decoder_layers = getattr(getattr(reason_plugin, "decoder", None), "layers", ())
+        expected_kv_dim = getattr(decoder_layers[0], "kv_dim", None) if decoder_layers else None
+        if expected_kv_dim is not None and reason_class_embed.shape[1] != expected_kv_dim:
+            raise ValueError(
+                "reason_plugin checkpoint expects class embeddings with width "
+                f"{expected_kv_dim}, but the detector provides {reason_class_embed.shape[1]}"
+            )
+        reason_class_names = [dataset.class_names[class_id] for class_id in range(dataset.num_classes)]
+        print(
+            f"[i] 启用 FFT 一致性插件: {plugin_path} "
+            f"（class_ids={reason_plugin.config.reason_class_ids}, conf_low={reason_plugin.config.conf_low}）"
+        )
+
     # ── 推理分流：小图整图批量推理；大图走 nano 切分流程（nano 只加载一次）──
     large_image_stats: dict[str, float] | None = None
     crop_boxes_by_image: dict[str, list[tuple[float, float, float, float]]] = {}
@@ -1198,6 +1409,9 @@ def run_evaluation(
                 prefetch_factor=infer.prefetch_factor,
                 gpu_util_sample_interval=infer.gpu_util_sample_interval,
                 use_fp16=infer.use_fp16,
+                reason_plugin=reason_plugin,
+                reason_class_embed=reason_class_embed,
+                reason_class_names=reason_class_names,
             )
         else:
             small_records, throughput, gpu_util, timed_images = [], 0.0, None, 0
@@ -1216,6 +1430,9 @@ def run_evaluation(
             device=device,
             batch_size=large_image_cfg.batch_size,
             num_workers=large_image_cfg.num_workers,
+            reason_plugin=reason_plugin,
+            reason_class_ids=reason_plugin.config.reason_class_ids if reason_plugin is not None else None,
+            reason_conf_low=reason_plugin.config.conf_low if reason_plugin is not None else None,
         )
         large_records, per_image_seconds, crop_boxes_by_image = tiler.predict(large_paths)
         pred_records = small_records + large_records
@@ -1243,6 +1460,9 @@ def run_evaluation(
             prefetch_factor=infer.prefetch_factor,
             gpu_util_sample_interval=infer.gpu_util_sample_interval,
             use_fp16=infer.use_fp16,
+            reason_plugin=reason_plugin,
+            reason_class_embed=reason_class_embed,
+            reason_class_names=reason_class_names,
         )
     del model
     release_cuda_cache(device)

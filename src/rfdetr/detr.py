@@ -49,6 +49,8 @@ from rfdetr.utilities.logger import get_logger
 if TYPE_CHECKING:
     from supervision import Detections, KeyPoints
 
+    from rfdetr.reasoning.plugin import ConsistencyReasonPlugin
+
 try:
     torch.set_float32_matmul_precision("high")
 except Exception:
@@ -405,6 +407,7 @@ class RFDETR:
         self._optimized_dtype: torch.dtype | None = None
         self._optimized_inplace = False
         self._has_been_trained = False
+        self._reason_plugin_cache: dict[str, ConsistencyReasonPlugin] = {}
 
     def maybe_download_pretrain_weights(self) -> None:
         """Download pre-trained weights if they are not already downloaded.
@@ -2071,6 +2074,9 @@ class RFDETR:
         shape: tuple[int, int] | None = None,
         patch_size: int | None = None,
         include_source_image: bool = True,
+        reason_plugin: str | Path | ConsistencyReasonPlugin | None = None,
+        reason_class_ids: tuple[int, ...] | None = (24,),
+        reason_conf_low: float | None = None,
         **kwargs: Any,
     ) -> Detections | KeyPoints | list[Detections | KeyPoints]:
         """Performs model inference on the input images.
@@ -2119,6 +2125,14 @@ class RFDETR:
             ``source_shape`` as per-object arrays. When ``include_source_image=True`` for keypoint models,
             ``source_image`` is stored as per-object data until Supervision exposes collection-level metadata for
             ``KeyPoints``.
+            reason_plugin:
+                已训练 FFT 一致性插件 checkpoint 的可选路径，或已加载的插件对象。
+                插件仅支持检测任务，并在 RF-DETR 前向后执行。
+            reason_class_ids:
+                需要由插件重打分的低置信候选类别。默认为 mask04 插件使用的 FSC
+                类别 ``(24,)``；传入 ``None`` 时处理全部类别。
+            reason_conf_low:
+                插件收集候选框的低置信度下限；默认使用插件配置。
 
         Note:
             For ``Detections`` outputs, ``source_image`` moved from ``detections.data`` to ``detections.metadata``.
@@ -2163,6 +2177,44 @@ class RFDETR:
 
         self._ensure_eval_mode_for_unoptimized_inference()
 
+        reason_module: ConsistencyReasonPlugin | None = None
+        reason_class_embed: torch.Tensor | None = None
+        if reason_plugin is not None:
+            if self._is_optimized_for_inference or self.model.model is None:
+                raise RuntimeError("reason_plugin requires an unoptimized RF-DETR model")
+            from rfdetr.reasoning import PluginLoader
+
+            if isinstance(reason_plugin, (str, Path)):
+                plugin_path = str(reason_plugin)
+                cache = getattr(self, "_reason_plugin_cache", {})
+                reason_module = cache.get(plugin_path)
+                if reason_module is None:
+                    reason_module = PluginLoader.load(plugin_path)
+                    cache[plugin_path] = reason_module
+                    self._reason_plugin_cache = cache
+            else:
+                reason_module = reason_plugin
+            reason_module.config.reason_class_ids = None if reason_class_ids is None else tuple(reason_class_ids)
+            if reason_conf_low is not None:
+                if not 0.0 <= reason_conf_low <= 1.0:
+                    raise ValueError(f"reason_conf_low must be in [0, 1], got {reason_conf_low}")
+                reason_module.config.conf_low = reason_conf_low
+            reason_module = reason_module.to(self.model.device)
+            if hasattr(reason_module, "float"):
+                reason_module = reason_module.float()
+            class_embed = getattr(self.model.model, "class_embed", None)
+            if class_embed is None or not hasattr(class_embed, "weight"):
+                raise RuntimeError("reason_plugin requires the detector class_embed.weight")
+            reason_class_embed = class_embed.weight.detach().to(device=self.model.device, dtype=torch.float32)
+            decoder = getattr(reason_module, "decoder", None)
+            decoder_layers = getattr(decoder, "layers", ())
+            expected_kv_dim = getattr(decoder_layers[0], "kv_dim", None) if decoder_layers else None
+            if expected_kv_dim is not None and reason_class_embed.shape[1] != expected_kv_dim:
+                raise ValueError(
+                    "reason_plugin checkpoint expects class embeddings with width "
+                    f"{expected_kv_dim}, but the detector provides {reason_class_embed.shape[1]}"
+                )
+
         # Determine the return shape from the *input* type, not the runtime batch
         # length: a single image (path / PIL / tensor) yields a bare Detections,
         # while a list/tuple always yields a list — even when it holds one image.
@@ -2172,7 +2224,7 @@ class RFDETR:
 
         orig_sizes: list[Any] = []
         processed_images: list[Any] = []
-        source_images: list[Any] | None = [] if include_source_image else None
+        source_images: list[Any] | None = [] if (include_source_image or reason_module is not None) else None
 
         for img_input in images:
             img: Any = img_input
@@ -2191,13 +2243,13 @@ class RFDETR:
                 # the channel dimension is the caller's responsibility.
                 if isinstance(img, Image.Image) and img.mode != "RGB":
                     img = img.convert("RGB")
-                if include_source_image:
+                if source_images is not None:
                     src = np.array(img)
                     if src.dtype != np.uint8:
                         src = (src * 255).clip(0, 255).astype(np.uint8)
                     source_images.append(src)  # type: ignore[union-attr]
                 img = F.to_tensor(img)
-            elif include_source_image:
+            elif source_images is not None:
                 source_images.append(  # type: ignore[union-attr]
                     (img.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
                 )
@@ -2327,6 +2379,36 @@ class RFDETR:
             scores = result["scores"]
             labels = result["labels"]
             boxes = result["boxes"]
+
+            if reason_module is not None:
+                if "masks" in result or "keypoints" in result:
+                    raise ValueError("reason_plugin is currently supported for detection models only")
+                source_image = source_images[i] if source_images is not None else None
+                if source_image is None or reason_class_embed is None:
+                    raise RuntimeError("reason_plugin requires the original source image and class embeddings")
+                candidate_boxes = boxes.float().cpu().numpy()
+                candidate_scores = scores.float().cpu().numpy()
+                candidate_classes = labels.long().cpu().numpy()
+                if candidate_classes.size and (
+                    candidate_classes.min() < 0 or candidate_classes.max() >= reason_class_embed.shape[0]
+                ):
+                    raise ValueError(
+                        "reason_plugin received class IDs outside detector class_embed.weight; "
+                        "check the checkpoint class ordering"
+                    )
+                candidate_boxes, candidate_scores, candidate_classes = reason_module.predict_detections(
+                    source_image=source_image,
+                    candidate_boxes=candidate_boxes,
+                    candidate_scores=candidate_scores,
+                    candidate_classes=candidate_classes,
+                    class_names=model_class_names,
+                    class_embed_weight=reason_class_embed,
+                    device=str(self.model.device),
+                    target_conf=threshold,
+                )
+                boxes = torch.from_numpy(candidate_boxes).to(self.model.device)
+                scores = torch.from_numpy(candidate_scores).to(self.model.device)
+                labels = torch.from_numpy(candidate_classes).to(self.model.device)
 
             keep = scores > threshold
             scores = scores[keep]
