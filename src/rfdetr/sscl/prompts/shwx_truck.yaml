@@ -1,0 +1,13 @@
+# SHWX 26 类实验的提示词覆盖层。
+# 继承 shwx.yaml 的 0-24 类，仅新增 25: truck，避免改动旧 25 类实验。
+dataset: SHWX_TRUCK
+base_dataset: shwx
+
+class_names:
+  25: truck
+
+class_prompts:
+  25:
+    - "a wheeled military cargo truck with a cab and an empty rear cargo bed, no missile launch tubes or launcher rack, overhead satellite view"
+    - "a non-launcher military logistics truck with a boxy chassis and a plain flatbed, viewed from above in remote sensing imagery"
+    - "a standard military transport truck carrying cargo on its rear bed, without any erector launcher, missile canisters, or launch frame, top-down aerial image"

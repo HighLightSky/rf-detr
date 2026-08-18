@@ -2,7 +2,8 @@
 # 用法: python src/scripts/test.py -c configs/experiments/test_dior.yaml
 test:
   dataset: dior # eval_lib.DATASET_CONFIGS 内置名
-  checkpoint: output/0804-DIOR-rfdetr_medium_SSCL/checkpoint_best_regular.pth
+  checkpoint: output/0818-DIOR-ProtoGuidance-allon/checkpoint_best_total.pth
+  output_dir: output/0818-DIOR-ProtoGuidance-allon
   conf_threshold: 0.25
   class_conf_thresholds: {}
   device: cuda:0
@@ -10,5 +11,5 @@ test:
   num_workers: 12
   use_fp16: false
   # DIOR 无分类损失均衡化实验，la_bias 关闭
-  save_fp_fn: true
+  save_fp_fn: false
   save_yolo_preds: false

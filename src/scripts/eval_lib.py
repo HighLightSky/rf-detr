@@ -54,7 +54,11 @@ if str(SRC_DIR) not in sys.path:
 
 # 类别名称统一来自 sscl/prompts/*.yaml，保证与语义矩阵的类别索引一致
 from rfdetr import RFDETR  # noqa: E402
-from rfdetr.sscl.prompts import DIOR_CLASS_NAMES, SHWX_CLASS_NAMES  # noqa: E402
+from rfdetr.sscl.prompts import (  # noqa: E402
+    DIOR_CLASS_NAMES,
+    SHWX_CLASS_NAMES,
+    SHWX_TRUCK_CLASS_NAMES,
+)
 from val.competition_metrics import (  # noqa: E402
     BoxRecord,
     EvalConfig,
@@ -109,8 +113,27 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         },
         "group_iou_thresholds": {"ship": 0.50, "aircraft": 0.50, "vehicle": 0.35},
     },
+    "shwx_truck": {
+        "data_dir": "/home/liu/wzt/datasets/SHWX-dataset-dict-redo-truck",
+        "image_dir": "images/test",
+        "label_format": "yolo",
+        "label_dir": "labels/test",
+        "exp_output_dir": "output/0820-SHWX-26class-truck-eval",
+        "checkpoint_file": "checkpoint_best_total.pth",
+        "num_classes": 26,
+        "vehicle_class_ids": {24, 25},  # FSC 与普通军用卡车均按车辆 IoU=0.35
+        "class_names": _label_keyed_names(SHWX_TRUCK_CLASS_NAMES),
+        # 26 类实验：舰船 0-3、飞机 4-23、车辆 24-25。
+        "class_to_group": {
+            **{class_id: "ship" for class_id in range(0, 4)},
+            **{class_id: "aircraft" for class_id in range(4, 24)},
+            24: "vehicle",
+            25: "vehicle",
+        },
+        "group_iou_thresholds": {"ship": 0.50, "aircraft": 0.50, "vehicle": 0.35},
+    },
     "dior": {
-        "data_dir": "/home/liu/datasets/DIOR-rfdetr",
+        "data_dir": "/home/liu/wzt/datasets/DIOR-rfdetr",
         "image_dir": "test",
         "label_format": "coco",
         "annotation_file": "test/_annotations.coco.json",

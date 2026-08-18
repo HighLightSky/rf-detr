@@ -19,6 +19,7 @@
 
 类别索引与各数据集标注中的 ``class_id`` 保持一致：
 - SHWX: 0-24（见 shwx.yaml）。
+- SHWX_TRUCK: 0-25（见 shwx_truck.yaml，继承 SHWX 并新增 truck）。
 - DIOR: 1-20（见 dior.yaml，与 COCO 标注中的 category id 一致）。
 """
 
@@ -70,8 +71,22 @@ def load_class_prompts(dataset: str) -> tuple[dict[int, str], dict[int, list[str
     if "class_names" not in data or "class_prompts" not in data:
         raise ValueError(f"提示词 YAML 必须包含 class_names 与 class_prompts 字段: {yaml_path}")
 
-    class_names = _coerce_int_keys(data["class_names"])
-    class_prompts = _coerce_int_keys(data["class_prompts"])
+    base_dataset = data.get("base_dataset")
+    if base_dataset:
+        base_names, base_prompts = load_class_prompts(str(base_dataset))
+        class_names = dict(base_names)
+        class_prompts = dict(base_prompts)
+    else:
+        class_names = {}
+        class_prompts = {}
+
+    if "class_names" in data:
+        class_names.update(_coerce_int_keys(data["class_names"]))
+    if "class_prompts" in data:
+        class_prompts.update(_coerce_int_keys(data["class_prompts"]))
+
+    if not class_names or not class_prompts:
+        raise ValueError(f"提示词 YAML 必须包含 class_names 与 class_prompts 字段: {yaml_path}")
 
     # 两个字段的类别索引必须完全一致
     if set(class_names.keys()) != set(class_prompts.keys()):
@@ -88,11 +103,14 @@ def load_class_prompts(dataset: str) -> tuple[dict[int, str], dict[int, list[str
 
 # 模块加载时从对应 YAML 读取各数据集提示词，保持向后兼容
 SHWX_CLASS_NAMES, SHWX_CLASS_PROMPTS = load_class_prompts("shwx")
+SHWX_TRUCK_CLASS_NAMES, SHWX_TRUCK_CLASS_PROMPTS = load_class_prompts("shwx_truck")
 DIOR_CLASS_NAMES, DIOR_CLASS_PROMPTS = load_class_prompts("dior")
 
 __all__ = [
     "SHWX_CLASS_NAMES",
     "SHWX_CLASS_PROMPTS",
+    "SHWX_TRUCK_CLASS_NAMES",
+    "SHWX_TRUCK_CLASS_PROMPTS",
     "DIOR_CLASS_NAMES",
     "DIOR_CLASS_PROMPTS",
     "load_class_prompts",

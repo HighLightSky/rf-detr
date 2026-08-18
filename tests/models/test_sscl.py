@@ -24,7 +24,12 @@ from rfdetr.sscl import (
     normalize_semantic_matrix,
     save_semantic_matrix,
 )
-from rfdetr.sscl.prompts import SHWX_CLASS_NAMES, SHWX_CLASS_PROMPTS
+from rfdetr.sscl.prompts import (
+    SHWX_CLASS_NAMES,
+    SHWX_CLASS_PROMPTS,
+    SHWX_TRUCK_CLASS_NAMES,
+    SHWX_TRUCK_CLASS_PROMPTS,
+)
 
 # 5 类测试用语义相似度矩阵（模拟舰船内部高相似、跨大类低相似）
 _SEMANTIC_MATRIX = torch.tensor(
@@ -206,3 +211,10 @@ class TestPrompts:
         """舰船类提示词应包含甲板/船体等形态关键词。"""
         ship_prompts = SHWX_CLASS_PROMPTS[0] + SHWX_CLASS_PROMPTS[1]
         assert any("deck" in p for p in ship_prompts)
+
+    def test_shwx_truck_adds_class_25(self) -> None:
+        """26 类提示词应保留原类别并为 truck 提供非空提示词。"""
+        assert len(SHWX_TRUCK_CLASS_NAMES) == 26
+        assert set(SHWX_TRUCK_CLASS_NAMES) == set(range(26))
+        assert len(SHWX_TRUCK_CLASS_PROMPTS[25]) >= 2
+        assert all("truck" in prompt.lower() for prompt in SHWX_TRUCK_CLASS_PROMPTS[25])

@@ -28,6 +28,7 @@ CLIP 对遥感提示词（``sscl/prompts/shwx.yaml``）编码取平均，保持�
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import torch
@@ -35,7 +36,7 @@ import torch.nn.functional as F  # noqa: N812 -- 项目约定别名（见 AGENTS
 from tqdm.auto import tqdm  # 注意：必须用 tqdm.auto，不能用 from tqdm import tqdm
 
 from rfdetr.datasets.aug_configs import AUG_AERIAL
-from rfdetr.sscl.prompts import SHWX_CLASS_NAMES, SHWX_CLASS_PROMPTS
+from rfdetr.sscl.prompts import load_class_prompts
 from rfdetr.sscl.proto_guidance.artifacts import save_proto_artifacts
 from rfdetr.sscl.semantic_matrix import encode_class_text_embeddings
 from rfdetr.training import RFDETRDataModule
@@ -45,20 +46,26 @@ from rfdetr.variants import RFDETRMedium
 # 配置 —— 在这里修改
 # ============================================================================
 
-# 与训练配方一致的 backbone checkpoint（已适配 SHWX 的骨干/projector 权重）
+# 以下配置可通过环境变量覆盖，默认值保持旧 25 类实验行为。
+PROTO_DATASET = os.environ.get("RFDETR_PROTO_DATASET", "shwx")
 BASE_CHECKPOINT = str(
-    Path("output/0813-SHWX-rfdetr-medium-baseline-精细标注/checkpoint_best_total.pth").resolve()
+    Path(
+        os.environ.get(
+            "RFDETR_PROTO_CHECKPOINT",
+            "output/0813-SHWX-rfdetr-medium-baseline-精细标注/checkpoint_best_total.pth",
+        )
+    ).resolve()
 )
 
 # SHWX 数据集（YOLO 布局；与 configs/experiments/*.yaml 的 dataset_dir 一致）
 DATASET_DIR = "/home/liu/wzt/datasets/SHWX-dataset-dict-redo"
 DATASET_FILE = "yolo"
 
-NUM_CLASSES = 25
-RESOLUTION = 640
-BATCH_SIZE = 16
-NUM_WORKERS = 8
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+NUM_CLASSES = int(os.environ.get("RFDETR_PROTO_NUM_CLASSES", "25"))
+RESOLUTION = int(os.environ.get("RFDETR_PROTO_RESOLUTION", "640"))
+BATCH_SIZE = int(os.environ.get("RFDETR_PROTO_BATCH_SIZE", "16"))
+NUM_WORKERS = int(os.environ.get("RFDETR_PROTO_NUM_WORKERS", "8"))
+DEVICE = os.environ.get("RFDETR_PROTO_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 
 # 每类视觉子原型槽位数 M（与 proto_guidance_num_slots 配置一致）
 NUM_SLOTS = 10
@@ -66,7 +73,21 @@ NUM_SLOTS = 10
 CLUSTER_ITERS = 20
 
 # 输出路径（训练配置 proto_guidance_artifacts_path 引用该文件）
-OUTPUT_FILE = str(Path("data/proto_guidance_shwx.pt").resolve())
+OUTPUT_FILE = str(
+    Path(
+        os.environ.get(
+            "RFDETR_PROTO_OUTPUT",
+            f"data/proto_guidance_{PROTO_DATASET}.pt",
+        )
+    ).resolve()
+)
+
+CLASS_NAMES, CLASS_PROMPTS = load_class_prompts(PROTO_DATASET)
+if len(CLASS_NAMES) != NUM_CLASSES or set(CLASS_NAMES) != set(range(NUM_CLASSES)):
+    raise ValueError(
+        f"提示词类别与 NUM_CLASSES 不一致: dataset={PROTO_DATASET!r}, "
+        f"类别={sorted(CLASS_NAMES)}, NUM_CLASSES={NUM_CLASSES}"
+    )
 
 
 def _cluster_slots(
@@ -174,15 +195,15 @@ def main() -> None:
         centroids, valid = _cluster_slots(class_features, NUM_SLOTS)
         visual_prototypes[class_id] = centroids
         valid_slots[class_id] = valid
-        print(f"  类别 {class_id} ({SHWX_CLASS_NAMES.get(class_id, '?')}): "
+        print(f"  类别 {class_id} ({CLASS_NAMES.get(class_id, '?')}): "
               f"{class_features.shape[0]} 个实例 -> {int(valid.sum())} 个槽位")
 
     # 文本原型：CLIP 对遥感提示词编码取平均（多 prompt 平均，768 维不归一化）
     print("编码 CLIP 文本原型 ...")
-    text_prototypes = encode_class_text_embeddings(SHWX_CLASS_PROMPTS, device=DEVICE)
+    text_prototypes = encode_class_text_embeddings(CLASS_PROMPTS, device=DEVICE)
 
     meta = {
-        "dataset": "shwx",
+        "dataset": PROTO_DATASET,
         "num_classes": NUM_CLASSES,
         "hidden_dim": int(d),
         "text_dim": int(text_prototypes.shape[1]),
@@ -192,7 +213,7 @@ def main() -> None:
         "cluster_iters": CLUSTER_ITERS,
         "note": "视觉原型: backbone/projector P4 特征 + GT box masked avg pool + 余弦 k-means",
     }
-    class_names = [SHWX_CLASS_NAMES.get(c, f"c{c}") for c in range(NUM_CLASSES)]
+    class_names = [CLASS_NAMES.get(c, f"c{c}") for c in range(NUM_CLASSES)]
     save_proto_artifacts(
         OUTPUT_FILE,
         visual_prototypes=visual_prototypes,

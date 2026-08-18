@@ -1,0 +1,8 @@
+# 26 类 truck 推理配置。
+# 用法：python src/scripts/predict.py -c configs/experiments/predict_shwx_26_truck.yaml --image <图片或目录>
+predict:
+  checkpoint: output/0820-SHWX-ProtoGuidance-E4-hardneg-fsc-26class-truck/checkpoint_best_total.pth
+  conf: 0.25
+  output_dir: output/0820-SHWX-ProtoGuidance-E4-hardneg-fsc-26class-truck-predict
+  image: null
+  class_names: shwx_truck

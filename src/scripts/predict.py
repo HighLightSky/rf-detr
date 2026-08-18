@@ -26,7 +26,7 @@
       conf: 0.25
       output_dir: output/xxx/predict
       image: null              # 通常由 --image 命令行提供
-      class_names: shwx        # 内置名 shwx/dior，或 {label: 名称} 字典
+      class_names: shwx        # 内置名 shwx/shwx_truck/dior，或 {label: 名称} 字典
 """
 
 from __future__ import annotations
@@ -45,7 +45,11 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from rfdetr import RFDETR  # noqa: E402
-from rfdetr.sscl.prompts import DIOR_CLASS_NAMES, SHWX_CLASS_NAMES  # noqa: E402
+from rfdetr.sscl.prompts import (  # noqa: E402
+    DIOR_CLASS_NAMES,
+    SHWX_CLASS_NAMES,
+    SHWX_TRUCK_CLASS_NAMES,
+)
 from scripts import expcfg  # noqa: E402
 
 # 缺省配置（不传 -c 时使用，保持向后兼容）
@@ -60,7 +64,7 @@ _DEFAULT_CLASS_NAMES: dict[int, str] = {
 
 
 def _resolve_class_names(value) -> dict[int, str]:
-    """解析类别名配置：内置名（shwx/dior）或 ``{label: 名称}`` 字典。
+    """解析类别名配置：内置名（shwx/shwx_truck/dior）或 ``{label: 名称}`` 字典。
 
     Args:
         value: yaml ``predict.class_names`` 的值（``"shwx"``/``"dior"``/字典/省略）。
@@ -72,6 +76,8 @@ def _resolve_class_names(value) -> dict[int, str]:
         return {int(k): str(v) for k, v in value.items()}
     if value == "dior":
         return {label: DIOR_CLASS_NAMES[cid] for label, cid in enumerate(sorted(DIOR_CLASS_NAMES))}
+    if value == "shwx_truck":
+        return {label: SHWX_TRUCK_CLASS_NAMES[cid] for label, cid in enumerate(sorted(SHWX_TRUCK_CLASS_NAMES))}
     return _DEFAULT_CLASS_NAMES
 
 
