@@ -33,6 +33,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F  # noqa: N812 -- 项目约定别名（见 AGENTS.md）
+import yaml
 from tqdm.auto import tqdm  # 注意：必须用 tqdm.auto，不能用 from tqdm import tqdm
 
 from rfdetr.datasets.aug_configs import AUG_AERIAL
@@ -58,7 +59,10 @@ BASE_CHECKPOINT = str(
 )
 
 # SHWX 数据集（YOLO 布局；与 configs/experiments/*.yaml 的 dataset_dir 一致）
-DATASET_DIR = "/home/liu/wzt/datasets/SHWX-dataset-dict-redo"
+DATASET_DIR = os.environ.get(
+    "RFDETR_PROTO_DATASET_DIR",
+    "/home/liu/wzt/datasets/SHWX-dataset-dict-redo",
+)
 DATASET_FILE = "yolo"
 
 NUM_CLASSES = int(os.environ.get("RFDETR_PROTO_NUM_CLASSES", "25"))
@@ -127,9 +131,28 @@ def _cluster_slots(
     return centroids, valid
 
 
+def _validate_dataset_num_classes() -> None:
+    """在 CUDA 前校验数据集类别数，避免标签错误表现为设备端断言。"""
+    data_yaml_path = Path(DATASET_DIR) / "data.yaml"
+    if not data_yaml_path.is_file():
+        raise FileNotFoundError(f"数据集配置不存在: {data_yaml_path}")
+    with data_yaml_path.open(encoding="utf-8") as file:
+        data_config = yaml.safe_load(file)
+    if not isinstance(data_config, dict):
+        raise ValueError(f"数据集配置必须是映射: {data_yaml_path}")
+    dataset_num_classes = data_config.get("nc")
+    if dataset_num_classes != NUM_CLASSES:
+        raise ValueError(
+            f"数据集类别数与原型配置不一致: data.yaml nc={dataset_num_classes}, "
+            f"NUM_CLASSES={NUM_CLASSES}, DATASET_DIR={DATASET_DIR}"
+        )
+
+
 def main() -> None:
     """执行视觉原型提取、文本原型编码与产物保存。"""
+    _validate_dataset_num_classes()
     print(f"加载 backbone checkpoint: {BASE_CHECKPOINT}")
+    print(f"原型数据集目录: {DATASET_DIR}")
     model = RFDETRMedium(
         num_classes=NUM_CLASSES,
         resolution=RESOLUTION,

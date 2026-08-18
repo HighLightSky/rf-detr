@@ -1,11 +1,11 @@
-# 26 类 truck 诊断评测：FSC=24，truck=25，二者均按车辆 IoU=0.35。
+# 26 类 truck 诊断评测：FSC=24 参与车辆/总指标，truck=25 仅显示逐类指标。
 # 用法：python src/scripts/test.py -c configs/experiments/test_shwx_26_truck.yaml
 test:
   dataset: shwx_truck
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-truck
   resolution: 1024
   checkpoint: output/0820-SHWX-ProtoGuidance-E4-hardneg-fsc-26class-truck/checkpoint_best_total.pth
-  output_dir: output/0820-SHWX-ProtoGuidance-E4-hardneg-fsc-26class-truck-eval
+  output_dir: output/0820-SHWX-ProtoGuidance-E4-hardneg-fsc-26class-truck
   conf_threshold: 0.25
   class_conf_thresholds: {}
   device: cuda:0
@@ -15,4 +15,4 @@ test:
   gpu_util_sample_interval: 0.5
   use_fp16: false
   save_fp_fn: true
-  save_yolo_preds: true
+  save_yolo_preds: false

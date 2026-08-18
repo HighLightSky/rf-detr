@@ -105,6 +105,7 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         "checkpoint_file": "checkpoint_best_total.pth",
         "num_classes": 25,
         "vehicle_class_ids": {24},  # FSC 发射车，比赛规则按车辆目标 IoU=0.35
+        "metric_excluded_class_ids": set(),
         "class_names": _label_keyed_names(SHWX_CLASS_NAMES),
         # 大类分组：25 类 → 3 个大类（舰船/飞机/车辆）
         "class_to_group": {
@@ -122,7 +123,8 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         "exp_output_dir": "output/0820-SHWX-26class-truck-eval",
         "checkpoint_file": "checkpoint_best_total.pth",
         "num_classes": 26,
-        "vehicle_class_ids": {24, 25},  # FSC 与普通军用卡车均按车辆 IoU=0.35
+        "vehicle_class_ids": {24},  # 车辆类指标只保留 FSC，truck 采用常规 IoU=0.50
+        "metric_excluded_class_ids": {25},  # truck 只作辅助类别，不进入大类/总指标
         "class_names": _label_keyed_names(SHWX_TRUCK_CLASS_NAMES),
         # 26 类实验：舰船 0-3、飞机 4-23、车辆 24-25。
         "class_to_group": {
@@ -142,6 +144,7 @@ DATASET_CONFIGS: dict[str, dict[str, Any]] = {
         "checkpoint_file": "checkpoint_best_regular.pth",
         "num_classes": 20,
         "vehicle_class_ids": set(),  # DIOR 无比赛特殊 IoU 规则，全部按 0.50
+        "metric_excluded_class_ids": set(),
         "class_names": _label_keyed_names(DIOR_CLASS_NAMES),
         # DIOR 无舰船/飞机/车辆大类分组，所有类别归为单组 "all"
         "class_to_group": {class_id: "all" for class_id in range(20)},
@@ -165,6 +168,7 @@ class DatasetCfg:
         checkpoint_file: 默认 checkpoint 相对文件名。
         num_classes: 类别数。
         vehicle_class_ids: 车辆类别 id 集合（比赛规则按 IoU=0.35）。
+        metric_excluded_class_ids: 不参与大类与总指标计算的辅助类别 ID 集合。
         class_names: ``{label: 名称}`` 映射。
         class_to_group: ``{类别 id: 大类名}`` 映射。
         group_iou_thresholds: ``{大类名: IoU 阈值}`` 映射。
@@ -182,6 +186,7 @@ class DatasetCfg:
     checkpoint_file: str
     num_classes: int
     vehicle_class_ids: frozenset[int]
+    metric_excluded_class_ids: frozenset[int]
     class_names: dict[int, str]
     class_to_group: dict[int, str]
     group_iou_thresholds: dict[str, float]
@@ -241,6 +246,7 @@ def build_dataset_cfg(
         checkpoint_file=cfg["checkpoint_file"],
         num_classes=cfg["num_classes"],
         vehicle_class_ids=frozenset(cfg["vehicle_class_ids"]),
+        metric_excluded_class_ids=frozenset(cfg.get("metric_excluded_class_ids", set())),
         class_names=class_names,
         class_to_group=class_to_group,
         group_iou_thresholds=cfg["group_iou_thresholds"],
@@ -677,6 +683,38 @@ def compute_total_metrics(group_macro: Mapping[str, Mapping[str, float]]) -> dic
     return {key: sum(group[key] for group in group_macro.values()) / num_groups for key in metric_keys}
 
 
+def filter_auxiliary_metric_records(
+    records: list[BoxRecord],
+    excluded_class_ids: frozenset[int],
+) -> list[BoxRecord]:
+    """过滤不参与大类和总指标计算的辅助类别记录。
+
+    Args:
+        records: 原始真实框或预测框记录。
+        excluded_class_ids: 辅助类别 ID 集合。
+
+    Returns:
+        去除辅助类别后的记录列表；逐类指标、混淆矩阵和 FP/FN 分析仍使用原始列表。
+    """
+    return [record for record in records if record.class_id not in excluded_class_ids]
+
+
+def build_metric_class_to_group(dataset: DatasetCfg) -> dict[int, str]:
+    """构建排除辅助类别后的大类映射。
+
+    Args:
+        dataset: 数据集评测配置。
+
+    Returns:
+        仅包含参与大类 macro 与总指标计算类别的分组映射。
+    """
+    return {
+        class_id: group_name
+        for class_id, group_name in dataset.class_to_group.items()
+        if class_id not in dataset.metric_excluded_class_ids
+    }
+
+
 def build_test_report(
     *,
     dataset_name: str,
@@ -693,6 +731,7 @@ def build_test_report(
     per_class_results: dict[str, EvalResult | dict[str, EvalResult]],
     dataset: DatasetCfg,
     infer: InferenceCfg,
+    test_resolution: int | None = None,
     large_errors_dir: Path | None = None,
     large_image_stats: dict[str, float] | None = None,
 ) -> list[str]:
@@ -713,6 +752,7 @@ def build_test_report(
         per_class_results: 细粒度逐类评估结果。
         dataset: 数据集配置。
         infer: 推理参数。
+        test_resolution: 实际生效的测试输入分辨率。
         large_errors_dir: 大图错误可视化目录；非 ``None`` 时写入报告。
         large_image_stats: 大图切分目标检测的耗时统计（``count``/``avg``/
             ``max``/``total``，秒）；非 ``None`` 时写入报告。
@@ -732,9 +772,17 @@ def build_test_report(
             f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"数据集: {dataset_name}",
             f"权重: {checkpoint_path}",
+            f"测试分辨率: {test_resolution if test_resolution is not None else '未记录'}",
+            f"数据集目录: {dataset.data_dir}",
             sep,
         ]
     )
+    if dataset.metric_excluded_class_ids:
+        excluded_names = "，".join(
+            f"{dataset.class_names.get(class_id, str(class_id))}({class_id})"
+            for class_id in sorted(dataset.metric_excluded_class_ids)
+        )
+        report_lines.append(f"大类与总指标排除的辅助类别: {excluded_names}")
 
     # ── 测试数据概况 ────────────────────────────────────────────────
     report_lines.extend(
@@ -1342,6 +1390,7 @@ def run_evaluation(
         ckpt_kwargs["resolution"] = resolution
         print(f"[i] 推理分辨率覆盖为: {resolution}")
     model = RFDETR.from_checkpoint(str(checkpoint_path), **ckpt_kwargs)
+    test_resolution = int(model.model.resolution)
     print(f"[i] 已加载模型: {type(model).__name__} | 分辨率: {int(model.model.resolution)}")
     # [SemHead] 若 checkpoint 含语义头权重（语义分类头实验），重建语义残差模块，
     # 保证离线推理与训练前向一致（from_checkpoint 不经过 module_model 的装配逻辑）。
@@ -1494,7 +1543,10 @@ def run_evaluation(
         default_iou_threshold=0.50,
         class_aware=True,
     )
-    eval_results = evaluate_competition_metrics(gt_records, pred_records, config)
+    metric_excluded_ids = dataset.metric_excluded_class_ids
+    metric_gt_records = filter_auxiliary_metric_records(gt_records, metric_excluded_ids)
+    metric_pred_records = filter_auxiliary_metric_records(pred_records, metric_excluded_ids)
+    eval_results = evaluate_competition_metrics(metric_gt_records, metric_pred_records, config)
 
     print("=" * 80)
     print("比赛指标评估结果（测试集）")
@@ -1502,6 +1554,12 @@ def run_evaluation(
     print(f"测试图像数: {len(test_image_paths)}")
     print(f"真实框数: {len(gt_records)}")
     print(f"预测框数: {len(pred_records)}")
+    if metric_excluded_ids:
+        excluded_names = "，".join(
+            f"{dataset.class_names.get(class_id, str(class_id))}({class_id})"
+            for class_id in sorted(metric_excluded_ids)
+        )
+        print(f"大类与总指标排除的辅助类别: {excluded_names}")
     print(f"置信度阈值: {infer.conf_threshold}")
     if infer.class_conf_thresholds:
         print(
@@ -1542,7 +1600,7 @@ def run_evaluation(
     # ── 每个大类下小类指标的平均值（macro 平均）与总指标 ──────────────
     group_macro = compute_group_macro_averages(
         per_class_results["groups"],
-        dataset.class_to_group,
+        build_metric_class_to_group(dataset),
         dataset.class_names,
     )
     total_macro = compute_total_metrics(group_macro)
@@ -1621,6 +1679,7 @@ def run_evaluation(
         per_class_results=per_class_results,
         dataset=dataset,
         infer=infer,
+        test_resolution=test_resolution,
         large_errors_dir=large_errors_dir,
         large_image_stats=large_image_stats,
     )

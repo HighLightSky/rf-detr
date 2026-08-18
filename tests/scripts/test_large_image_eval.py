@@ -90,3 +90,58 @@ def test_build_test_report_includes_large_image_timing(tmp_path: Path) -> None:
         large_image_stats={"count": 4.0, "avg": 1.25, "max": 2.0, "total": 5.0},
     )
     assert any("大图目标检测" in line and "平均 1.25s" in line and "最大 2.00s" in line for line in lines)
+
+
+def test_truck_is_excluded_from_group_macro_but_retained_per_class(tmp_path: Path) -> None:
+    """truck 仅显示逐类指标，不参与车辆大类和总指标。"""
+    dataset = eval_lib.build_dataset_cfg("shwx_truck", root=tmp_path)
+    assert dataset.vehicle_class_ids == frozenset({24})
+    records = [
+        eval_lib.BoxRecord("image", 24, (0.0, 0.0, 1.0, 1.0)),
+        eval_lib.BoxRecord("image", 25, (0.0, 0.0, 1.0, 1.0)),
+    ]
+    metric_records = eval_lib.filter_auxiliary_metric_records(records, dataset.metric_excluded_class_ids)
+    assert [record.class_id for record in metric_records] == [24]
+
+    per_class_results = {
+        "FSC": eval_lib.EvalResult(tp=1, fp=0, fn=0),
+        "truck": eval_lib.EvalResult(tp=0, fp=10, fn=0),
+    }
+    group_macro = eval_lib.compute_group_macro_averages(
+        per_class_results,
+        eval_lib.build_metric_class_to_group(dataset),
+        dataset.class_names,
+    )
+    assert group_macro["vehicle"]["avg_fp"] == 0.0
+
+
+def test_truck_report_records_resolution_dataset_and_exclusion(tmp_path: Path) -> None:
+    """26 类报告应记录实际分辨率、数据集目录和辅助类别排除规则。"""
+    dataset = eval_lib.build_dataset_cfg("shwx_truck", root=tmp_path)
+    lines = eval_lib.build_test_report(
+        dataset_name="shwx_truck",
+        checkpoint_path=Path("/tmp/ckpt.pth"),
+        test_image_paths=[],
+        gt_records=[],
+        pred_records=[],
+        throughput=1.0,
+        timed_images=1,
+        gpu_util=None,
+        eval_results={"all": eval_lib.EvalResult(0, 0, 0), "groups": {}},
+        group_macro={},
+        total_macro={
+            "avg_tp": 0.0,
+            "avg_fp": 0.0,
+            "avg_fn": 0.0,
+            "recall": 0.0,
+            "fdr": 0.0,
+            "precision": 0.0,
+        },
+        per_class_results={"groups": {}},
+        dataset=dataset,
+        infer=eval_lib.InferenceCfg(),
+        test_resolution=1024,
+    )
+    assert "测试分辨率: 1024" in lines
+    assert f"数据集目录: {dataset.data_dir}" in lines
+    assert "大类与总指标排除的辅助类别: truck(25)" in lines
