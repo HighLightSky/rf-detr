@@ -109,6 +109,43 @@ def _write_route_audit(manifest: Any, output_path: Path) -> dict[str, Any]:
     return payload
 
 
+def _save_fp_fn_visualizations(
+    dataset: eval_lib.DatasetCfg,
+    gt_records: list[eval_lib.BoxRecord],
+    pred_records: list[eval_lib.BoxRecord],
+    test_image_paths: list[Path],
+    output_dir: Path,
+    *,
+    save_fp_fn: bool,
+) -> None:
+    """按统一比赛匹配口径保存合并预测的 FP/FN 对照图。"""
+    if not save_fp_fn:
+        return
+    print("[i] 正在生成双模型合并结果的 FP/FN 可视化...")
+    fp_dir = output_dir / "FP"
+    fn_dir = output_dir / "FN"
+    eval_lib.clear_vis_dirs(fp_dir, fn_dir, dataset.class_names)
+    fp_images, fn_images, fp_boxes, fn_boxes, tp_preds = eval_lib.match_per_image_per_class(
+        gt_records,
+        pred_records,
+        dataset.num_classes,
+        dataset.vehicle_class_ids,
+    )
+    eval_lib.save_fp_fn_visualizations(
+        fp_images,
+        fn_images,
+        fp_boxes,
+        fn_boxes,
+        tp_preds,
+        gt_records,
+        test_image_paths,
+        dataset.class_names,
+        fp_dir,
+        fn_dir,
+    )
+    print("[完成] 双模型 FP/FN 可视化保存完成")
+
+
 def main() -> None:
     """加载双模型、按模态推理并生成统一比赛报告。"""
     args = _parse_args()
@@ -158,6 +195,14 @@ def main() -> None:
     total_macro = eval_lib.compute_total_metrics(group_macro)
     output_dir.mkdir(parents=True, exist_ok=True)
     audit = _write_route_audit(manifest, output_dir / "route_audit.json")
+    _save_fp_fn_visualizations(
+        dataset,
+        gt_records,
+        pred_records,
+        test_image_paths,
+        output_dir,
+        save_fp_fn=bool(section.get("save_fp_fn", True)),
+    )
 
     cm = eval_lib.build_confusion_matrix(
         gt_records=gt_records,

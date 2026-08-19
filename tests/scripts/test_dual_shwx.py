@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from PIL import Image
 import pytest
 
+from scripts import eval_lib, test_dual_shwx
 from scripts.dual_shwx import PAN_CLASSES, RGB_CLASSES, prepare_dual_dataset
 
 
@@ -88,3 +90,33 @@ def test_public_class_sets_are_disjoint_and_complete() -> None:
     """验证双模型类别集合覆盖 SHWX 25 类且无交集。"""
     assert set(PAN_CLASSES).isdisjoint(RGB_CLASSES)
     assert set(PAN_CLASSES) | set(RGB_CLASSES) == set(range(25))
+
+
+def test_merged_predictions_save_fp_fn_visualizations(tmp_path: Path) -> None:
+    """验证合并后的全局类别预测复用统一的 FP/FN 可视化。"""
+    image_path = tmp_path / "sample.jpg"
+    _write_image(image_path, (80, 80, 80))
+    output_dir = tmp_path / "output"
+    dataset = SimpleNamespace(
+        num_classes=1,
+        vehicle_class_ids=frozenset(),
+        class_names={0: "target"},
+    )
+    gt_records = [
+        eval_lib.BoxRecord("sample", 0, (1.0, 1.0, 3.0, 3.0)),
+    ]
+    pred_records = [
+        eval_lib.BoxRecord("sample", 0, (5.0, 5.0, 7.0, 7.0), 0.9),
+    ]
+
+    test_dual_shwx._save_fp_fn_visualizations(
+        dataset,
+        gt_records,
+        pred_records,
+        [image_path],
+        output_dir,
+        save_fp_fn=True,
+    )
+
+    assert (output_dir / "FP" / "target" / "sample.jpg").exists()
+    assert (output_dir / "FN" / "target" / "sample.jpg").exists()
