@@ -24,7 +24,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 import torch.nn.functional as F  # noqa: N812 -- 项目约定别名（见 AGENTS.md）
@@ -48,7 +48,7 @@ logger = get_logger()
 # 采样节流区间默认值（与 semantic_monitor_log_interval 同量级）
 DEFAULT_MONITOR_INTERVAL = 100
 
-# margin 标准差相对线性 objectness 的目标比例；给 top-k 留出稳定主干。
+# 默认只注入小比例 residual；具体实验可通过配置显式扫描。
 POSITION_SCORE_STD_RATIO = 0.1
 
 
@@ -115,6 +115,10 @@ class ProtoGuidance(nn.Module):
         visual_ema_momentum: float = 0.99,
         slot_reduction: Literal["max", "lse"] = "max",
         slot_reduction_tau: float = 0.1,
+        position_score_mode: Literal["margin", "foreground", "foreground_semantic"] = "margin",
+        foreground_enabled: bool = False,
+        position_score_std_ratio: float = POSITION_SCORE_STD_RATIO,
+        position_semantic_weight: float = 0.5,
     ) -> None:
         super().__init__()
         if num_classes < 1:
@@ -129,6 +133,13 @@ class ProtoGuidance(nn.Module):
             raise ValueError(f"slot_reduction 必须是 'max' 或 'lse'，收到 {slot_reduction!r}。")
         if slot_reduction_tau <= 0.0:
             raise ValueError(f"slot_reduction_tau 必须 > 0，收到 {slot_reduction_tau}。")
+        if position_score_mode not in {"margin", "foreground", "foreground_semantic"}:
+            raise ValueError(
+                "position_score_mode 必须是 'margin'、'foreground' 或 "
+                f"'foreground_semantic'，收到 {position_score_mode!r}。"
+            )
+        if position_score_std_ratio <= 0.0:
+            raise ValueError(f"position_score_std_ratio 必须 > 0，收到 {position_score_std_ratio}。")
 
         self.num_classes = num_classes
         self.hidden_dim = hidden_dim
@@ -144,6 +155,10 @@ class ProtoGuidance(nn.Module):
         self.visual_ema_update = bool(visual_ema_update)
         self.slot_reduction = slot_reduction
         self.slot_reduction_tau = float(slot_reduction_tau)
+        self.position_score_mode = position_score_mode
+        self.foreground_enabled = bool(foreground_enabled)
+        self.position_score_std_ratio = float(position_score_std_ratio)
+        self.position_semantic_weight = float(position_semantic_weight)
 
         self.target_classes = sorted(
             {int(c) for c in (target_classes or []) if 0 <= int(c) < num_classes}
@@ -166,6 +181,12 @@ class ProtoGuidance(nn.Module):
             w_v_init=w_v_init,
             w_t_init=w_t_init,
         )
+        # 独立前景头只负责判断 token 是否属于目标区域，不把背景压进任一语义类别。
+        self.foreground_head = nn.Linear(hidden_dim, 1)
+        nn.init.zeros_(self.foreground_head.bias)
+        if not (self.foreground_enabled or self.position_score_mode == "foreground"):
+            for parameter in self.foreground_head.parameters():
+                parameter.requires_grad = False
         # 内容增强 gate：MLP([tgt, ctx]) -> 标量，bias 初始 logit(gate_bias_init)
         self.gate_mlp = nn.Sequential(
             nn.Linear(2 * hidden_dim, hidden_dim),
@@ -217,6 +238,10 @@ class ProtoGuidance(nn.Module):
         visual_ema_momentum: float = 0.99,
         slot_reduction: Literal["max", "lse"] = "max",
         slot_reduction_tau: float = 0.1,
+        position_score_mode: Literal["margin", "foreground", "foreground_semantic"] = "margin",
+        foreground_enabled: bool = False,
+        position_score_std_ratio: float = POSITION_SCORE_STD_RATIO,
+        position_semantic_weight: float = 0.5,
     ) -> ProtoGuidance | None:
         """构建模块并加载离线原型产物。
 
@@ -231,9 +256,8 @@ class ProtoGuidance(nn.Module):
             ``ProtoGuidance`` 实例，或产物不可用时返回 ``None``。
         """
         try:
-            data = load_proto_artifacts(artifacts_path)
-            data = validate_proto_artifacts(
-                data,
+            data = cls._load_validated_artifacts(
+                artifacts_path,
                 num_classes=num_classes,
                 hidden_dim=hidden_dim,
                 text_dim=text_dim,
@@ -267,18 +291,108 @@ class ProtoGuidance(nn.Module):
             visual_ema_momentum=visual_ema_momentum,
             slot_reduction=slot_reduction,
             slot_reduction_tau=slot_reduction_tau,
+            position_score_mode=position_score_mode,
+            foreground_enabled=foreground_enabled,
+            position_score_std_ratio=position_score_std_ratio,
+            position_semantic_weight=position_semantic_weight,
         )
-        module.visual_bank.prototypes.copy_(data["visual_prototypes"])
-        module.visual_bank.slot_valid_mask.copy_(data["valid_slots"])
-        # 有效槽位计数置 1（标识已初始化，供 get_normalized_* 等接口判断）
-        module.visual_bank.slot_num_updates.masked_fill_(data["valid_slots"], 1)
-        module.visual_bank.num_updates.fill_(1)
-        module.P_t_clip.copy_(data["text_prototypes"])
+        module._copy_artifact_buffers(data)
+        module._log_artifacts_loaded(artifacts_path, data)
+        return module
+
+    @staticmethod
+    def _load_validated_artifacts(
+        artifacts_path: str | Path,
+        *,
+        num_classes: int,
+        hidden_dim: int,
+        text_dim: int,
+    ) -> dict[str, Any]:
+        """加载并校验离线原型产物。"""
+        data = load_proto_artifacts(artifacts_path)
+        return validate_proto_artifacts(
+            data,
+            num_classes=num_classes,
+            hidden_dim=hidden_dim,
+            text_dim=text_dim,
+        )
+
+    def _copy_artifact_buffers(self, data: dict[str, Any]) -> None:
+        """将已校验产物复制到模块 buffer，并校验槽位数量。"""
+        visual_prototypes = data["visual_prototypes"]
+        valid_slots = data["valid_slots"]
+        text_prototypes = data["text_prototypes"]
+        if visual_prototypes.shape != self.visual_bank.prototypes.shape:
+            raise ValueError(
+                "原型槽位数与当前 ProtoGuidance 不一致："
+                f"期望 {tuple(self.visual_bank.prototypes.shape)}，"
+                f"收到 {tuple(visual_prototypes.shape)}。"
+            )
+        if valid_slots.shape != self.visual_bank.slot_valid_mask.shape:
+            raise ValueError(
+                "有效槽位掩码形状与当前 ProtoGuidance 不一致："
+                f"期望 {tuple(self.visual_bank.slot_valid_mask.shape)}，"
+                f"收到 {tuple(valid_slots.shape)}。"
+            )
+        if text_prototypes.shape != self.P_t_clip.shape:
+            raise ValueError(
+                "文本原型形状与当前 ProtoGuidance 不一致："
+                f"期望 {tuple(self.P_t_clip.shape)}，收到 {tuple(text_prototypes.shape)}。"
+            )
+
+        with torch.no_grad():
+            self.visual_bank.prototypes.copy_(
+                visual_prototypes.to(
+                    device=self.visual_bank.prototypes.device,
+                    dtype=self.visual_bank.prototypes.dtype,
+                )
+            )
+            self.visual_bank.slot_valid_mask.copy_(
+                valid_slots.to(
+                    device=self.visual_bank.slot_valid_mask.device,
+                    dtype=torch.bool,
+                )
+            )
+            # 有效槽位计数置 1，用于标识离线原型已完成初始化。
+            self.visual_bank.slot_num_updates.copy_(
+                valid_slots.to(
+                    device=self.visual_bank.slot_num_updates.device,
+                    dtype=self.visual_bank.slot_num_updates.dtype,
+                )
+            )
+            self.visual_bank.num_updates.copy_(
+                valid_slots.any(dim=1).to(
+                    device=self.visual_bank.num_updates.device,
+                    dtype=self.visual_bank.num_updates.dtype,
+                )
+            )
+            self.P_t_clip.copy_(
+                text_prototypes.to(device=self.P_t_clip.device, dtype=self.P_t_clip.dtype)
+            )
+
+    def _log_artifacts_loaded(self, artifacts_path: str | Path, data: dict[str, Any]) -> None:
+        """记录离线原型产物的加载信息。"""
         logger.info(
             f"[ProtoGuidance] 多模态原型已加载: {artifacts_path}（"
-            f"类别数 {num_classes}，槽位 {num_slots}，数据集 {data['meta'].get('dataset', '?')}）"
+            f"类别数 {self.num_classes}，槽位 {self.visual_bank.max_slots}，"
+            f"数据集 {data['meta'].get('dataset', '?')}）"
         )
-        return module
+
+    def reload_artifacts(self, artifacts_path: str | Path) -> None:
+        """用显式产物覆盖起始预训练 checkpoint 中的原型 buffer。"""
+        data = self._load_validated_artifacts(
+            artifacts_path,
+            num_classes=self.num_classes,
+            hidden_dim=self.hidden_dim,
+            text_dim=self.P_t_clip.shape[1],
+        )
+        self._copy_artifact_buffers(data)
+        self._log_artifacts_loaded(artifacts_path, data)
+
+    def reset_content_gate_bias(self, bias: float) -> None:
+        """在加载起始 checkpoint 后重设内容 gate 的最终偏置。"""
+        with torch.no_grad():
+            self.gate_mlp[-1].bias.fill_(float(bias))
 
     # ------------------------------------------------------------------
     # 原型融合与打分
@@ -339,6 +453,7 @@ class ProtoGuidance(nn.Module):
         )
         proto_logits = class_sim / self.tau_p
         selected_class = class_sim.argmax(dim=-1)  # [bs, N]
+        foreground_logit = self.foreground_head(token_h).squeeze(-1)
 
         if self.target_classes:
             target_ids = torch.as_tensor(self.target_classes, device=mem_gidx.device)
@@ -357,7 +472,18 @@ class ProtoGuidance(nn.Module):
             proto_score = top_values[..., 0]
             if self.num_classes > 1:
                 proto_score = proto_score - top_values[..., 1]
+        semantic_score = proto_score
+        if self.position_score_mode == "foreground":
+            proto_score = foreground_logit
+        elif self.position_score_mode == "foreground_semantic":
+            # 前景头先排除背景，再以 target 类相对语义间隔提高该类 query 的密度。
+            proto_score = foreground_logit + self.position_semantic_weight * semantic_score
         return proto_logits, proto_score, selected_class
+
+    def foreground_score(self, mem_gidx: Tensor) -> Tensor:
+        """计算 dense token 的独立前景 logit，供 BCE 监督和 selection 使用。"""
+        token_h = F.normalize(self.fusion.projectors.proj_token(mem_gidx), dim=-1)
+        return self.foreground_head(token_h).squeeze(-1)
 
     def class_confidence(self, proto_logits: Tensor) -> Tensor:
         """把原型分类概率转换为去除类别数影响的置信度。"""
@@ -373,7 +499,7 @@ class ProtoGuidance(nn.Module):
         proto_centered = proto_score - proto_score.mean(dim=-1, keepdim=True)
         proto_std = proto_centered.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
         linear_std = linear_score.detach().std(dim=-1, keepdim=True, unbiased=False)
-        return proto_centered / proto_std * linear_std * POSITION_SCORE_STD_RATIO
+        return proto_centered / proto_std * linear_std * self.position_score_std_ratio
 
     def enhance_content(
         self,

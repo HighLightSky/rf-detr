@@ -367,6 +367,7 @@ class Transformer(nn.Module):
             dense_proto_logits_parts: list[Tensor] = []
             dense_proto_boxes_parts: list[Tensor] = []
             dense_proto_scores_parts: list[Tensor] = []
+            dense_proto_foreground_parts: list[Tensor] = []
             proto_confidence_ts_parts: list[Tensor] = []
             linear_logits_ts_parts: list[Tensor] = []
             topk_ts_parts: list[Tensor] = []
@@ -412,7 +413,13 @@ class Transformer(nn.Module):
                 else:
                     select_score_gidx = linear_score_gidx
 
-                if self.proto_guidance_dense_loss_enabled and proto_logits_gidx is not None:
+                # dense 对齐监督必须与推理路径一致：eval 只使用 group 0，训练时
+                # 其余 group 仅用于 group-detr 的检测扰动，不能让它们分摊原型监督。
+                if (
+                    self.proto_guidance_dense_loss_enabled
+                    and proto_logits_gidx is not None
+                    and g_idx == 0
+                ):
                     dense_proto_logits_parts.append(proto_logits_gidx)
                     dense_proto_boxes_parts.append(
                         enc_outputs_coord_unselected_gidx
@@ -420,6 +427,7 @@ class Transformer(nn.Module):
                         else enc_outputs_coord_unselected_gidx.sigmoid()
                     )
                     dense_proto_scores_parts.append(linear_score_gidx)
+                    dense_proto_foreground_parts.append(self.proto_guidance.foreground_score(output_memory_gidx))
 
                 topk = min(self.num_queries, enc_outputs_class_unselected_gidx.shape[-2])
                 topk_proposals_gidx = torch.topk(select_score_gidx, topk, dim=1)[1]  # bs, nq
@@ -500,6 +508,7 @@ class Transformer(nn.Module):
                     "pred_proto_logits_dense": torch.cat(dense_proto_logits_parts, dim=1),
                     "pred_proto_boxes_dense": torch.cat(dense_proto_boxes_parts, dim=1),
                     "pred_proto_scores_dense": torch.cat(dense_proto_scores_parts, dim=1),
+                    "pred_proto_fg_logits_dense": torch.cat(dense_proto_foreground_parts, dim=1),
                 }
         else:
             dense_proto = None

@@ -606,6 +606,24 @@ class ModelConfig(BaseConfig):
     proto_guidance_dense_center_fallback_topk: int = Field(default=4, ge=1)
     """小目标无高 IoU proposal 时按中心 fallback 选取的 token 数。"""
 
+    proto_guidance_dense_foreground_loss_enabled: bool = False
+    """是否对 dense token 增加独立的前景/背景二分类监督。"""
+
+    proto_guidance_dense_foreground_loss_weight: float = Field(default=1.0, ge=0.0)
+    """dense 前景/背景二分类损失权重。"""
+
+    proto_guidance_dense_background_ratio: float = Field(default=1.0, gt=0.0)
+    """每个前景 token 最多采样的背景 token 数，用于平衡 hard negative。"""
+
+    proto_guidance_position_score_mode: Literal["margin", "foreground", "foreground_semantic"] = "margin"
+    """位置 selection 分数：语义 margin、foregroundness 或二者组合。"""
+
+    proto_guidance_position_semantic_weight: float = Field(default=0.5, ge=0.0)
+    """foreground_semantic 模式中语义 target margin 的相对权重。"""
+
+    proto_guidance_position_score_std_ratio: float = Field(default=0.1, gt=0.0)
+    """位置分数校准后相对线性 objectness 标准差的比例。"""
+
     proto_guidance_slot_reduction: Literal["max", "lse"] = "max"
     """多槽位聚合方式：max 或温度化 log-sum-exp。"""
 
@@ -1403,8 +1421,8 @@ class TrainConfig(BaseConfig):
     """保守冻结策略下解冻 decoder 末尾层数。1=旧行为，仅解冻最后一层；2/3 可用于扩大 SSCL 微调容量。"""
     proto_guidance_freeze_all_except_proto: bool = False
     """[ProtoGuidance] 阶段 A 冷启动专用：除原型引导模块外冻结全部参数 （跳过 decoder/norm/class_embed 的解冻分支）。实验阶段由 stageA 配方启用。"""
-    proto_guidance_trainable_scope: Literal["all", "token"] = "all"
-    """原型模块内部可训练范围：all 或仅 token 投影层。"""
+    proto_guidance_trainable_scope: Literal["all", "token", "token_fg"] = "all"
+    """原型模块内部可训练范围：all、仅 token 投影层，或 token+foreground head。"""
     sscl_prototype_enabled: bool = False
     """是否启用类别原型库锚定的 SSCL（原型模式）。开启时正样本为本类原型、 负样本为全部类别原型，每个样本恒有正负锚点，摆脱 batch 内同类样本不足 导致的零损失问题。"""
     sscl_prototype_momentum: float = 0.99

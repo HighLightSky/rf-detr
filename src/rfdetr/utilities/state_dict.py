@@ -138,8 +138,10 @@ def strip_checkpoint(
 ) -> None:
     """Strip a checkpoint file down to ``model``, ``args``, and PTL-compatible keys.
 
-    Preserves ``model_name`` (when present) so that ``RFDETR.from_checkpoint()`` can still resolve the model class from
-    the stripped file.  Also preserves ``rfdetr_version`` (when present) for provenance tracking.
+    Preserves model identity and configuration metadata (when present), so that
+    ``RFDETR.from_checkpoint()`` can reconstruct resolution and ProtoGuidance
+    settings from the stripped file. Also preserves ``rfdetr_version`` for
+    provenance tracking.
 
     Also preserves ``state_dict``, ``global_step``, ``pytorch-lightning_version``, ``loops``, ``optimizer_states``, and
     ``lr_schedulers`` when present so the stripped checkpoint can still be used directly with
@@ -178,12 +180,10 @@ def strip_checkpoint(
         "model": state_dict["model"],
         "args": state_dict["args"],
     }
-    # Preserve model_name when present (#887).
-    if "model_name" in state_dict:
-        new_state_dict["model_name"] = state_dict["model_name"]
-    # Preserve rfdetr_version when present for provenance tracking.
-    if "rfdetr_version" in state_dict:
-        new_state_dict["rfdetr_version"] = state_dict["rfdetr_version"]
+    # 保留模型标识及完整配置，避免精简后的 checkpoint 丢失 ProtoGuidance 设置。
+    for key in ("model_name", "model_config", "model_config_type", "rfdetr_version"):
+        if key in state_dict:
+            new_state_dict[key] = state_dict[key]
     # Preserve PTL-compatible keys when present (written by BestModelCallback).
     for key in _PTL_COMPAT_KEYS:
         if key in state_dict:

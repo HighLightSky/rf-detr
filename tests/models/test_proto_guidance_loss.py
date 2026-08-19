@@ -226,3 +226,61 @@ class TestLossProtoDense:
         repeated = criterion.loss_proto_dense(repeated_outputs, targets, [], torch.tensor(2.0))["loss_proto_dense"]
 
         assert torch.allclose(base, repeated)
+
+    def test_foreground_loss_suppresses_hard_background(self) -> None:
+        """独立前景监督应同时接收前景正梯度和 hard negative 负梯度。"""
+        criterion = SetCriterion(
+            num_classes=3,
+            matcher=HungarianMatcher(cost_class=1.0, cost_bbox=5.0, cost_giou=2.0),
+            weight_dict={"loss_proto_dense": 1.0},
+            focal_alpha=0.25,
+            losses=["proto_dense"],
+            proto_dense_foreground_enabled=True,
+            proto_dense_background_ratio=1.0,
+        )
+        logits = torch.tensor([[[0.0, 3.0, -1.0], [3.0, 0.0, -1.0]]])
+        fg_logits = torch.tensor([[2.0, 2.0]], requires_grad=True)
+        outputs = {
+            "pred_proto_logits_dense": logits,
+            "pred_proto_boxes_dense": torch.tensor(
+                [[[0.5, 0.5, 0.4, 0.4], [0.1, 0.1, 0.05, 0.05]]]
+            ),
+            "pred_proto_scores_dense": torch.tensor([[0.9, 0.8]]),
+            "pred_proto_fg_logits_dense": fg_logits,
+        }
+        targets = [{"labels": torch.tensor([1]), "boxes": torch.tensor([[0.5, 0.5, 0.4, 0.4]])}]
+        result = criterion.loss_proto_dense(outputs, targets, [], torch.tensor(1.0))
+        assert result["proto_dense_fg_positive_count"] == 1
+        assert result["proto_dense_fg_background_count"] == 1
+        result["loss_proto_dense_fg"].backward()
+        assert fg_logits.grad is not None
+        assert fg_logits.grad[0, 0] < 0
+        assert fg_logits.grad[0, 1] > 0
+
+    def test_foreground_loss_handles_empty_image(self) -> None:
+        """无 GT 图像仍应把采样背景用于 foreground head 的负监督。"""
+        criterion = SetCriterion(
+            num_classes=2,
+            matcher=HungarianMatcher(cost_class=1.0, cost_bbox=5.0, cost_giou=2.0),
+            weight_dict={"loss_proto_dense": 1.0},
+            focal_alpha=0.25,
+            losses=["proto_dense"],
+            proto_dense_foreground_enabled=True,
+        )
+        fg_logits = torch.tensor([[1.0, 1.0]], requires_grad=True)
+        outputs = {
+            "pred_proto_logits_dense": torch.zeros(1, 2, 2),
+            "pred_proto_boxes_dense": torch.tensor([[[0.2, 0.2, 0.1, 0.1], [0.8, 0.8, 0.1, 0.1]]]),
+            "pred_proto_scores_dense": torch.tensor([[0.9, 0.8]]),
+            "pred_proto_fg_logits_dense": fg_logits,
+        }
+        result = criterion.loss_proto_dense(
+            outputs,
+            [{"labels": torch.empty(0, dtype=torch.long), "boxes": torch.empty(0, 4)}],
+            [],
+            torch.tensor(1.0),
+        )
+        assert result["proto_dense_fg_background_count"] == 1
+        result["loss_proto_dense_fg"].backward()
+        assert fg_logits.grad is not None
+        assert fg_logits.grad[0, 0] > 0

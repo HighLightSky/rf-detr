@@ -162,6 +162,10 @@ class LWDETR(nn.Module):
         proto_guidance_visual_ema_momentum: float = 0.99,
         proto_guidance_slot_reduction: str = "max",
         proto_guidance_slot_reduction_tau: float = 0.1,
+        proto_guidance_position_score_mode: str = "margin",
+        proto_guidance_dense_foreground_loss_enabled: bool = False,
+        proto_guidance_position_score_std_ratio: float = 0.1,
+        proto_guidance_position_semantic_weight: float = 0.5,
     ) -> None:
         """Initializes the model.
 
@@ -233,6 +237,10 @@ class LWDETR(nn.Module):
                 visual_ema_momentum=proto_guidance_visual_ema_momentum,
                 slot_reduction=proto_guidance_slot_reduction,
                 slot_reduction_tau=proto_guidance_slot_reduction_tau,
+                position_score_mode=proto_guidance_position_score_mode,
+                foreground_enabled=proto_guidance_dense_foreground_loss_enabled,
+                position_score_std_ratio=proto_guidance_position_score_std_ratio,
+                position_semantic_weight=proto_guidance_position_semantic_weight,
             )
         query_dim = 4
         self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
@@ -1009,6 +1017,12 @@ def build_model(args: "BuilderArgs") -> LWDETR | tuple[Any, None, None]:
         proto_guidance_visual_ema_momentum=getattr(args, "proto_guidance_visual_ema_momentum", 0.99),
         proto_guidance_slot_reduction=getattr(args, "proto_guidance_slot_reduction", "max"),
         proto_guidance_slot_reduction_tau=getattr(args, "proto_guidance_slot_reduction_tau", 0.1),
+        proto_guidance_position_score_mode=getattr(args, "proto_guidance_position_score_mode", "margin"),
+        proto_guidance_dense_foreground_loss_enabled=getattr(
+            args, "proto_guidance_dense_foreground_loss_enabled", False
+        ),
+        proto_guidance_position_score_std_ratio=getattr(args, "proto_guidance_position_score_std_ratio", 0.1),
+        proto_guidance_position_semantic_weight=getattr(args, "proto_guidance_position_semantic_weight", 0.5),
     )
     return model
 
@@ -1040,6 +1054,10 @@ def build_criterion_and_postprocessors(args: "BuilderArgs") -> tuple[SetCriterio
     proto_dense_loss_enabled = getattr(args, "proto_guidance_dense_loss_enabled", False)
     if proto_dense_loss_enabled:
         weight_dict["loss_proto_dense"] = getattr(args, "proto_guidance_dense_loss_weight", 1.0)
+        if getattr(args, "proto_guidance_dense_foreground_loss_enabled", False):
+            weight_dict["loss_proto_dense_fg"] = getattr(
+                args, "proto_guidance_dense_foreground_loss_weight", 1.0
+            )
     # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}
@@ -1100,6 +1118,8 @@ def build_criterion_and_postprocessors(args: "BuilderArgs") -> tuple[SetCriterio
             proto_dense_iou_pos=getattr(args, "proto_guidance_dense_iou_pos", 0.3),
             proto_dense_iou_ignore=getattr(args, "proto_guidance_dense_iou_ignore", 0.1),
             proto_dense_center_fallback_topk=getattr(args, "proto_guidance_dense_center_fallback_topk", 4),
+            proto_dense_foreground_enabled=getattr(args, "proto_guidance_dense_foreground_loss_enabled", False),
+            proto_dense_background_ratio=getattr(args, "proto_guidance_dense_background_ratio", 1.0),
             **class_balance_kwargs,
         )
     else:
@@ -1118,6 +1138,8 @@ def build_criterion_and_postprocessors(args: "BuilderArgs") -> tuple[SetCriterio
             proto_dense_iou_pos=getattr(args, "proto_guidance_dense_iou_pos", 0.3),
             proto_dense_iou_ignore=getattr(args, "proto_guidance_dense_iou_ignore", 0.1),
             proto_dense_center_fallback_topk=getattr(args, "proto_guidance_dense_center_fallback_topk", 4),
+            proto_dense_foreground_enabled=getattr(args, "proto_guidance_dense_foreground_loss_enabled", False),
+            proto_dense_background_ratio=getattr(args, "proto_guidance_dense_background_ratio", 1.0),
             **class_balance_kwargs,
         )
     criterion.to(device)

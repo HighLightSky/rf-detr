@@ -78,6 +78,13 @@ def _init_from_artifacts(module: ProtoGuidance, data: dict[str, object]) -> Prot
 
 
 class TestPositionScore:
+    def test_reset_content_gate_bias(self) -> None:
+        """显式重设应覆盖 checkpoint 加载后的 gate 最终偏置。"""
+        module = _make_module()
+        module.reset_content_gate_bias(-0.5)
+        assert module.gate_mlp[-1].bias is not None
+        assert torch.allclose(module.gate_mlp[-1].bias, torch.full_like(module.gate_mlp[-1].bias, -0.5))
+
     def test_shapes(self) -> None:
         """position_score 输出形状与类别数一致。"""
         module = _make_module()
@@ -236,6 +243,41 @@ class TestArtifacts:
         """产物缺失时 build 返回 None（恒等降级）。"""
         module = ProtoGuidance.build(num_classes=_C, hidden_dim=_D, artifacts_path="/nonexistent/x.pt")
         assert module is None
+
+    def test_reload_artifacts_replaces_checkpoint_buffers(self, tmp_path: pytest.TempPathFactory) -> None:
+        """重新加载产物只覆盖原型 buffer，不保留起始 checkpoint 的旧原型。"""
+        data = _make_artifacts()
+        data["valid_slots"][0, 1] = False  # type: ignore[index]
+        path = tmp_path / "replacement_proto.pt"
+        save_proto_artifacts(
+            path,
+            visual_prototypes=data["visual_prototypes"],  # type: ignore[arg-type]
+            valid_slots=data["valid_slots"],  # type: ignore[arg-type]
+            text_prototypes=data["text_prototypes"],  # type: ignore[arg-type]
+            class_names=data["class_names"],  # type: ignore[arg-type]
+            meta=data["meta"],  # type: ignore[arg-type]
+        )
+        module = _make_module()
+        with torch.no_grad():
+            module.visual_bank.prototypes.fill_(7.0)
+            module.visual_bank.slot_valid_mask.fill_(False)
+            module.visual_bank.slot_num_updates.fill_(9)
+            module.visual_bank.num_updates.fill_(9)
+            module.P_t_clip.fill_(7.0)
+
+        module.reload_artifacts(path)
+
+        assert torch.equal(module.visual_bank.prototypes, data["visual_prototypes"])
+        assert torch.equal(module.visual_bank.slot_valid_mask, data["valid_slots"])
+        assert torch.equal(
+            module.visual_bank.slot_num_updates,
+            data["valid_slots"].to(dtype=torch.long),  # type: ignore[union-attr]
+        )
+        assert torch.equal(
+            module.visual_bank.num_updates,
+            data["valid_slots"].any(dim=1).to(dtype=torch.long),  # type: ignore[union-attr]
+        )
+        assert torch.equal(module.P_t_clip, data["text_prototypes"])
 
 
 class TestFusion:

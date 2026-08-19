@@ -119,6 +119,16 @@ class TestTransformerIntegration:
         assert proto_logits is not None
         assert proto_logits.shape == (_BS, _NQ * _G, _C)
 
+    def test_dense_tokens_use_inference_group_only(self) -> None:
+        """训练态 dense token 只保留 group 0，确保与 eval 推理路径一致。"""
+        transformer = _make_transformer()
+        transformer.proto_guidance_dense_loss_enabled = True
+        transformer.proto_guidance = _make_proto_guidance()
+        out = _forward(transformer)
+        dense = out[5]
+        assert dense is not None
+        assert dense["pred_proto_logits_dense"].shape == (_BS, _H * _W, _C)
+
     def test_without_module_returns_none(self) -> None:
         """无模块时第 5 位为 None（原版行为兼容）。"""
         transformer = _make_transformer()

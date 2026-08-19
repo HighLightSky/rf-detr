@@ -197,6 +197,8 @@ class SetCriterion(nn.Module):
         proto_dense_iou_pos: float = 0.3,
         proto_dense_iou_ignore: float = 0.1,
         proto_dense_center_fallback_topk: int = 4,
+        proto_dense_foreground_enabled: bool = False,
+        proto_dense_background_ratio: float = 1.0,
     ) -> None:
         """Create the criterion.
 
@@ -243,10 +245,14 @@ class SetCriterion(nn.Module):
         self.proto_dense_iou_pos = float(proto_dense_iou_pos)
         self.proto_dense_iou_ignore = float(proto_dense_iou_ignore)
         self.proto_dense_center_fallback_topk = int(proto_dense_center_fallback_topk)
+        self.proto_dense_foreground_enabled = bool(proto_dense_foreground_enabled)
+        self.proto_dense_background_ratio = float(proto_dense_background_ratio)
         if not 0.0 <= self.proto_dense_iou_ignore <= self.proto_dense_iou_pos <= 1.0:
             raise ValueError("dense 原型 IoU 阈值必须满足 0 <= ignore <= pos <= 1。")
         if self.proto_dense_center_fallback_topk < 1:
             raise ValueError("dense 原型中心 fallback 的 topk 必须 >= 1。")
+        if self.proto_dense_background_ratio <= 0.0:
+            raise ValueError("dense 原型背景采样比例必须 > 0。")
         self._la_warmup_factor = 1.0
         weights, bias = self._build_class_balance_buffers(
             counts=class_balance_counts,
@@ -629,14 +635,15 @@ class SetCriterion(nn.Module):
         if logits.ndim != 3 or boxes.shape != logits.shape[:2] + (4,) or scores.shape != logits.shape[:2]:
             raise ValueError("dense 原型输出形状必须为 logits[B,N,C]、boxes[B,N,4]、scores[B,N]。")
 
-        labels_per_image = [
-            self._assign_dense_proto_labels(boxes[batch_idx], scores[batch_idx], target)
+        assignments = [
+            self._assign_dense_proto_targets(boxes[batch_idx], scores[batch_idx], target)
             for batch_idx, target in enumerate(targets)
         ]
+        labels_per_image = [assignment[0] for assignment in assignments]
         dense_labels = torch.stack(labels_per_image)
         positive = dense_labels >= 0
         positive_count = positive.sum()
-        if not bool(positive.any()):
+        if not bool(positive.any()) and not self.proto_dense_foreground_enabled:
             zero = logits.sum() * 0.0
             return {
                 "loss_proto_dense": zero,
@@ -644,21 +651,82 @@ class SetCriterion(nn.Module):
                 "proto_dense_accuracy": zero.detach(),
                 "proto_dense_margin": zero.detach(),
             }
-
-        positive_logits = logits[positive]
-        positive_labels = dense_labels[positive]
-        per_sample = F.cross_entropy(positive_logits, positive_labels, reduction="none")
-        class_losses = [per_sample[positive_labels == class_id].mean() for class_id in positive_labels.unique()]
-        sorted_logits = positive_logits.topk(min(2, positive_logits.shape[-1]), dim=-1).values
-        margin = sorted_logits[:, 0]
-        if sorted_logits.shape[-1] > 1:
-            margin = margin - sorted_logits[:, 1]
-        return {
-            "loss_proto_dense": torch.stack(class_losses).mean(),
-            "proto_dense_positive_count": positive_count.to(dtype=logits.dtype).detach(),
-            "proto_dense_accuracy": (positive_logits.argmax(dim=-1) == positive_labels).float().mean().detach(),
-            "proto_dense_margin": margin.mean().detach(),
-        }
+        if bool(positive.any()):
+            positive_logits = logits[positive]
+            positive_labels = dense_labels[positive]
+            per_sample = F.cross_entropy(positive_logits, positive_labels, reduction="none")
+            class_losses = [per_sample[positive_labels == class_id].mean() for class_id in positive_labels.unique()]
+            sorted_logits = positive_logits.topk(min(2, positive_logits.shape[-1]), dim=-1).values
+            margin = sorted_logits[:, 0]
+            if sorted_logits.shape[-1] > 1:
+                margin = margin - sorted_logits[:, 1]
+            result = {
+                "loss_proto_dense": torch.stack(class_losses).mean(),
+                "proto_dense_positive_count": positive_count.to(dtype=logits.dtype).detach(),
+                "proto_dense_accuracy": (positive_logits.argmax(dim=-1) == positive_labels).float().mean().detach(),
+                "proto_dense_margin": margin.mean().detach(),
+            }
+        else:
+            zero = logits.sum() * 0.0
+            result = {
+                "loss_proto_dense": zero,
+                "proto_dense_positive_count": zero.detach(),
+                "proto_dense_accuracy": zero.detach(),
+                "proto_dense_margin": zero.detach(),
+            }
+        if self.proto_dense_foreground_enabled:
+            fg_logits = outputs.get("pred_proto_fg_logits_dense")
+            if fg_logits is None or fg_logits.shape != dense_labels.shape:
+                raise ValueError("启用 dense 前景监督时必须提供形状为 [B,N] 的 pred_proto_fg_logits_dense。")
+            positive_fg = torch.stack([assignment[1] for assignment in assignments])
+            background_fg = torch.stack([assignment[2] for assignment in assignments])
+            selected_background = torch.zeros_like(background_fg)
+            for batch_idx in range(background_fg.shape[0]):
+                positive_num = int(positive_fg[batch_idx].sum())
+                candidate = background_fg[batch_idx].nonzero(as_tuple=False).flatten()
+                if candidate.numel() == 0:
+                    continue
+                max_background = max(1, int(round(positive_num * self.proto_dense_background_ratio)))
+                if candidate.numel() > max_background:
+                    hard_order = scores[batch_idx, candidate].topk(max_background).indices
+                    candidate = candidate[hard_order]
+                selected_background[batch_idx, candidate] = True
+            fg_mask = positive_fg | selected_background
+            fg_target = positive_fg[fg_mask].to(dtype=fg_logits.dtype)
+            fg_values = fg_logits[fg_mask]
+            if fg_values.numel() == 0:
+                fg_loss = fg_logits.sum() * 0.0
+                fg_accuracy = fg_loss.detach()
+            else:
+                pos_values = fg_logits[positive_fg]
+                neg_values = fg_logits[selected_background]
+                pos_loss = (
+                    F.binary_cross_entropy_with_logits(pos_values, torch.ones_like(pos_values))
+                    if pos_values.numel()
+                    else fg_logits.sum() * 0.0
+                )
+                neg_loss = (
+                    F.binary_cross_entropy_with_logits(neg_values, torch.zeros_like(neg_values))
+                    if neg_values.numel()
+                    else fg_logits.sum() * 0.0
+                )
+                fg_loss = (pos_loss + neg_loss) / (2.0 if pos_values.numel() and neg_values.numel() else 1.0)
+                fg_accuracy = ((fg_values.sigmoid() >= 0.5) == fg_target.bool()).float().mean().detach()
+            result.update(
+                {
+                    "loss_proto_dense_fg": fg_loss,
+                    "proto_dense_fg_positive_count": positive_fg.sum().to(dtype=logits.dtype).detach(),
+                    "proto_dense_fg_background_count": selected_background.sum().to(dtype=logits.dtype).detach(),
+                    "proto_dense_fg_accuracy": fg_accuracy,
+                    "proto_dense_fg_positive_mean": fg_logits[positive_fg].sigmoid().mean().detach()
+                    if bool(positive_fg.any())
+                    else fg_loss.detach(),
+                    "proto_dense_fg_background_mean": fg_logits[selected_background].sigmoid().mean().detach()
+                    if bool(selected_background.any())
+                    else fg_loss.detach(),
+                }
+            )
+        return result
 
     def _assign_dense_proto_labels(
         self,
@@ -667,11 +735,23 @@ class SetCriterion(nn.Module):
         target: dict[str, Tensor],
     ) -> Tensor:
         """按 IoU 与中心 fallback 为单张图的 dense token 分配前景类别。"""
+        return self._assign_dense_proto_targets(dense_boxes, dense_scores, target)[0]
+
+    def _assign_dense_proto_targets(
+        self,
+        dense_boxes: Tensor,
+        dense_scores: Tensor,
+        target: dict[str, Tensor],
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """同时返回语义标签、前景 mask 与可采样背景 mask。"""
         labels = torch.full((dense_boxes.shape[0],), -1, dtype=torch.long, device=dense_boxes.device)
+        positive = torch.zeros_like(labels, dtype=torch.bool)
+        background = torch.zeros_like(labels, dtype=torch.bool)
         target_boxes = target.get("boxes")
         target_labels = target.get("labels")
         if target_boxes is None or target_labels is None or target_boxes.numel() == 0:
-            return labels
+            background.fill_(True)
+            return labels, positive, background
         target_boxes = target_boxes.to(device=dense_boxes.device, dtype=dense_boxes.dtype)
         target_labels = target_labels.to(device=dense_boxes.device, dtype=torch.long)
 
@@ -680,6 +760,7 @@ class SetCriterion(nn.Module):
         ious, _ = box_ops.box_iou(dense_xyxy, target_xyxy)
         best_iou, best_target = ious.max(dim=1)
         positive = best_iou >= self.proto_dense_iou_pos
+        background = best_iou < self.proto_dense_iou_ignore
         labels[positive] = target_labels[best_target[positive]]
 
         centers = dense_boxes[:, :2]
@@ -700,7 +781,9 @@ class SetCriterion(nn.Module):
             count = min(self.proto_dense_center_fallback_topk, int(candidate_indices.numel()))
             selected = candidate_indices[dense_scores[candidate_indices].topk(count).indices]
             labels[selected] = target_labels[target_idx]
-        return labels
+            positive[selected] = True
+            background[selected] = False
+        return labels, positive, background
 
     @torch.no_grad()
     def loss_cardinality(

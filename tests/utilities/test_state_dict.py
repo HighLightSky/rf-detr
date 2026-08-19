@@ -505,3 +505,21 @@ class TestStripCheckpoint:
         strip_checkpoint(ckpt_path, extra_metadata={"rfdetr_version": "override"})
         result = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         assert result["rfdetr_version"] == "override"
+
+    def test_strip_preserves_model_configuration(self, tmp_path) -> None:
+        """精简后仍保留分辨率和 ProtoGuidance 的完整模型配置。"""
+        model_config = {
+            "resolution": 1024,
+            "proto_guidance_enabled": True,
+            "proto_guidance_artifacts_path": "data/proto.pt",
+        }
+        ckpt_path = self._make_minimal_ckpt(
+            tmp_path,
+            extra={"model_config": model_config, "model_config_type": "RFDETRMediumConfig"},
+        )
+
+        strip_checkpoint(ckpt_path)
+
+        result = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        assert result["model_config"] == model_config
+        assert result["model_config_type"] == "RFDETRMediumConfig"

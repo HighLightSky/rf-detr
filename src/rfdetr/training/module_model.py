@@ -386,6 +386,22 @@ class RFDETRModelModule(LightningModule):
             # per-group query slicing, class-name extraction, partial-load warnings,
             # and writes any auto-aligned ``num_classes`` back onto ``model_config``.
             load_pretrain_weights(self.model, self.model_config)
+            proto_guidance = getattr(self.model.transformer, "proto_guidance", None)
+            artifacts_path = self.model_config.proto_guidance_artifacts_path
+            if proto_guidance is not None and artifacts_path:
+                # 显式实验原型必须覆盖起始 checkpoint 携带的旧原型 buffer。
+                proto_guidance.reload_artifacts(artifacts_path)
+            if (
+                proto_guidance is not None
+                and "proto_guidance_gate_bias_init" in self.model_config.model_fields_set
+            ):
+                # checkpoint 会覆盖 gate 参数；实验显式指定的初始开启度必须随后恢复，
+                # 否则 content 强度扫描会被旧 checkpoint 的 gate 偏置静默抵消。
+                proto_guidance.reset_content_gate_bias(self.model_config.proto_guidance_gate_bias_init)
+                logger.info(
+                    "[ProtoGuidance] 已按实验配置重设内容 gate 偏置：%.4f",
+                    self.model_config.proto_guidance_gate_bias_init,
+                )
             if model_config.use_grouppose_keypoints:
                 # Older model shims may omit the keypoint reset hook; call it only when implemented.
                 reset_keypoint_gaussian_parameters = getattr(self.model, "reset_keypoint_gaussian_parameters", None)
@@ -681,10 +697,18 @@ class RFDETRModelModule(LightningModule):
         if proto_guidance is not None:
             for param in proto_guidance.parameters():
                 param.requires_grad = True
-            if getattr(self.train_config, "proto_guidance_trainable_scope", "all") == "token":
+            trainable_scope = getattr(self.train_config, "proto_guidance_trainable_scope", "all")
+            if trainable_scope == "token":
                 for param in proto_guidance.parameters():
                     param.requires_grad = False
                 for param in proto_guidance.fusion.projectors.proj_token.parameters():
+                    param.requires_grad = True
+            elif trainable_scope == "token_fg":
+                for param in proto_guidance.parameters():
+                    param.requires_grad = False
+                for param in proto_guidance.fusion.projectors.proj_token.parameters():
+                    param.requires_grad = True
+                for param in proto_guidance.foreground_head.parameters():
                     param.requires_grad = True
             logger.info(f"[ProtoGuidance] 原型引导参数可训练性恢复完成：{proto_guidance.describe_freeze()}")
         logger.info(
