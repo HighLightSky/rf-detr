@@ -18,6 +18,52 @@ uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidan
 uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/12_dense_ce_lse_slots.yaml
 ```
 
+若 `10` 出现训练/验证 group 不一致，先运行 group 0 修复实验：
+
+```bash
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/10b_dense_ce_group0_lr1e4.yaml
+```
+
+以 `10b/last_ema.pth` 为共同起点的并行实验：
+
+```bash
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/11_dense_ce_unfrozen_projection.yaml
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/12_dense_ce_lse_slots.yaml
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/20b_selection_group0_lambda025.yaml
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/21b_selection_group0_lambda050.yaml
+
+## 前景性修复（group_detr=1）
+
+```bash
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/13_dense_foreground_group1.yaml
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/14_foreground_selection_group1_lambda025.yaml
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/15_foreground_selection_group1_lambda050.yaml
+```
+
+`13` 只训练 token 投影和独立 foreground head。仅当验证集记录的
+`proto_dense_fg_positive_mean` 高于 `proto_dense_fg_background_mean`，且二者差距
+稳定扩大时，才启动 `14/15` 的 selection 强度扫描。
+
+MS 语义选择与 decoder 适应对照：
+
+```bash
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/16_foreground_selection_ratio025.yaml
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/20_ms_semantic_selection_w025.yaml
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/21_ms_semantic_selection_w050.yaml
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/22_decoder_adapt_baseline.yaml
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/23_ms_semantic_decoder_adapt.yaml
+```
+
+`22/23` 使用同一原型对齐 checkpoint 与相同的保守解冻范围。两者的检测差异因而可以归因于
+MS 的 prototype selection，而非 decoder 微调本身。
+
+若 `23` 提升 MS 但 FSC 回退，运行降低位置 residual 的保护实验：
+
+```bash
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/24_ms_semantic_decoder_adapt_lambda025.yaml
+uv run --no-sync python src/scripts/train.py -c configs/experiments/proto_guidance_alignment_repair/25_ms_semantic_decoder_adapt_lambda0375.yaml
+```
+
 选择实验：
 
 ```bash

@@ -1,38 +1,49 @@
-# ProtoGuidance 对齐修复：dense CE，解冻全部原型投影
+# 在已适应 decoder 的模型上降低 MS 语义 residual，保护 FSC 候选分布
 model:
   variant: medium
   num_classes: 25
   resolution: 1024
+  group_detr: 1
   gradient_checkpointing: true
-  pretrain_weights: output/proto_guidance_alignment_repair/10b_dense_ce_group0_lr1e4/last_ema.pth
+  pretrain_weights: output/proto_guidance_alignment_repair/22_decoder_adapt_baseline/checkpoint_best_total.pth
   proto_guidance_enabled: true
   proto_guidance_artifacts_path: data/proto_guidance_shwx_1024_current.pt
   proto_guidance_fusion_mode: simple
   proto_guidance_num_slots: 10
-  proto_guidance_position_enabled: false
+  proto_guidance_target_classes: [3]
+  proto_guidance_position_enabled: true
   proto_guidance_content_enabled: false
-  proto_guidance_aux_loss_enabled: false
   proto_guidance_dense_loss_enabled: true
   proto_guidance_dense_loss_weight: 1.0
+  proto_guidance_dense_foreground_loss_enabled: true
+  proto_guidance_dense_foreground_loss_weight: 1.0
+  proto_guidance_dense_background_ratio: 1.0
+  proto_guidance_position_score_mode: foreground_semantic
+  proto_guidance_position_semantic_weight: 0.25
+  proto_guidance_position_score_std_ratio: 0.25
+  proto_guidance_lambda_pos_init: 0.025
+  proto_guidance_lambda_pos_max: 0.25
+  proto_guidance_warmup_epochs: 2.0
   proto_guidance_dense_iou_pos: 0.3
   proto_guidance_dense_iou_ignore: 0.1
   proto_guidance_dense_center_fallback_topk: 4
-  proto_guidance_slot_reduction: max
+  proto_guidance_slot_reduction: lse
+  proto_guidance_slot_reduction_tau: 0.1
   proto_guidance_tau_p: 0.2
 
 train:
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
   dataset_file: yolo
-  output_dir: output/proto_guidance_alignment_repair/11_dense_ce_unfrozen_projection
-  epochs: 5
+  output_dir: output/proto_guidance_alignment_repair/24_ms_semantic_decoder_adapt_lambda025
+  epochs: 3
   batch_size: 16
   grad_accum_steps: 4
   num_workers: 2
-  lr: 1e-5
-  lr_encoder: 1e-5
+  lr: 5e-6
+  lr_encoder: 5e-6
   weight_decay: 1e-4
   clip_max_norm: 0.1
-  lr_drop: 4
+  lr_drop: 2
   warmup_epochs: 0.0
   tensorboard: true
   wandb: false
@@ -47,5 +58,6 @@ train:
   mosaic_p: 0.0
   multi_scale: false
   sscl_freeze_strategy: conservative
-  proto_guidance_freeze_all_except_proto: true
+  sscl_unfreeze_decoder_layers: 1
+  proto_guidance_freeze_all_except_proto: false
   proto_guidance_trainable_scope: all
