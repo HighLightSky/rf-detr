@@ -114,6 +114,23 @@ class TestPositionScore:
         assert torch.allclose(score_cold, score_warm, atol=1e-6)
         assert torch.equal(class_cold, class_warm)
 
+    def test_lse_slot_reduction_is_finite_and_differentiable(self) -> None:
+        """LSE 槽聚合应保持有限，并让融合投影收到梯度。"""
+        module = _init_from_artifacts(
+            _make_module(slot_reduction="lse", slot_reduction_tau=0.1),
+            _make_artifacts(),
+        )
+        memory = torch.randn(_B, _N, _D, requires_grad=True)
+
+        logits, score, _ = module.position_score(memory)
+        (logits.mean() + score.mean()).backward()
+
+        assert torch.isfinite(logits).all()
+        assert torch.isfinite(score).all()
+        for name, parameter in module.fusion.named_parameters():
+            assert parameter.grad is not None, f"{name} 未收到 LSE 槽聚合梯度"
+            assert float(parameter.grad.abs().sum()) > 0.0, f"{name} 的 LSE 槽聚合梯度为零"
+
 
 class TestNearIdentity:
     def test_lambda_zero_is_identity_score(self) -> None:
@@ -168,6 +185,15 @@ class TestNearIdentity:
         module.current_epoch = 1.0
         assert module.lambda_pos_effective() == pytest.approx(0.5)
         module.current_epoch = 5.0
+        assert module.lambda_pos_effective() == pytest.approx(0.9)
+
+    def test_eval_uses_completed_warmup_strength(self) -> None:
+        """独立评估不能退回 epoch 0 的原型注入强度。"""
+        module = _make_module(lambda_pos_init=0.1, lambda_pos_max=0.9, warmup_epochs=2.0)
+        module.current_epoch = 0.0
+
+        module.eval()
+
         assert module.lambda_pos_effective() == pytest.approx(0.9)
 
 

@@ -160,6 +160,8 @@ class LWDETR(nn.Module):
         proto_guidance_aux_loss_enabled: bool = False,
         proto_guidance_visual_ema_update: bool = False,
         proto_guidance_visual_ema_momentum: float = 0.99,
+        proto_guidance_slot_reduction: str = "max",
+        proto_guidance_slot_reduction_tau: float = 0.1,
     ) -> None:
         """Initializes the model.
 
@@ -229,6 +231,8 @@ class LWDETR(nn.Module):
                 aux_loss_enabled=proto_guidance_aux_loss_enabled,
                 visual_ema_update=proto_guidance_visual_ema_update,
                 visual_ema_momentum=proto_guidance_visual_ema_momentum,
+                slot_reduction=proto_guidance_slot_reduction,
+                slot_reduction_tau=proto_guidance_slot_reduction_tau,
             )
         query_dim = 4
         self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
@@ -588,11 +592,11 @@ class LWDETR(nn.Module):
             cross_attn_srcs=cross_attn_srcs,
         )
         if self.use_grouppose_keypoints:
-            hs, ref_unsigmoid, hs_enc, ref_enc, proto_logits_ts, keypoint_hs, enc_kp_predictions, _ = (
+            hs, ref_unsigmoid, hs_enc, ref_enc, proto_logits_ts, dense_proto, keypoint_hs, enc_kp_predictions, _ = (
                 transformer_outputs
             )
         else:
-            hs, ref_unsigmoid, hs_enc, ref_enc, proto_logits_ts = transformer_outputs[:5]
+            hs, ref_unsigmoid, hs_enc, ref_enc, proto_logits_ts, dense_proto = transformer_outputs[:6]
             keypoint_hs = None
             enc_kp_predictions = None
 
@@ -723,6 +727,8 @@ class LWDETR(nn.Module):
                 # 供 criterion 的 loss_proto_labels 辅助损失复用 enc 的 Hungarian indices）
                 if proto_logits_ts is not None:
                     out["enc_outputs"]["pred_proto_logits"] = proto_logits_ts
+                if dense_proto is not None:
+                    out["enc_outputs"].update(dense_proto)
                 if self.segmentation_head is not None:
                     out["enc_outputs"]["pred_masks"] = masks_enc
                 if keypoints_enc is not None:
@@ -731,6 +737,8 @@ class LWDETR(nn.Module):
                 out = {"pred_logits": cls_enc, "pred_boxes": ref_enc}
                 if proto_logits_ts is not None:
                     out["pred_proto_logits"] = proto_logits_ts
+                if dense_proto is not None:
+                    out.update(dense_proto)
                 if self.segmentation_head is not None:
                     out["pred_masks"] = masks_enc
                 if keypoints_enc is not None:
@@ -753,11 +761,11 @@ class LWDETR(nn.Module):
             cross_attn_srcs=cross_attn_srcs,
         )
         if self.use_grouppose_keypoints:
-            hs, ref_unsigmoid, hs_enc, ref_enc, proto_logits_ts, keypoint_hs, enc_kp_predictions, _ = (
+            hs, ref_unsigmoid, hs_enc, ref_enc, proto_logits_ts, _dense_proto, keypoint_hs, enc_kp_predictions, _ = (
                 transformer_outputs
             )
         else:
-            hs, ref_unsigmoid, hs_enc, ref_enc, proto_logits_ts = transformer_outputs[:5]
+            hs, ref_unsigmoid, hs_enc, ref_enc, proto_logits_ts, _dense_proto = transformer_outputs[:6]
             keypoint_hs = None
             enc_kp_predictions = None
 
@@ -944,6 +952,9 @@ def build_model(args: "BuilderArgs") -> LWDETR | tuple[Any, None, None]:
 
     args.num_feature_levels = len(args.projector_scale)  # type: ignore[attr-defined]
     transformer = build_transformer(args)
+    transformer.proto_guidance_dense_loss_enabled = bool(
+        getattr(args, "proto_guidance_dense_loss_enabled", False)
+    )
 
     segmentation_head = (
         SegmentationHead(
@@ -996,6 +1007,8 @@ def build_model(args: "BuilderArgs") -> LWDETR | tuple[Any, None, None]:
         proto_guidance_aux_loss_enabled=getattr(args, "proto_guidance_aux_loss_enabled", False),
         proto_guidance_visual_ema_update=getattr(args, "proto_guidance_visual_ema_update", False),
         proto_guidance_visual_ema_momentum=getattr(args, "proto_guidance_visual_ema_momentum", 0.99),
+        proto_guidance_slot_reduction=getattr(args, "proto_guidance_slot_reduction", "max"),
+        proto_guidance_slot_reduction_tau=getattr(args, "proto_guidance_slot_reduction_tau", 0.1),
     )
     return model
 
@@ -1024,6 +1037,9 @@ def build_criterion_and_postprocessors(args: "BuilderArgs") -> tuple[SetCriterio
     )
     if proto_aux_loss_enabled:
         weight_dict["loss_proto_labels"] = getattr(args, "proto_guidance_aux_loss_weight", 1.0)
+    proto_dense_loss_enabled = getattr(args, "proto_guidance_dense_loss_enabled", False)
+    if proto_dense_loss_enabled:
+        weight_dict["loss_proto_dense"] = getattr(args, "proto_guidance_dense_loss_weight", 1.0)
     # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}
@@ -1040,6 +1056,8 @@ def build_criterion_and_postprocessors(args: "BuilderArgs") -> tuple[SetCriterio
         losses.append("keypoints")
     if proto_aux_loss_enabled:
         losses.append("proto_labels")
+    if proto_dense_loss_enabled:
+        losses.append("proto_dense")
 
     sum_group_losses = getattr(args, "sum_group_losses", False)
     # [分类损失均衡化] P0/P1 参数与类别统计：每个 rank 读同一 JSON，天然 DDP 一致；
@@ -1079,6 +1097,9 @@ def build_criterion_and_postprocessors(args: "BuilderArgs") -> tuple[SetCriterio
             ia_bce_loss=args.ia_bce_loss,
             mask_point_sample_ratio=args.mask_point_sample_ratio,
             num_keypoints_per_class=getattr(args, "num_keypoints_per_class", []),
+            proto_dense_iou_pos=getattr(args, "proto_guidance_dense_iou_pos", 0.3),
+            proto_dense_iou_ignore=getattr(args, "proto_guidance_dense_iou_ignore", 0.1),
+            proto_dense_center_fallback_topk=getattr(args, "proto_guidance_dense_center_fallback_topk", 4),
             **class_balance_kwargs,
         )
     else:
@@ -1094,6 +1115,9 @@ def build_criterion_and_postprocessors(args: "BuilderArgs") -> tuple[SetCriterio
             use_position_supervised_loss=args.use_position_supervised_loss,
             ia_bce_loss=args.ia_bce_loss,
             num_keypoints_per_class=getattr(args, "num_keypoints_per_class", []),
+            proto_dense_iou_pos=getattr(args, "proto_guidance_dense_iou_pos", 0.3),
+            proto_dense_iou_ignore=getattr(args, "proto_guidance_dense_iou_ignore", 0.1),
+            proto_dense_center_fallback_topk=getattr(args, "proto_guidance_dense_center_fallback_topk", 4),
             **class_balance_kwargs,
         )
     criterion.to(device)

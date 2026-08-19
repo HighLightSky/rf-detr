@@ -194,6 +194,9 @@ class SetCriterion(nn.Module):
         logit_adjustment_enabled: bool = False,
         logit_adjustment_tau: float = 0.1,
         logit_adjustment_bias_clip: float = 1.0,
+        proto_dense_iou_pos: float = 0.3,
+        proto_dense_iou_ignore: float = 0.1,
+        proto_dense_center_fallback_topk: int = 4,
     ) -> None:
         """Create the criterion.
 
@@ -237,6 +240,13 @@ class SetCriterion(nn.Module):
         # 不进 state_dict；criterion 每次构建时由训练配置重建，device 随 .to(device) 迁移）。
         self.class_balance_enabled = class_balance_enabled
         self.logit_adjustment_enabled = logit_adjustment_enabled
+        self.proto_dense_iou_pos = float(proto_dense_iou_pos)
+        self.proto_dense_iou_ignore = float(proto_dense_iou_ignore)
+        self.proto_dense_center_fallback_topk = int(proto_dense_center_fallback_topk)
+        if not 0.0 <= self.proto_dense_iou_ignore <= self.proto_dense_iou_pos <= 1.0:
+            raise ValueError("dense 原型 IoU 阈值必须满足 0 <= ignore <= pos <= 1。")
+        if self.proto_dense_center_fallback_topk < 1:
+            raise ValueError("dense 原型中心 fallback 的 topk 必须 >= 1。")
         self._la_warmup_factor = 1.0
         weights, bias = self._build_class_balance_buffers(
             counts=class_balance_counts,
@@ -602,6 +612,96 @@ class SetCriterion(nn.Module):
         class_losses = [per_sample[target_classes_o == class_id].mean() for class_id in target_classes_o.unique()]
         return {"loss_proto_labels": torch.stack(class_losses).mean()}
 
+    def loss_proto_dense(
+        self,
+        outputs: dict[str, Any],
+        targets: list[dict[str, Tensor]],
+        indices: list[tuple[Tensor, Tensor]],
+        num_boxes: Tensor,
+    ) -> dict[str, Tensor]:
+        """对全部 encoder token 的前景原型 logits 施加类别均衡 CE。"""
+        required = ("pred_proto_logits_dense", "pred_proto_boxes_dense", "pred_proto_scores_dense")
+        if any(key not in outputs for key in required):
+            return {}
+        logits = outputs["pred_proto_logits_dense"]
+        boxes = outputs["pred_proto_boxes_dense"]
+        scores = outputs["pred_proto_scores_dense"]
+        if logits.ndim != 3 or boxes.shape != logits.shape[:2] + (4,) or scores.shape != logits.shape[:2]:
+            raise ValueError("dense 原型输出形状必须为 logits[B,N,C]、boxes[B,N,4]、scores[B,N]。")
+
+        labels_per_image = [
+            self._assign_dense_proto_labels(boxes[batch_idx], scores[batch_idx], target)
+            for batch_idx, target in enumerate(targets)
+        ]
+        dense_labels = torch.stack(labels_per_image)
+        positive = dense_labels >= 0
+        positive_count = positive.sum()
+        if not bool(positive.any()):
+            zero = logits.sum() * 0.0
+            return {
+                "loss_proto_dense": zero,
+                "proto_dense_positive_count": zero.detach(),
+                "proto_dense_accuracy": zero.detach(),
+                "proto_dense_margin": zero.detach(),
+            }
+
+        positive_logits = logits[positive]
+        positive_labels = dense_labels[positive]
+        per_sample = F.cross_entropy(positive_logits, positive_labels, reduction="none")
+        class_losses = [per_sample[positive_labels == class_id].mean() for class_id in positive_labels.unique()]
+        sorted_logits = positive_logits.topk(min(2, positive_logits.shape[-1]), dim=-1).values
+        margin = sorted_logits[:, 0]
+        if sorted_logits.shape[-1] > 1:
+            margin = margin - sorted_logits[:, 1]
+        return {
+            "loss_proto_dense": torch.stack(class_losses).mean(),
+            "proto_dense_positive_count": positive_count.to(dtype=logits.dtype).detach(),
+            "proto_dense_accuracy": (positive_logits.argmax(dim=-1) == positive_labels).float().mean().detach(),
+            "proto_dense_margin": margin.mean().detach(),
+        }
+
+    def _assign_dense_proto_labels(
+        self,
+        dense_boxes: Tensor,
+        dense_scores: Tensor,
+        target: dict[str, Tensor],
+    ) -> Tensor:
+        """按 IoU 与中心 fallback 为单张图的 dense token 分配前景类别。"""
+        labels = torch.full((dense_boxes.shape[0],), -1, dtype=torch.long, device=dense_boxes.device)
+        target_boxes = target.get("boxes")
+        target_labels = target.get("labels")
+        if target_boxes is None or target_labels is None or target_boxes.numel() == 0:
+            return labels
+        target_boxes = target_boxes.to(device=dense_boxes.device, dtype=dense_boxes.dtype)
+        target_labels = target_labels.to(device=dense_boxes.device, dtype=torch.long)
+
+        dense_xyxy = box_ops.box_cxcywh_to_xyxy(dense_boxes)
+        target_xyxy = box_ops.box_cxcywh_to_xyxy(target_boxes)
+        ious, _ = box_ops.box_iou(dense_xyxy, target_xyxy)
+        best_iou, best_target = ious.max(dim=1)
+        positive = best_iou >= self.proto_dense_iou_pos
+        labels[positive] = target_labels[best_target[positive]]
+
+        centers = dense_boxes[:, :2]
+        for target_idx in range(target_boxes.shape[0]):
+            if bool((positive & (best_target == target_idx)).any()):
+                continue
+            x0, y0, x1, y1 = target_xyxy[target_idx]
+            inside = (
+                (centers[:, 0] >= x0)
+                & (centers[:, 0] <= x1)
+                & (centers[:, 1] >= y0)
+                & (centers[:, 1] <= y1)
+                & (best_target == target_idx)
+            )
+            candidate_indices = inside.nonzero(as_tuple=False).flatten()
+            if candidate_indices.numel() == 0:
+                continue
+            count = min(self.proto_dense_center_fallback_topk, int(candidate_indices.numel()))
+            selected = candidate_indices[dense_scores[candidate_indices].topk(count).indices]
+            labels[selected] = target_labels[target_idx]
+        return labels
+
     @torch.no_grad()
     def loss_cardinality(
         self,
@@ -840,6 +940,7 @@ class SetCriterion(nn.Module):
             "keypoints": self.loss_keypoints,
             # [ProtoGuidance] 原型分类辅助损失（仅 enc_outputs 携带 pred_proto_logits 时产出）
             "proto_labels": self.loss_proto_labels,
+            "proto_dense": self.loss_proto_dense,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)

@@ -591,6 +591,27 @@ class ModelConfig(BaseConfig):
     proto_guidance_visual_ema_momentum: float = 0.99
     """训练期视觉原型 EMA 更新动量。"""
 
+    proto_guidance_dense_loss_enabled: bool = False
+    """是否对全部 encoder proposal token 启用 dense 原型对齐损失。"""
+
+    proto_guidance_dense_loss_weight: float = Field(default=1.0, ge=0.0)
+    """dense 原型对齐损失权重。"""
+
+    proto_guidance_dense_iou_pos: float = Field(default=0.3, ge=0.0, le=1.0)
+    """dense proposal 分配为前景正样本的 IoU 阈值。"""
+
+    proto_guidance_dense_iou_ignore: float = Field(default=0.1, ge=0.0, le=1.0)
+    """dense proposal 低于该 IoU 时作为背景忽略。"""
+
+    proto_guidance_dense_center_fallback_topk: int = Field(default=4, ge=1)
+    """小目标无高 IoU proposal 时按中心 fallback 选取的 token 数。"""
+
+    proto_guidance_slot_reduction: Literal["max", "lse"] = "max"
+    """多槽位聚合方式：max 或温度化 log-sum-exp。"""
+
+    proto_guidance_slot_reduction_tau: float = Field(default=0.1, gt=0.0)
+    """log-sum-exp 槽位聚合温度。"""
+
     proto_guidance_monitor_log_interval: int = Field(default=100, ge=1)
     """原型引导监控的采样节流步数（每 N 步采样一次）。"""
 
@@ -1382,6 +1403,8 @@ class TrainConfig(BaseConfig):
     """保守冻结策略下解冻 decoder 末尾层数。1=旧行为，仅解冻最后一层；2/3 可用于扩大 SSCL 微调容量。"""
     proto_guidance_freeze_all_except_proto: bool = False
     """[ProtoGuidance] 阶段 A 冷启动专用：除原型引导模块外冻结全部参数 （跳过 decoder/norm/class_embed 的解冻分支）。实验阶段由 stageA 配方启用。"""
+    proto_guidance_trainable_scope: Literal["all", "token"] = "all"
+    """原型模块内部可训练范围：all 或仅 token 投影层。"""
     sscl_prototype_enabled: bool = False
     """是否启用类别原型库锚定的 SSCL（原型模式）。开启时正样本为本类原型、 负样本为全部类别原型，每个样本恒有正负锚点，摆脱 batch 内同类样本不足 导致的零损失问题。"""
     sscl_prototype_momentum: float = 0.99

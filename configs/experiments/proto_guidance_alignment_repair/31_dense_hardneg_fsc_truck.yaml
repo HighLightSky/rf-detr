@@ -1,0 +1,24 @@
+# 阶段五候选：FSC 与 truck；必须使用 26 类数据与对应 26 类原型产物后运行
+model:
+  variant: medium
+  num_classes: 26
+  resolution: 1024
+  gradient_checkpointing: true
+  pretrain_weights: output/0818-SHWX-ProtoGuidance-E4-hardneg-fsc-26class-truck/checkpoint_best_total.pth
+  proto_guidance_enabled: false
+  # 26 类原型产物尚未生成，禁止直接打开 ProtoGuidance
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-truck
+  dataset_file: yolo
+  output_dir: output/proto_guidance_alignment_repair/31_dense_hardneg_fsc_truck
+  epochs: 5
+  batch_size: 16
+  grad_accum_steps: 4
+  num_workers: 6
+  lr: 1e-5
+  lr_encoder: 1e-5
+  eval_interval: 1
+  use_ema: true
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  sscl_freeze_strategy: none

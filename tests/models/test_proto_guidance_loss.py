@@ -158,3 +158,71 @@ class TestLossProtoLabels:
         )["loss_proto_labels"]
 
         assert torch.allclose(repeated, base)
+
+
+class TestLossProtoDense:
+    """验证全量 encoder token 原型对齐损失。"""
+
+    def test_missing_dense_keys_returns_empty(self) -> None:
+        """未输出 dense token 时不影响现有训练路径。"""
+        criterion = _make_criterion()
+        result = criterion.loss_proto_dense({}, [], [], torch.tensor(1.0))
+        assert result == {}
+
+    def test_iou_positive_has_finite_loss_and_gradient(self) -> None:
+        """IoU 正样本应产生有限损失并回传到 dense logits。"""
+        criterion = _make_criterion(num_classes=3)
+        logits = torch.tensor([[[0.0, 3.0, -1.0], [0.0, -1.0, 3.0]]], requires_grad=True)
+        outputs = {
+            "pred_proto_logits_dense": logits,
+            "pred_proto_boxes_dense": torch.tensor([[[0.5, 0.5, 0.4, 0.4], [0.1, 0.1, 0.1, 0.1]]]),
+            "pred_proto_scores_dense": torch.tensor([[0.9, 0.1]]),
+        }
+        targets = [{"labels": torch.tensor([1]), "boxes": torch.tensor([[0.5, 0.5, 0.4, 0.4]])}]
+
+        result = criterion.loss_proto_dense(outputs, targets, [], torch.tensor(1.0))
+
+        assert torch.isfinite(result["loss_proto_dense"])
+        assert torch.allclose(result["proto_dense_positive_count"], torch.tensor(1.0))
+        result["loss_proto_dense"].backward()
+        assert logits.grad is not None
+        assert float(logits.grad.abs().sum()) > 0.0
+
+    def test_center_fallback_supervises_small_object(self) -> None:
+        """低 IoU 小目标应由 proposal 中心落框规则补充正样本。"""
+        criterion = _make_criterion(num_classes=2)
+        logits = torch.tensor([[[0.0, 2.0], [2.0, 0.0]]])
+        outputs = {
+            "pred_proto_logits_dense": logits,
+            "pred_proto_boxes_dense": torch.tensor([[[0.5, 0.5, 0.02, 0.02], [0.1, 0.1, 0.02, 0.02]]]),
+            "pred_proto_scores_dense": torch.tensor([[0.9, 0.1]]),
+        }
+        targets = [{"labels": torch.tensor([1]), "boxes": torch.tensor([[0.5, 0.5, 0.2, 0.2]])}]
+
+        result = criterion.loss_proto_dense(outputs, targets, [], torch.tensor(1.0))
+
+        assert torch.allclose(result["proto_dense_positive_count"], torch.tensor(1.0))
+        assert float(result["proto_dense_accuracy"]) == 1.0
+
+    def test_loss_is_class_balanced(self) -> None:
+        """重复同类 dense 正样本不应改变各类别等权的损失。"""
+        criterion = _make_criterion(num_classes=2)
+        logits = torch.tensor([[[2.0, -1.0], [-1.0, 2.0], [2.0, -1.0]]])
+        targets = [{"labels": torch.tensor([0, 1]), "boxes": torch.tensor([[0.2, 0.2, 0.2, 0.2], [0.8, 0.8, 0.2, 0.2]])}]
+        base_outputs = {
+            "pred_proto_logits_dense": logits[:, :2],
+            "pred_proto_boxes_dense": torch.tensor([[[0.2, 0.2, 0.2, 0.2], [0.8, 0.8, 0.2, 0.2]]]),
+            "pred_proto_scores_dense": torch.tensor([[0.8, 0.8]]),
+        }
+        repeated_outputs = {
+            "pred_proto_logits_dense": logits,
+            "pred_proto_boxes_dense": torch.tensor(
+                [[[0.2, 0.2, 0.2, 0.2], [0.8, 0.8, 0.2, 0.2], [0.2, 0.2, 0.2, 0.2]]]
+            ),
+            "pred_proto_scores_dense": torch.tensor([[0.8, 0.8, 0.7]]),
+        }
+
+        base = criterion.loss_proto_dense(base_outputs, targets, [], torch.tensor(2.0))["loss_proto_dense"]
+        repeated = criterion.loss_proto_dense(repeated_outputs, targets, [], torch.tensor(2.0))["loss_proto_dense"]
+
+        assert torch.allclose(base, repeated)

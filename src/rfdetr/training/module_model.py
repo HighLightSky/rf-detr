@@ -681,6 +681,11 @@ class RFDETRModelModule(LightningModule):
         if proto_guidance is not None:
             for param in proto_guidance.parameters():
                 param.requires_grad = True
+            if getattr(self.train_config, "proto_guidance_trainable_scope", "all") == "token":
+                for param in proto_guidance.parameters():
+                    param.requires_grad = False
+                for param in proto_guidance.fusion.projectors.proj_token.parameters():
+                    param.requires_grad = True
             logger.info(f"[ProtoGuidance] 原型引导参数可训练性恢复完成：{proto_guidance.describe_freeze()}")
         logger.info(
             "[SSCL] 冻结策略已应用：%s（decoder 末尾 %d/%d 层 + decoder norm + class_embed + 附加模块参数可训练）",

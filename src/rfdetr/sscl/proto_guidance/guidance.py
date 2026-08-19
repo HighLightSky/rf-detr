@@ -113,6 +113,8 @@ class ProtoGuidance(nn.Module):
         aux_loss_enabled: bool = False,
         visual_ema_update: bool = False,
         visual_ema_momentum: float = 0.99,
+        slot_reduction: Literal["max", "lse"] = "max",
+        slot_reduction_tau: float = 0.1,
     ) -> None:
         super().__init__()
         if num_classes < 1:
@@ -123,6 +125,10 @@ class ProtoGuidance(nn.Module):
             raise ValueError(f"tau_p 必须 > 0，收到 {tau_p}。")
         if warmup_epochs < 0.0:
             raise ValueError(f"warmup_epochs 必须 >= 0，收到 {warmup_epochs}。")
+        if slot_reduction not in {"max", "lse"}:
+            raise ValueError(f"slot_reduction 必须是 'max' 或 'lse'，收到 {slot_reduction!r}。")
+        if slot_reduction_tau <= 0.0:
+            raise ValueError(f"slot_reduction_tau 必须 > 0，收到 {slot_reduction_tau}。")
 
         self.num_classes = num_classes
         self.hidden_dim = hidden_dim
@@ -136,6 +142,8 @@ class ProtoGuidance(nn.Module):
         self.content_enabled = bool(content_enabled)
         self.aux_loss_enabled = bool(aux_loss_enabled)
         self.visual_ema_update = bool(visual_ema_update)
+        self.slot_reduction = slot_reduction
+        self.slot_reduction_tau = float(slot_reduction_tau)
 
         self.target_classes = sorted(
             {int(c) for c in (target_classes or []) if 0 <= int(c) < num_classes}
@@ -176,6 +184,13 @@ class ProtoGuidance(nn.Module):
         # enhance_content 记录的最后 gate 值（[bs, Q] detach），供 collect_stats 读取
         self._last_gate: Tensor | None = None
 
+    def train(self, mode: bool = True) -> ProtoGuidance:
+        """切换训练/评估模式，并在独立推理时使用 warmup 完成强度。"""
+        super().train(mode)
+        if not mode:
+            self.current_epoch = self.warmup_epochs
+        return self
+
     @classmethod
     def build(
         cls,
@@ -200,6 +215,8 @@ class ProtoGuidance(nn.Module):
         aux_loss_enabled: bool = False,
         visual_ema_update: bool = False,
         visual_ema_momentum: float = 0.99,
+        slot_reduction: Literal["max", "lse"] = "max",
+        slot_reduction_tau: float = 0.1,
     ) -> ProtoGuidance | None:
         """构建模块并加载离线原型产物。
 
@@ -248,6 +265,8 @@ class ProtoGuidance(nn.Module):
             aux_loss_enabled=aux_loss_enabled,
             visual_ema_update=visual_ema_update,
             visual_ema_momentum=visual_ema_momentum,
+            slot_reduction=slot_reduction,
+            slot_reduction_tau=slot_reduction_tau,
         )
         module.visual_bank.prototypes.copy_(data["visual_prototypes"])
         module.visual_bank.slot_valid_mask.copy_(data["valid_slots"])
@@ -307,7 +326,12 @@ class ProtoGuidance(nn.Module):
         # 逐槽位余弦 [bs, N, C, M] -> 无效槽位置 -inf -> max over M
         sim = torch.einsum("bnd,cmd->bncm", token_h, p_mm)
         sim = sim.masked_fill(~valid.unsqueeze(0).unsqueeze(0), torch.finfo(sim.dtype).min)
-        class_sim = sim.max(dim=-1).values  # [bs, N, C]
+        if self.slot_reduction == "lse":
+            class_sim = self.slot_reduction_tau * torch.logsumexp(
+                sim / self.slot_reduction_tau, dim=-1
+            )
+        else:
+            class_sim = sim.max(dim=-1).values  # [bs, N, C]
         class_valid = valid.any(dim=-1)
         class_sim = class_sim.masked_fill(
             ~class_valid.view(1, 1, -1),

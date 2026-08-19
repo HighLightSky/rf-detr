@@ -1,0 +1,51 @@
+# ProtoGuidance 对齐修复：全 encoder token dense CE，仅训练 token 投影
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 1024
+  gradient_checkpointing: true
+  pretrain_weights: output/0816在120ep1024基础上续训多模态原型-效果最好/0816-SHWX-ProtoGuidance-E4-hardneg-fsc-次好-当前最佳/checkpoint_best_total.pth
+  proto_guidance_enabled: true
+  proto_guidance_artifacts_path: data/proto_guidance_shwx_1024_current.pt
+  proto_guidance_fusion_mode: simple
+  proto_guidance_num_slots: 10
+  proto_guidance_position_enabled: false
+  proto_guidance_content_enabled: false
+  proto_guidance_aux_loss_enabled: false
+  proto_guidance_dense_loss_enabled: true
+  proto_guidance_dense_loss_weight: 1.0
+  proto_guidance_dense_iou_pos: 0.3
+  proto_guidance_dense_iou_ignore: 0.1
+  proto_guidance_dense_center_fallback_topk: 4
+  proto_guidance_slot_reduction: max
+  proto_guidance_tau_p: 0.2
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_file: yolo
+  output_dir: output/proto_guidance_alignment_repair/10_dense_ce_token_only
+  epochs: 5
+  batch_size: 16
+  grad_accum_steps: 4
+  num_workers: 6
+  lr: 1e-5
+  lr_encoder: 1e-5
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  lr_drop: 4
+  warmup_epochs: 0.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 1
+  use_ema: true
+  compute_val_loss: true
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+  sscl_freeze_strategy: conservative
+  proto_guidance_freeze_all_except_proto: true
+  proto_guidance_trainable_scope: token

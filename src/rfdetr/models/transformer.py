@@ -259,6 +259,7 @@ class Transformer(nn.Module):
         # [ProtoGuidance] 多模态原型引导模块；由 LWDETR 构建并挂载
         # （默认 None = 原版行为，top-k 恒等于线性分数）。
         self.proto_guidance: "ProtoGuidance | None" = None
+        self.proto_guidance_dense_loss_enabled = False
 
     def export(self) -> None:
         self._export = True
@@ -363,6 +364,9 @@ class Transformer(nn.Module):
             selected_class_ts_parts: list[Tensor] = []
             proto_logits_ts_parts: list[Tensor] = []
             proto_score_ts_parts: list[Tensor] = []
+            dense_proto_logits_parts: list[Tensor] = []
+            dense_proto_boxes_parts: list[Tensor] = []
+            dense_proto_scores_parts: list[Tensor] = []
             proto_confidence_ts_parts: list[Tensor] = []
             linear_logits_ts_parts: list[Tensor] = []
             topk_ts_parts: list[Tensor] = []
@@ -407,6 +411,15 @@ class Transformer(nn.Module):
                         select_score_gidx = linear_score_gidx
                 else:
                     select_score_gidx = linear_score_gidx
+
+                if self.proto_guidance_dense_loss_enabled and proto_logits_gidx is not None:
+                    dense_proto_logits_parts.append(proto_logits_gidx)
+                    dense_proto_boxes_parts.append(
+                        enc_outputs_coord_unselected_gidx
+                        if self.bbox_reparam
+                        else enc_outputs_coord_unselected_gidx.sigmoid()
+                    )
+                    dense_proto_scores_parts.append(linear_score_gidx)
 
                 topk = min(self.num_queries, enc_outputs_class_unselected_gidx.shape[-2])
                 topk_proposals_gidx = torch.topk(select_score_gidx, topk, dim=1)[1]  # bs, nq
@@ -481,6 +494,15 @@ class Transformer(nn.Module):
             )  # bs, nq*G, C+1
             topk_ts = torch.cat(topk_ts_parts, dim=1) if topk_ts_parts else None  # bs, nq*G
             linear_topk_ts = torch.cat(linear_topk_ts_parts, dim=1) if linear_topk_ts_parts else None  # bs, nq*G
+            dense_proto = None
+            if dense_proto_logits_parts:
+                dense_proto = {
+                    "pred_proto_logits_dense": torch.cat(dense_proto_logits_parts, dim=1),
+                    "pred_proto_boxes_dense": torch.cat(dense_proto_boxes_parts, dim=1),
+                    "pred_proto_scores_dense": torch.cat(dense_proto_scores_parts, dim=1),
+                }
+        else:
+            dense_proto = None
 
         enc_kp_predictions = None
         init_kp_ref_xy = None
@@ -646,8 +668,9 @@ class Transformer(nn.Module):
                 return_values.append(boxes_ts.sigmoid())
             # [ProtoGuidance] 选中 query 的原型 logits（[bs, nq*G, C]；无模块时为 None）
             return_values.append(proto_logits_ts)
+            return_values.append(dense_proto)
         else:
-            return_values.extend([None, None, None])
+            return_values.extend([None, None, None, None])
 
         if self.use_grouppose_keypoints:
             return_values.append(keypoint_hs)
