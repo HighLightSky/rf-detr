@@ -24,7 +24,6 @@ As an AI agent contributing to RF-DETR, you are responsible for:
 
 2. **Adhering to code quality standards**
 
-    - **禁止运行 `pre-commit run --all-files`**（会对整个仓库产生大量无关格式改动，见 [Code Quality & Linting](#code-quality--linting)）
     - Follow type hint and docstring requirements
     - Prefer direct project imports; conventional third-party aliases are allowed
 
@@ -45,6 +44,10 @@ As an AI agent contributing to RF-DETR, you are responsible for:
     - Avoid over-engineering and unnecessary abstractions
     - Write secure code (prevent injection vulnerabilities)
     - Follow existing patterns in the codebase
+
+6. **Committing**
+
+    - 每次 commit 都不要携带 `Co-Authored-By` 尾注（包括 Claude 默认附带的尾注），保持提交信息简洁
 
 > [!NOTE]
 > Keeping documentation current ensures consistency across agent contributions and reduces repeated feedback on the same issues.
@@ -124,19 +127,8 @@ See [CI Testing](.github/CONTRIBUTING.md#ci-testing) in CONTRIBUTING.md for deta
 > [!NOTE]
 > **Canonical Reference:** See [Code Quality and Linting](.github/CONTRIBUTING.md#code-quality-and-linting) in CONTRIBUTING.md for setup and details.
 
-### Command
-
-> [!WARNING]
-> **禁止运行 `pre-commit run --all-files`。**
-> `--all-files` 会让所有自动修复钩子扫描**整个仓库**：
-> prettier 会重排所有 yaml/toml（破坏手工对齐的注释列）、ruff 会按字母序重排所有文件的 import、
-> docformatter 会重排所有 docstring——产生与本次改动无关的大规模格式 diff。
-> 若确需运行 pre-commit，只对本次改动的文件执行：`pre-commit run --files <本次改动文件>`；
-> 提交时钩子会自动只检查暂存文件，无需手动全仓扫描。
-
 **Configuration Files:**
 
-- `.pre-commit-config.yaml` - Pre-commit hooks (ruff, mdformat, prettier, codespell, license headers)
 - `pyproject.toml` - Ruff linting rules (`[tool.ruff]` section)
 
 **License Header (required for all Python files):**
@@ -169,8 +161,6 @@ uv run mkdocs build
 - **Source:** `docs/` directory (Markdown)
 - **Config:** `mkdocs.yaml` (uses custom YAML tags: `!!python/name`)
 - **Deployment:** GitHub Actions publishes to GitHub Pages
-
-**Note:** `mkdocs.yaml` is checked by the `check-yaml` pre-commit hook with `--unsafe` so custom YAML tags such as `!!python/name` are accepted.
 
 ## Package Building
 
@@ -302,7 +292,7 @@ result = subprocess.run(
     - Features: Test all major use cases
     - Run: `uv run --no-sync pytest src/ tests/ -n 2 -m "not gpu" --ignore=tests/run_smoke_all_models.py --timeout=240 --durations=50`
 5. **Build (if needed):** `uv build`
-6. **Commit:** Pre-commit hooks run automatically on staged files only（不要手动运行 `pre-commit run --all-files`）
+6. **Commit:** 提交信息保持简洁，不要携带 `Co-Authored-By` 尾注
 
 ### Adding New Model Variants
 

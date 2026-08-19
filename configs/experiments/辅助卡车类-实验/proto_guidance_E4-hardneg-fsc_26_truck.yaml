@@ -34,8 +34,8 @@ train:
   dataset_file: yolo
   output_dir: output/0820-SHWX-ProtoGuidance-E4-hardneg-fsc-26class-truck
   epochs: 20
-  batch_size: 16
-  grad_accum_steps: 4
+  batch_size: 32
+  grad_accum_steps: 2
   num_workers: 6
   lr: 1e-5
   lr_encoder: 1e-5
@@ -58,8 +58,13 @@ train:
   class_balanced_sampling: true
   class_balanced_class_ids: [0, 1, 24, 25]
 
-  # 26 类实验默认关闭补丁粘贴，先隔离显式 truck 类别的真实收益。
-  patch_paste_enabled: false
+  # 补丁粘贴
+  patch_paste_enabled: true
+  patch_paste_dir: data/fsc_patch_pool   # 由 build_fsc_patch_pool.py 生成
+  patch_paste_prob: 0.5
+  patch_paste_max_patches: 2
+  patch_paste_target_classes: [24]       # 宿主约束：只贴到含发射车的图
+  patch_paste_neg_ratio: 0.5
 
   sscl_enabled: true
   sscl_semantic_matrix_path: data/semantic_matrix_shwx_truck_26.pt

@@ -2,10 +2,10 @@
 # 用法: python src/scripts/test.py -c configs/experiments/test_shwx.yaml
 test:
   dataset: shwx # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test
   resolution: 1024
-  checkpoint: output/0816在120ep1024基础上续训多模态原型-效果最好/0816-SHWX-ProtoGuidance-E4-hardneg-fsc-次好-当前最佳/checkpoint_best_total.pth
-  output_dir: output/0816在120ep1024基础上续训多模态原型-效果最好/0816-SHWX-ProtoGuidance-E4-hardneg-fsc-次好-当前最佳
+  checkpoint: output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024/checkpoint_best_total.pth
+  output_dir: output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024
   conf_threshold: 0.25 # 全局置信度阈值
   class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}；可整段贴入 calibrate_thresholds 产物
   device: cuda:0 # 无 CUDA 时自动回退 CPU
