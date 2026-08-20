@@ -3,9 +3,13 @@
 test_dual:
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test
   cache_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test/.rfdetr_dual_cache/shwx_v1
-  output_dir: output/dual-shwx-medium-1024/test_dual
-  pan_checkpoint: output/dual-shwx-medium-1024/pan/checkpoint_best_total.pth
-  rgb_checkpoint: output/dual-shwx-medium-1024/rgb/checkpoint_best_ema.pth
+  # PAN 使用 v3：船舶 macro FDR 为 0.0961，是当前最低虚警候选。
+  # RGB 使用 ProtoGuidance 对齐修复基线：飞机指标更优，FSC FDR=0.2887。
+  output_dir: output/dual-v3-pan-proto00-rgb-1024/test_dual
+  pan_checkpoint: output/sscl-macro-balanced-v3-ship-hardneg/checkpoint_best_total.pth
+  pan_checkpoint_class_space: global
+  rgb_checkpoint: output/proto_guidance_alignment_repair/00_baseline_1024/checkpoint_best_total.pth
+  rgb_checkpoint_class_space: global
   resolution: 1024
   conf_threshold: 0.25
   class_conf_thresholds: {}

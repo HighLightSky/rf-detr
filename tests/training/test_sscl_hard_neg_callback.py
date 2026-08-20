@@ -175,6 +175,36 @@ class TestSSCLHardNegCallback:
         others[2] = 0
         assert int(others.sum().item()) == 0
 
+    def test_proto_guidance_source_adds_repulsion(self) -> None:
+        """难例原型来源切换到 ProtoGuidance 时应产生可反传排斥项。"""
+        module = _build_module(training=True, hard_neg_enabled=True)
+        module.train_config.sscl_hard_neg_proto_source = "proto_guidance"
+        outputs = _make_outputs()
+        query_feature = torch.nn.functional.normalize(outputs["hs"][0, 3].detach(), dim=0)
+
+        class _FakeGuidance:
+            fusion = SimpleNamespace(projectors=SimpleNamespace(proj_token=torch.nn.Identity()))
+
+            @staticmethod
+            def fused_prototypes() -> tuple[torch.Tensor, torch.Tensor]:
+                prototypes = torch.zeros(3, 1, 16)
+                prototypes[0, 0] = query_feature
+                return prototypes, torch.ones(3, 1, dtype=torch.bool)
+
+        object.__setattr__(
+            module,
+            "model",
+            SimpleNamespace(transformer=SimpleNamespace(proto_guidance=_FakeGuidance())),
+        )
+        losses, stats = module._hard_negative_suppression_loss(
+            outputs, torch.tensor([0]), torch.tensor([3])
+        )
+        assert losses["loss_sscl_hard_neg"].item() > 0.0
+        assert stats["hn_proto_loss"] > 0.0
+        losses["loss_sscl_hard_neg"].backward()
+        assert outputs["hs"].grad is not None
+        assert outputs["hs"].grad[0, 3].abs().sum().item() > 0.0
+
     def test_callback_disabled_no_change(self) -> None:
         """禁用难例时损失与不启用完全一致（基线行为不变）。"""
         module = _build_module(training=True, hard_neg_enabled=False)
@@ -284,6 +314,35 @@ class TestHardNegConfigValidation:
                 dataset_dir="/tmp/dummy",
                 sscl_hard_neg_enabled=True,
                 sscl_hard_neg_loss_lambda=-0.1,
+            )
+
+    def test_config_accepts_class_balanced_selection(self) -> None:
+        """类均衡难例选择配置应通过校验并保留参数。"""
+        cfg = TrainConfig(
+            dataset_dir="/tmp/dummy",
+            sscl_hard_neg_enabled=True,
+            sscl_hard_neg_selection_mode="class_balanced",
+            sscl_hard_neg_class_quota=2,
+        )
+        assert cfg.sscl_hard_neg_selection_mode == "class_balanced"
+        assert cfg.sscl_hard_neg_class_quota == 2
+
+    def test_config_rejects_bad_class_quota(self) -> None:
+        """类均衡首轮配额必须为正数。"""
+        with pytest.raises(ValueError, match="sscl_hard_neg_class_quota"):
+            TrainConfig(
+                dataset_dir="/tmp/dummy",
+                sscl_hard_neg_enabled=True,
+                sscl_hard_neg_class_quota=0,
+            )
+
+    def test_config_rejects_negative_class_score_threshold_id(self) -> None:
+        """按类难例阈值不应接受负类别索引。"""
+        with pytest.raises(ValueError, match="sscl_hard_neg_target_score_thresholds"):
+            TrainConfig(
+                dataset_dir="/tmp/dummy",
+                sscl_hard_neg_enabled=True,
+                sscl_hard_neg_target_score_thresholds={-1: -1.5},
             )
 
 

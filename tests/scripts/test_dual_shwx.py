@@ -92,6 +92,19 @@ def test_public_class_sets_are_disjoint_and_complete() -> None:
     assert set(PAN_CLASSES) | set(RGB_CLASSES) == set(range(25))
 
 
+def test_global_predictions_are_filtered_without_remapping() -> None:
+    """验证全局类别权重只保留路由模态的类别且不改变类别索引。"""
+    records = [
+        eval_lib.BoxRecord("sample", 0, (1.0, 1.0, 3.0, 3.0), 0.9),
+        eval_lib.BoxRecord("sample", 3, (2.0, 2.0, 4.0, 4.0), 0.8),
+        eval_lib.BoxRecord("sample", 24, (3.0, 3.0, 5.0, 5.0), 0.7),
+    ]
+
+    filtered = test_dual_shwx._filter_global_records(records, set(PAN_CLASSES))
+
+    assert [record.class_id for record in filtered] == [0, 3]
+
+
 def test_merged_predictions_save_fp_fn_visualizations(tmp_path: Path) -> None:
     """验证合并后的全局类别预测复用统一的 FP/FN 可视化。"""
     image_path = tmp_path / "sample.jpg"

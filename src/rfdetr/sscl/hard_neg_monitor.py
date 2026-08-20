@@ -16,6 +16,8 @@ CPU 标量统计，epoch 末统一输出到 ``train/sscl/*`` 前缀后清空（�
   均值和最大 IoU 均值；
 - ``hn_logit_loss`` / ``hn_proto_loss``：直接前景 logit 抑制与原型排斥损失
   的未加外部权重数值。
+- ``hn_class_{id}_count``：每图被选择为难例的预测类别数量，用于验证类均衡
+  选择是否实际覆盖了参与比赛 macro 的低频类别。
 """
 
 from __future__ import annotations

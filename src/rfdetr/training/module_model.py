@@ -813,7 +813,8 @@ class RFDETRModelModule(LightningModule):
             - batch_idx/query_idx: ``[K_total]`` 难例位置索引。
             - stats: 喂给 HardNegMonitor 的 CPU 标量（``hn_count`` 每图平均
               难例数、``hn_fill_rate`` IoU 带填充率、``n_unmatched_avg``
-              每图平均未匹配数、``hn_score_mean`` 与 ``hn_iou_mean``）。
+              每图平均未匹配数、``hn_score_mean``、``hn_iou_mean`` 与
+              ``hn_class_{id}_count`` 的每图类别覆盖数）。
         """
         from rfdetr.sscl.hard_neg_selection import select_hard_negatives_for_image
 
@@ -822,6 +823,14 @@ class RFDETRModelModule(LightningModule):
         query_parts: list[Tensor] = []
         n_selected = n_band = n_unmatched = 0
         score_sum = iou_sum = 0.0
+        num_foreground = int(outputs["pred_logits"].shape[-1] - 1)
+        if cfg.sscl_hard_neg_target_classes is None:
+            monitored_classes = list(range(num_foreground))
+        else:
+            monitored_classes = sorted(
+                {int(c) for c in cfg.sscl_hard_neg_target_classes if 0 <= int(c) < num_foreground}
+            )
+        selected_by_class = {class_id: 0 for class_id in monitored_classes}
         for b in range(len(indices)):
             hn_idx, stats = select_hard_negatives_for_image(
                 pred_logits=outputs["pred_logits"][b],
@@ -830,13 +839,23 @@ class RFDETRModelModule(LightningModule):
                 matched_src=indices[b][0],
                 top_k=cfg.sscl_hard_neg_topk,
                 score_thresh=cfg.sscl_hard_neg_score_thresh,
+                class_score_thresholds=getattr(cfg, "sscl_hard_neg_target_score_thresholds", None),
                 target_classes=cfg.sscl_hard_neg_target_classes,
                 iou_low=cfg.sscl_hard_neg_iou_low,
                 iou_high=cfg.sscl_hard_neg_iou_high,
+                selection_mode=getattr(cfg, "sscl_hard_neg_selection_mode", "score"),
+                class_quota=getattr(cfg, "sscl_hard_neg_class_quota", 1),
+                require_class_absent=getattr(cfg, "sscl_hard_neg_require_class_absent", False),
+                present_classes=targets[b].get("labels"),
             )
             if hn_idx.shape[0] > 0:
                 query_parts.append(hn_idx)
                 batch_parts.append(torch.full_like(hn_idx, b))
+                class_idx = torch.as_tensor(monitored_classes, dtype=torch.long, device=hn_idx.device)
+                if class_idx.numel() > 0:
+                    hn_class = class_idx[outputs["pred_logits"][b, hn_idx][:, class_idx].argmax(dim=-1)]
+                    for class_id in hn_class.tolist():
+                        selected_by_class[class_id] += 1
                 score_sum += float(stats["score_mean"]) * hn_idx.shape[0]
                 iou_sum += float(stats["iou_mean"]) * hn_idx.shape[0]
             n_selected += int(stats["n_selected"])
@@ -853,6 +872,10 @@ class RFDETRModelModule(LightningModule):
                     "n_unmatched_avg": float(n_unmatched) / max(1, len(indices)),
                     "hn_score_mean": 0.0,
                     "hn_iou_mean": 0.0,
+                    **{
+                        f"hn_class_{class_id}_count": 0.0
+                        for class_id in selected_by_class
+                    },
                 },
             )
         batch_stats = {
@@ -862,6 +885,9 @@ class RFDETRModelModule(LightningModule):
             "hn_score_mean": score_sum / max(1, n_selected),
             "hn_iou_mean": iou_sum / max(1, n_selected),
         }
+        batch_stats.update(
+            {f"hn_class_{class_id}_count": count / len(indices) for class_id, count in selected_by_class.items()}
+        )
         return torch.cat(batch_parts, dim=0), torch.cat(query_parts, dim=0), batch_stats
 
     def _hard_negative_suppression_loss(
@@ -908,12 +934,12 @@ class RFDETRModelModule(LightningModule):
             float(cfg.sscl_hard_neg_logit_margin),
             device=logits.device,
         )
-        for c, m in (cfg.sscl_hard_neg_target_logit_margins or {}).items():
+        for c, m in (getattr(cfg, "sscl_hard_neg_target_logit_margins", None) or {}).items():
             if 0 <= int(c) < num_foreground:
                 margins[int(c)] = float(m)
         margin_q = margins[hardest_class]
         lambdas = torch.ones(num_foreground, device=logits.device)
-        for c, l in (cfg.sscl_hard_neg_target_loss_lambdas or {}).items():
+        for c, l in (getattr(cfg, "sscl_hard_neg_target_loss_lambdas", None) or {}).items():
             if 0 <= int(c) < num_foreground:
                 lambdas[int(c)] = float(l)
         lambda_q = lambdas[hardest_class]
@@ -923,26 +949,55 @@ class RFDETRModelModule(LightningModule):
         ).mean()
 
         proto_loss = logit_loss.new_zeros(())
-        if (
-            float(cfg.sscl_hard_neg_proto_lambda) > 0.0
-            and "hs" in outputs
-            and getattr(self.sscl_loss, "prototype_mode", False)
-        ):
-            proto_slots, valid_slots = self.sscl_loss.prototype_bank.get_normalized_slot_prototypes()
-            valid_class = torch.zeros(valid_slots.shape[0], dtype=torch.bool, device=valid_slots.device)
-            valid_class[class_idx.to(valid_slots.device)] = True
-            valid_flat = (valid_slots & valid_class.unsqueeze(1)).reshape(-1)
-            if valid_flat.any():
-                proto_flat = proto_slots.reshape(-1, proto_slots.shape[-1])[valid_flat]
+        proto_source = getattr(cfg, "sscl_hard_neg_proto_source", "sscl")
+        if float(cfg.sscl_hard_neg_proto_lambda) > 0.0 and "hs" in outputs:
+            proto_slots: Tensor | None = None
+            valid_slots: Tensor | None = None
+            hn_features: Tensor | None = None
+            if proto_source == "proto_guidance":
+                model = getattr(self, "model", None)
+                transformer = getattr(model, "transformer", None)
+                guidance = getattr(transformer, "proto_guidance", None)
+                projectors = getattr(getattr(guidance, "fusion", None), "projectors", None)
+                proj_token = getattr(projectors, "proj_token", None)
+                fused_prototypes = getattr(guidance, "fused_prototypes", None)
+                if callable(fused_prototypes) and callable(proj_token):
+                    proto_slots, valid_slots = fused_prototypes()
+                    # 原型作为语义教师固定，难例梯度只更新 query 投影路径。
+                    proto_slots = proto_slots.detach()
+                    hn_features = proj_token(outputs["hs"][batch_idx, query_idx])
+            elif proto_source == "sscl" and getattr(self.sscl_loss, "prototype_mode", False):
+                proto_slots, valid_slots = self.sscl_loss.prototype_bank.get_normalized_slot_prototypes()
                 hn_features = self.sscl_loss._project(outputs["hs"][batch_idx, query_idx])
-                hn_norm = F.normalize(hn_features, dim=-1)
-                sim = hn_norm @ proto_flat.T
-                proto_temp = float(cfg.sscl_hard_neg_proto_temperature)
-                proto_loss = (
-                    F.softplus((sim.max(dim=-1).values - float(cfg.sscl_hard_neg_proto_margin)) / proto_temp).mean()
-                    * proto_temp
-                    * float(cfg.sscl_hard_neg_proto_lambda)
-                )
+            if proto_slots is not None and valid_slots is not None and hn_features is not None:
+                if proto_source == "proto_guidance":
+                    selected_slots = proto_slots[hardest_class]
+                    selected_valid = valid_slots[hardest_class]
+                    sim = torch.einsum("kd,kmd->km", F.normalize(hn_features, dim=-1), selected_slots)
+                    sim = sim.masked_fill(~selected_valid, torch.finfo(sim.dtype).min)
+                    valid_rows = selected_valid.any(dim=-1)
+                    peak_sim = sim.max(dim=-1).values
+                else:
+                    valid_class = torch.zeros(valid_slots.shape[0], dtype=torch.bool, device=valid_slots.device)
+                    valid_class[class_idx.to(valid_slots.device)] = True
+                    valid_flat = (valid_slots & valid_class.unsqueeze(1)).reshape(-1)
+                    if not valid_flat.any():
+                        peak_sim = None
+                        valid_rows = None
+                    else:
+                        proto_flat = proto_slots.reshape(-1, proto_slots.shape[-1])[valid_flat]
+                        sim = F.normalize(hn_features, dim=-1) @ proto_flat.T
+                        peak_sim = sim.max(dim=-1).values
+                        valid_rows = torch.ones_like(peak_sim, dtype=torch.bool)
+                if peak_sim is not None and valid_rows is not None and valid_rows.any():
+                    proto_temp = float(cfg.sscl_hard_neg_proto_temperature)
+                    proto_loss = (
+                        F.softplus(
+                            (peak_sim[valid_rows] - float(cfg.sscl_hard_neg_proto_margin)) / proto_temp
+                        ).mean()
+                        * proto_temp
+                        * float(cfg.sscl_hard_neg_proto_lambda)
+                    )
 
         loss = logit_loss + proto_loss
         stats = {

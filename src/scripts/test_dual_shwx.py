@@ -83,6 +83,21 @@ def _remap_records(records: list[eval_lib.BoxRecord], class_offset: int) -> list
     ]
 
 
+def _filter_global_records(
+    records: list[eval_lib.BoxRecord], allowed_classes: set[int]
+) -> list[eval_lib.BoxRecord]:
+    """筛选全局 25 类权重在当前模态允许输出的类别。"""
+    return [record for record in records if record.class_id in allowed_classes]
+
+
+def _class_space(section: dict[str, Any], modality: str) -> str:
+    """读取局部或全局 checkpoint 的类别空间配置。"""
+    value = str(section.get(f"{modality}_checkpoint_class_space", "local")).lower()
+    if value not in {"local", "global"}:
+        raise ValueError(f"{modality}_checkpoint_class_space 只能是 local 或 global，当前为: {value}")
+    return value
+
+
 def _write_route_audit(manifest: Any, output_path: Path) -> dict[str, Any]:
     """使用测试标签生成路由审计，不参与路由决策。"""
     counts = {"pan": 0, "rgb": 0, "correct": 0, "incorrect": 0, "ambiguous": 0}
@@ -157,6 +172,8 @@ def main() -> None:
     manifest = prepare_dual_dataset(dataset_dir, cache_dir, rebuild=False)
     pan_checkpoint = Path(section.get("pan_checkpoint", output_dir.parent / "pan" / "checkpoint_best_total.pth"))
     rgb_checkpoint = Path(section.get("rgb_checkpoint", output_dir.parent / "rgb" / "checkpoint_best_total.pth"))
+    pan_class_space = _class_space(section, "pan")
+    rgb_class_space = _class_space(section, "rgb")
     infer_fields = {field.name for field in dataclasses.fields(eval_lib.InferenceCfg)}
     infer = eval_lib.InferenceCfg(**{key: value for key, value in section.items() if key in infer_fields})
     resolution = int(section["resolution"]) if section.get("resolution") else None
@@ -164,12 +181,22 @@ def main() -> None:
     pan_paths = manifest.paths("test", "pan")
     rgb_paths = manifest.paths("test", "rgb")
     pan_records, pan_throughput, pan_timed = _predict_one_model(
-        pan_checkpoint, pan_paths, len(PAN_CLASSES), infer, resolution
+        pan_checkpoint, pan_paths, 25 if pan_class_space == "global" else len(PAN_CLASSES), infer, resolution
     )
     rgb_records, rgb_throughput, rgb_timed = _predict_one_model(
-        rgb_checkpoint, rgb_paths, len(RGB_CLASSES), infer, resolution
+        rgb_checkpoint, rgb_paths, 25 if rgb_class_space == "global" else len(RGB_CLASSES), infer, resolution
     )
-    pred_records = pan_records + _remap_records(rgb_records, 4)
+    pan_global_records = (
+        _filter_global_records(pan_records, set(PAN_CLASSES))
+        if pan_class_space == "global"
+        else pan_records
+    )
+    rgb_global_records = (
+        _filter_global_records(rgb_records, set(RGB_CLASSES))
+        if rgb_class_space == "global"
+        else _remap_records(rgb_records, 4)
+    )
+    pred_records = pan_global_records + rgb_global_records
 
     dataset = eval_lib.build_dataset_cfg("shwx", data_dir=dataset_dir, output_dir=output_dir)
     test_image_paths = eval_lib.read_test_image_paths(dataset.test_image_dir)
@@ -218,7 +245,10 @@ def main() -> None:
     combined_throughput = total_timed / total_seconds if total_seconds else 0.0
     report = eval_lib.build_test_report(
         dataset_name="shwx-dual",
-        checkpoint_path=f"PAN={pan_checkpoint}; RGB={rgb_checkpoint}",
+        checkpoint_path=(
+            f"PAN={pan_checkpoint} ({pan_class_space}); "
+            f"RGB={rgb_checkpoint} ({rgb_class_space})"
+        ),
         test_image_paths=test_image_paths,
         gt_records=gt_records,
         pred_records=pred_records,

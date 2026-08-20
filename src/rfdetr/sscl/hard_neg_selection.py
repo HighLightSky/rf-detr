@@ -23,6 +23,8 @@ query 降低前景分数，从而对虚警本身反传。
 
 from __future__ import annotations
 
+from typing import Literal
+
 import torch
 from torch import Tensor
 
@@ -40,9 +42,14 @@ def select_hard_negatives_for_image(
     matched_src: Tensor,
     top_k: int = 3,
     score_thresh: float = 0.0,
+    class_score_thresholds: dict[int, float] | None = None,
     target_classes: list[int] | Tensor | None = None,
     iou_low: float = IOU_BAND_LOW,
     iou_high: float = IOU_BAND_HIGH,
+    selection_mode: Literal["score", "class_balanced"] = "score",
+    class_quota: int = 1,
+    require_class_absent: bool = False,
+    present_classes: list[int] | Tensor | None = None,
 ) -> tuple[Tensor, dict[str, float]]:
     """单图难例负样本选择（纯函数，无梯度副作用）。
 
@@ -55,9 +62,18 @@ def select_hard_negatives_for_image(
             （被排除，绝不能成为难例）。
         top_k: 每图最多选取的难例数量（按最大前景 logit 降序，stable）。
         score_thresh: 最大前景 logit 下限，低于该值不选。
+        class_score_thresholds: 按预测类别覆盖 score_thresh 的阈值。
         target_classes: 参与挖掘的前景类别索引。为 ``None`` 时使用全部前景类。
         iou_low: 难例 IoU 带下界。
         iou_high: 难例 IoU 带上界。
+        selection_mode: ``"score"`` 按全局分数取 top-k；``"class_balanced"``
+            先为每个预测类别保留最多 ``class_quota`` 个难例，再按分数填满
+            剩余名额，用于避免宏平均指标被单一类别的难例梯度占满。
+        class_quota: 类均衡模式下每个预测类别的首轮配额。
+        require_class_absent: 是否只保留预测类别不在当前图 GT 中的候选。开启后
+            同图同类的重复框和定位偏差真目标不会被 hard-negative 抑制。
+        present_classes: 当前图 GT 中出现的类别索引；仅
+            ``require_class_absent=True`` 时使用。
 
     Returns:
         ``(hn_indices, stats)`` 元组：
@@ -66,6 +82,10 @@ def select_hard_negatives_for_image(
           "iou_mean"}`` CPU 标量。
     """
     device = pred_logits.device
+    if selection_mode not in ("score", "class_balanced"):
+        raise ValueError(f"selection_mode 必须是 score 或 class_balanced，收到 {selection_mode}")
+    if class_quota < 1:
+        raise ValueError(f"class_quota 必须 >= 1，收到 {class_quota}")
     num_q = pred_logits.shape[0]
     num_foreground = max(0, pred_logits.shape[-1] - 1)
 
@@ -98,13 +118,48 @@ def select_hard_negatives_for_image(
         class_idx = class_idx[(class_idx >= 0) & (class_idx < num_foreground)]
     if class_idx.numel() == 0:
         return torch.empty(0, dtype=torch.long, device=device), stats
-    scores = pred_logits[:, class_idx].max(dim=-1).values  # [Q]
-    candidates = in_band & (scores >= score_thresh)
+    target_logits = pred_logits[:, class_idx]
+    scores, predicted_idx = target_logits.max(dim=-1)  # [Q]
+    predicted_class = class_idx[predicted_idx]
+    thresholds = torch.full_like(scores, float(score_thresh))
+    for class_id, class_threshold in (class_score_thresholds or {}).items():
+        thresholds = torch.where(
+            predicted_class == int(class_id),
+            torch.as_tensor(float(class_threshold), device=device, dtype=scores.dtype),
+            thresholds,
+        )
+    candidates = in_band & (scores >= thresholds)
+    if require_class_absent and present_classes is not None:
+        present = torch.as_tensor(present_classes, dtype=torch.long, device=device)
+        if present.numel() > 0:
+            candidates = candidates & ~torch.isin(predicted_class, present)
     selected = torch.empty(0, dtype=torch.long, device=device)
     if candidates.any():
         cand_idx = candidates.nonzero(as_tuple=False).flatten()
-        order = torch.argsort(scores[cand_idx], descending=True, stable=True)[:top_k]
-        selected = cand_idx[order]
+        if selection_mode == "score":
+            order = torch.argsort(scores[cand_idx], descending=True, stable=True)[:top_k]
+            selected = cand_idx[order]
+        else:
+            # 首轮按预测类别配额取样，二轮再按全局分数填充，保持确定性。
+            first_pass: list[Tensor] = []
+            for class_id in class_idx.tolist():
+                class_candidates = cand_idx[predicted_class[cand_idx] == class_id]
+                if class_candidates.numel() == 0:
+                    continue
+                class_order = torch.argsort(scores[class_candidates], descending=True, stable=True)
+                first_pass.append(class_candidates[class_order[:class_quota]])
+            if first_pass:
+                selected = torch.cat(first_pass)
+                first_order = torch.argsort(scores[selected], descending=True, stable=True)
+                selected = selected[first_order[:top_k]]
+            if selected.numel() < top_k:
+                selected_mask = torch.zeros(num_q, dtype=torch.bool, device=device)
+                selected_mask[selected] = True
+                remaining = cand_idx[~selected_mask[cand_idx]]
+                if remaining.numel() > 0:
+                    remaining_order = torch.argsort(scores[remaining], descending=True, stable=True)
+                    fill = remaining[remaining_order[: top_k - selected.numel()]]
+                    selected = torch.cat([selected, fill])
     stats["n_selected"] = float(selected.shape[0])
     if selected.numel() > 0:
         stats["score_mean"] = float(scores[selected].mean().detach().item())

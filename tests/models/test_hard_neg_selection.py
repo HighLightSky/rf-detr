@@ -126,6 +126,80 @@ class TestHardNegSelection:
         )
         assert torch.equal(hn_idx, torch.tensor([3, 1]))
 
+    def test_class_balanced_selection_reserves_each_predicted_class(self) -> None:
+        """类均衡模式应先保留不同预测类别，再按分数填充。"""
+        logits = torch.full((10, 4), -5.0)
+        logits[:, -1] = 9.0
+        # q0/q3 都预测为类 0，q1 预测为类 1；全局 top-2 会吞掉 q1。
+        logits[0, 0] = 8.0
+        logits[3, 0] = 7.0
+        logits[1, 1] = 4.0
+        hn_idx, _ = select_hard_negatives_for_image(
+            logits,
+            _QUERY_BOXES,
+            _GT_BOX,
+            torch.tensor([], dtype=torch.long),
+            top_k=2,
+            target_classes=[0, 1],
+            selection_mode="class_balanced",
+            class_quota=1,
+        )
+        assert torch.equal(hn_idx, torch.tensor([0, 1]))
+
+    def test_class_balanced_selection_fills_remaining_by_score(self) -> None:
+        """类别首轮配额不足 top-k 时应使用剩余候选按分数填充。"""
+        logits = torch.full((10, 4), -5.0)
+        logits[:, -1] = 9.0
+        logits[0, 0] = 8.0
+        logits[3, 0] = 7.0
+        logits[1, 1] = 4.0
+        hn_idx, _ = select_hard_negatives_for_image(
+            logits,
+            _QUERY_BOXES,
+            _GT_BOX,
+            torch.tensor([], dtype=torch.long),
+            top_k=3,
+            target_classes=[0, 1],
+            selection_mode="class_balanced",
+            class_quota=1,
+        )
+        assert torch.equal(hn_idx, torch.tensor([0, 1, 3]))
+
+    def test_class_absent_protection_rejects_present_class(self) -> None:
+        """开启同图类别保护后，不抑制 GT 已出现类别的候选。"""
+        logits = torch.full((10, 4), -5.0)
+        logits[3, 0] = 8.0
+        logits[4, 1] = 7.0
+        hn_idx, _ = select_hard_negatives_for_image(
+            logits,
+            _QUERY_BOXES,
+            _GT_BOX,
+            torch.tensor([], dtype=torch.long),
+            top_k=3,
+            score_thresh=0.0,
+            target_classes=[0, 1, 2],
+            require_class_absent=True,
+            present_classes=torch.tensor([0]),
+        )
+        assert torch.equal(hn_idx, torch.tensor([4]))
+
+    def test_class_score_thresholds_recover_low_logit_class(self) -> None:
+        """按类放宽阈值时应只增加指定类别候选。"""
+        logits = torch.full((10, 4), -5.0)
+        logits[0, 0] = -1.0
+        logits[1, 1] = -1.0
+        selected, _ = select_hard_negatives_for_image(
+            logits,
+            _QUERY_BOXES,
+            _GT_BOX,
+            torch.tensor([], dtype=torch.long),
+            top_k=3,
+            score_thresh=-0.7,
+            target_classes=[0, 1],
+            class_score_thresholds={0: -1.5},
+        )
+        assert torch.equal(selected, torch.tensor([0]))
+
     def test_score_thresh(self) -> None:
         """低于 score_thresh 的候选不选。"""
         scores = [0.0, 0.5, 0.0] + [0.0] * 7  # q1 前景分 0.5

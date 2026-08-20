@@ -1450,8 +1450,17 @@ class TrainConfig(BaseConfig):
     """是否启用难负样本抑制：对高分未匹配 query 增加前景 logit 抑制和可选原型排斥损失。"""
     sscl_hard_neg_topk: int = 3
     """每图最多选取的难负样本数量 k。"""
+    sscl_hard_neg_selection_mode: Literal["score", "class_balanced"] = "score"
+    """难例选择策略：``score`` 为全局分数 top-k；``class_balanced`` 先按
+    预测类别配额取样，再用分数填充剩余名额，减少单一类别吞噬宏平均梯度。"""
+    sscl_hard_neg_class_quota: int = 1
+    """类均衡难例选择首轮每个预测类别的最多样本数。"""
+    sscl_hard_neg_require_class_absent: bool = False
+    """是否只抑制当前图 GT 未出现类别的难例，保护同类重复框与定位偏差真阳。"""
     sscl_hard_neg_score_thresh: float = -2.0
     """难例目标前景 logit 下限（原始 logit，非概率）。"""
+    sscl_hard_neg_target_score_thresholds: dict[int, float] = Field(default_factory=dict)
+    """按预测类别覆盖难例前景 logit 阈值，用于补偿不同类别的 logit 校准差异。"""
     sscl_hard_neg_log_interval: int = 100
     """难例诊断监控采样步间隔（每 N 步采样一次，epoch 末聚合输出到 train/sscl/*）。"""
     sscl_hard_neg_target_classes: list[int] | None = None
@@ -1483,6 +1492,8 @@ class TrainConfig(BaseConfig):
     """难负样本与前景原型余弦相似度的软上界。"""
     sscl_hard_neg_proto_temperature: float = 0.1
     """难负样本原型排斥的 softplus 温度。"""
+    sscl_hard_neg_proto_source: Literal["sscl", "proto_guidance"] = "sscl"
+    """难例原型排斥来源：SSCL EMA 原型或 ProtoGuidance 多模态原型。"""
     sscl_hard_neg_start_epoch: int = 0
     """难负样本抑制开始生效的 epoch（从 0 起计），独立于 ``sscl_start_epoch``。
 
@@ -1793,6 +1804,10 @@ class TrainConfig(BaseConfig):
         """难负样本字段的基础校验。"""
         if self.sscl_hard_neg_topk < 1:
             raise ValueError(f"sscl_hard_neg_topk 必须 >= 1，收到 {self.sscl_hard_neg_topk}。")
+        if self.sscl_hard_neg_class_quota < 1:
+            raise ValueError(
+                f"sscl_hard_neg_class_quota 必须 >= 1，收到 {self.sscl_hard_neg_class_quota}。"
+            )
         if not 0.0 <= self.sscl_hard_neg_iou_low <= 1.0:
             raise ValueError(f"sscl_hard_neg_iou_low 必须在 [0, 1] 内，收到 {self.sscl_hard_neg_iou_low}。")
         if not 0.0 <= self.sscl_hard_neg_iou_high <= 1.0:
@@ -1814,6 +1829,9 @@ class TrainConfig(BaseConfig):
             invalid = [c for c in self.sscl_hard_neg_target_classes if c < 0]
             if invalid:
                 raise ValueError(f"sscl_hard_neg_target_classes 含非法类别索引: {invalid}")
+        for c in self.sscl_hard_neg_target_score_thresholds:
+            if int(c) < 0:
+                raise ValueError(f"sscl_hard_neg_target_score_thresholds 含非法类别索引: {c}")
         if self.sscl_hard_neg_start_epoch < 0:
             raise ValueError(
                 f"sscl_hard_neg_start_epoch 必须 >= 0，收到 {self.sscl_hard_neg_start_epoch}。"
