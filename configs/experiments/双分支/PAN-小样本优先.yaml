@@ -1,0 +1,75 @@
+model:
+  group_detr: 1
+  pretrain_weights: output/proto_guidance_alignment_repair/00_baseline_1024/checkpoint_best_total.pth
+
+  proto_guidance_enabled: true
+  proto_guidance_target_classes: [0, 1, 2, 3]
+  proto_guidance_position_enabled: true
+  proto_guidance_content_enabled: false
+  proto_guidance_aux_loss_enabled: false
+
+  proto_guidance_dense_loss_enabled: true
+  proto_guidance_dense_loss_weight: 0.5
+  proto_guidance_dense_foreground_loss_enabled: true
+  proto_guidance_dense_foreground_loss_weight: 0.75
+
+  proto_guidance_lambda_pos_init: 0.0
+  proto_guidance_lambda_pos_max: 0.35
+  proto_guidance_warmup_epochs: 4.0
+
+train:
+  epochs: 16
+  lr: 5.0e-6
+  lr_encoder: 1.0e-6
+  lr_scheduler: cosine
+  lr_scheduler_kwargs:
+    min_factor: 0.1
+
+  class_balanced_sampling: true
+  class_balanced_threshold: 0.25
+  class_balanced_class_ids: [0, 1]  # 只补 HM、LQS 正样本
+
+  sscl_enabled: true
+  sscl_start_epoch: 3
+  sscl_lambda: 0.035
+  sscl_freeze_strategy: conservative
+  sscl_unfreeze_decoder_layers: 2
+
+  sscl_prototype_enabled: true
+  sscl_prototype_momentum: 0.99
+  sscl_prototype_max_slots: 2
+  sscl_prototype_multi_slot_classes: [0, 1, 2, 3]
+  sscl_prototype_group_pairs: [[0, 1], [2, 3]]
+  sscl_prototype_group_weight: 1.25
+  sscl_projection_enabled: true
+  sscl_projection_dim: 128
+  sscl_prototype_instance_pos: true
+
+  sscl_hard_neg_enabled: true
+  sscl_hard_neg_start_epoch: 7
+
+  # 稀有类专用，不让 QHS/MS 占用难例梯度
+  sscl_hard_neg_target_classes: [0, 1]
+  sscl_hard_neg_selection_mode: class_balanced
+  sscl_hard_neg_class_quota: 1
+  sscl_hard_neg_topk: 2
+
+  # 允许压制有 HM/LQS 图像中的同类未匹配错误 query
+  sscl_hard_neg_require_class_absent: false
+  sscl_hard_neg_iou_low: 0.0
+  sscl_hard_neg_iou_high: 0.15
+  sscl_hard_neg_score_thresh: -1.0
+
+  sscl_hard_neg_logit_margin: -1.5
+  sscl_hard_neg_loss_lambda: 0.06
+  sscl_hard_neg_proto_source: proto_guidance
+  sscl_hard_neg_proto_lambda: 0.03
+  sscl_hard_neg_proto_margin: 0.1
+  sscl_hard_neg_proto_temperature: 0.1
+
+  use_ema: true
+  ema_decay: 0.993
+  checkpoint_interval: 1
+  seed: 61
+
+  sscl_distill_enabled: false
