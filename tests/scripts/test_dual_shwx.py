@@ -133,3 +133,19 @@ def test_merged_predictions_save_fp_fn_visualizations(tmp_path: Path) -> None:
 
     assert (output_dir / "FP" / "target" / "sample.jpg").exists()
     assert (output_dir / "FN" / "target" / "sample.jpg").exists()
+
+
+def test_merged_predictions_save_yolo_when_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证双分支合并预测可按配置保存 YOLO 文件。"""
+    records = [eval_lib.BoxRecord("sample", 0, (1.0, 1.0, 3.0, 3.0), 0.9)]
+    calls: list[tuple[list[eval_lib.BoxRecord], Path, dict[str, tuple[int, int]]]] = []
+    monkeypatch.setattr(eval_lib, "save_yolo_predictions", lambda *args: calls.append(args))
+
+    test_dual_shwx._save_yolo_predictions(
+        records,
+        tmp_path,
+        {"sample": (8, 8)},
+        save_yolo_preds=True,
+    )
+
+    assert calls == [(records, tmp_path / "yolo_preds", {"sample": (8, 8)})]

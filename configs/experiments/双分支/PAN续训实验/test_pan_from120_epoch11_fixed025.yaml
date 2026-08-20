@@ -1,0 +1,20 @@
+# 从 120ep 单阶段续训 epoch 11 regular：hard-negative 启用后的固定 0.25 对照。
+test_dual:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test
+  cache_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test/.rfdetr_dual_cache/shwx_v1
+  output_dir: output/PAN续训实验/PAN从120ep单阶段复现-v1/full_test_epoch11_regular_fixed025
+  pan_checkpoint: output/PAN续训实验/PAN从120ep单阶段复现-v1/checkpoint_epoch11_regular_candidate.pth
+  pan_checkpoint_class_space: global
+  rgb_checkpoint: output/proto_guidance_alignment_repair/00_baseline_1024/checkpoint_best_total.pth
+  rgb_checkpoint_class_space: global
+  resolution: 1024
+  conf_threshold: 0.25
+  class_conf_thresholds: {}
+  device: cuda:0
+  batch_size: 1
+  num_workers: 2
+  prefetch_factor: 2
+  gpu_util_sample_interval: 0.5
+  use_fp16: false
+  save_fp_fn: false
+  save_yolo_preds: false

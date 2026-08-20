@@ -1,0 +1,142 @@
+# PAN 统一续训 v2：稳定复现当前 PAN，并在固定 0.25 下修复召回。
+# v1 已证实将 MS 纳入 hard-negative 会明显损伤召回，本配置严格排除 MS。
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 1024
+  # 旧 checkpoint 缺少 group 元数据；固定单组避免 flat slice 打乱多组 query。
+  group_detr: 1
+  gradient_checkpointing: true
+  pretrain_weights: output/sscl-macro-balanced-v3-ship-hardneg/checkpoint_best_total.pth
+  proto_guidance_enabled: true
+  proto_guidance_artifacts_path: data/proto_guidance_shwx.pt
+  proto_guidance_fusion_mode: simple
+  proto_guidance_num_slots: 10
+  proto_guidance_target_classes: [0, 1, 2, 3]
+  proto_guidance_position_enabled: true
+  proto_guidance_content_enabled: false
+  proto_guidance_aux_loss_enabled: false
+  proto_guidance_dense_loss_enabled: true
+  proto_guidance_dense_loss_weight: 0.5
+  proto_guidance_dense_foreground_loss_enabled: true
+  proto_guidance_dense_foreground_loss_weight: 0.75
+  proto_guidance_dense_background_ratio: 1.0
+  proto_guidance_position_score_mode: foreground_semantic
+  proto_guidance_position_semantic_weight: 0.25
+  proto_guidance_position_score_std_ratio: 0.25
+  proto_guidance_lambda_pos_init: 0.025
+  proto_guidance_lambda_pos_max: 0.35
+  proto_guidance_warmup_epochs: 2.0
+  proto_guidance_dense_iou_pos: 0.3
+  proto_guidance_dense_iou_ignore: 0.1
+  proto_guidance_dense_center_fallback_topk: 6
+  proto_guidance_slot_reduction: lse
+  proto_guidance_slot_reduction_tau: 0.1
+  proto_guidance_tau_p: 0.2
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test
+  dataset_file: yolo
+  output_dir: output/PAN续训实验/PAN统一续训-v2-final
+  epochs: 8
+  batch_size: 16
+  grad_accum_steps: 4
+  num_workers: 6
+  lr: 3.0e-6
+  lr_encoder: 6.0e-7
+  lr_scheduler: cosine
+  lr_scheduler_kwargs:
+    min_factor: 0.1
+  warmup_epochs: 1.0
+  weight_decay: 1.0e-4
+  clip_max_norm: 0.1
+  eval_interval: 1
+  checkpoint_interval: 4
+  skip_best_epochs: 1
+  use_ema: true
+  ema_decay: 0.993
+  ema_tau: 100
+  seed: 52
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  compute_val_loss: false
+
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+  scale_jitter: true
+
+  # 只保护稀有 HM/LQS；QHS/MS 不重复采样，避免分数分布向高召回高虚警漂移。
+  class_balanced_sampling: true
+  class_balanced_threshold: 0.25
+  class_balanced_class_ids: [0, 1]
+  class_balance_enabled: false
+  logit_adjustment_enabled: false
+
+  sscl_enabled: true
+  sscl_semantic_matrix_path: data/semantic_matrix_shwx.pt
+  sscl_matrix_normalize: minmax
+  sscl_lambda: 0.03
+  sscl_tau: 0.1
+  sscl_rho: 0.3
+  sscl_omega_max: 2.0
+  sscl_anchor_classes: [0, 1, 2, 3]
+  sscl_confusing_classes: [0, 1, 2, 3]
+  sscl_start_epoch: 1
+  sscl_freeze_strategy: conservative
+  sscl_unfreeze_decoder_layers: 2
+
+  sscl_prototype_enabled: true
+  sscl_prototype_momentum: 0.99
+  sscl_prototype_min_samples: 1
+  sscl_prototype_max_slots: 2
+  sscl_prototype_multi_slot_classes: [0, 1, 2, 3]
+  sscl_prototype_group_pairs: [[0, 1], [2, 3]]
+  sscl_prototype_group_weight: 1.2
+  sscl_projection_enabled: true
+  sscl_projection_dim: 128
+  sscl_prototype_instance_pos: true
+
+  # 原方案已验证的安全边界：MS 不参与 hard-negative，只由原型/SSCL 改善。
+  sscl_hard_neg_enabled: true
+  sscl_hard_neg_selection_mode: class_balanced
+  sscl_hard_neg_class_quota: 1
+  sscl_hard_neg_require_class_absent: false
+  sscl_hard_neg_topk: 3
+  sscl_hard_neg_score_thresh: -0.7
+  sscl_hard_neg_log_interval: 1
+  sscl_hard_neg_target_classes: [0, 1, 2]
+  sscl_hard_neg_iou_low: 0.0
+  sscl_hard_neg_iou_high: 0.08
+  sscl_hard_neg_loss_lambda: 0.05
+  sscl_hard_neg_target_logit_margins: {2: -1.8}
+  sscl_hard_neg_target_loss_lambdas: {2: 0.5}
+  sscl_hard_neg_logit_margin: -1.5
+  sscl_hard_neg_logit_temperature: 1.0
+  sscl_hard_neg_proto_source: proto_guidance
+  sscl_hard_neg_proto_lambda: 0.03
+  sscl_hard_neg_proto_margin: 0.1
+  sscl_hard_neg_proto_temperature: 0.1
+  sscl_hard_neg_start_epoch: 3
+
+  sscl_distill_enabled: false
+  sscl_teacher_checkpoint: null
+
+test:
+  dataset: shwx
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test
+  resolution: 1024
+  checkpoint: output/PAN续训实验/PAN统一续训-v2-final/checkpoint_best_total.pth
+  output_dir: output/PAN续训实验/PAN统一续训-v2-final/full_test_fixed025
+  conf_threshold: 0.25
+  class_conf_thresholds: {}
+  device: cuda:0
+  batch_size: 32
+  num_workers: 12
+  prefetch_factor: 3
+  use_fp16: false
+  save_fp_fn: true
+  save_yolo_preds: false

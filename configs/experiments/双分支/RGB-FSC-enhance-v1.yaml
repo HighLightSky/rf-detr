@@ -1,0 +1,35 @@
+_template:
+  class_counts: auto
+
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 1024
+  gradient_checkpointing: true
+  freeze_encoder: false
+  pretrain_weights: output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024/checkpoint_best_total.pth
+  proto_guidance_enabled: false
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test
+  dataset_file: yolo
+  output_dir: output/0820双分支方案/RGB-FSC-enhance-v1
+  epochs: 30
+  batch_size: 16
+  grad_accum_steps: 4
+  lr: 1e-5
+  lr_encoder: 2e-6
+  weight_decay: 1e-4
+  lr_drop: 6
+  eval_interval: 1
+  use_ema: true
+  seed: 42
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+
+  class_balanced_sampling: true
+  class_balanced_class_ids: [24]  # 仅 FSC 额外采样
+  class_balance_enabled: false
+  sscl_enabled: false
+  sscl_hard_neg_enabled: false

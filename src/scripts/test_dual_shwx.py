@@ -161,6 +161,26 @@ def _save_fp_fn_visualizations(
     print("[完成] 双模型 FP/FN 可视化保存完成")
 
 
+def _save_yolo_predictions(
+    pred_records: list[eval_lib.BoxRecord],
+    output_dir: Path,
+    image_size_map: dict[str, tuple[int, int]],
+    *,
+    save_yolo_preds: bool,
+) -> None:
+    """按配置保存双分支合并后的 YOLO 预测。
+
+    Args:
+        pred_records: 合并后的全局类别预测。
+        output_dir: 评测输出目录。
+        image_size_map: 图像尺寸映射。
+        save_yolo_preds: 是否写入 YOLO 预测文件。
+    """
+    if not save_yolo_preds:
+        return
+    eval_lib.save_yolo_predictions(pred_records, output_dir / "yolo_preds", image_size_map)
+
+
 def main() -> None:
     """加载双模型、按模态推理并生成统一比赛报告。"""
     args = _parse_args()
@@ -202,6 +222,12 @@ def main() -> None:
     test_image_paths = eval_lib.read_test_image_paths(dataset.test_image_dir)
     image_size_map = eval_lib.build_image_size_map(test_image_paths)
     gt_records = eval_lib.load_yolo_labels(dataset.label_dir, image_size_map)
+    _save_yolo_predictions(
+        pred_records,
+        output_dir,
+        image_size_map,
+        save_yolo_preds=bool(section.get("save_yolo_preds", False)),
+    )
     metric_config = eval_lib.EvalConfig(
         class_to_group=dataset.class_to_group,
         group_iou_thresholds=dataset.group_iou_thresholds,

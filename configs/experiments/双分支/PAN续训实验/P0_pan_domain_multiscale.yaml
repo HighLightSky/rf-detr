@@ -1,0 +1,72 @@
+# PAN 续训 P0：从 120 epoch 基线直接进行全色域与多尺度适配。
+# 目标：先验证纯检测训练能否提高 MS/QHS 召回，同时保持 HM/LQS。
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 1024
+  gradient_checkpointing: true
+  freeze_encoder: false
+  pretrain_weights: output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024/checkpoint_best_total.pth
+  proto_guidance_enabled: false
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test/.rfdetr_dual_cache/shwx_v1/pan
+  dataset_file: yolo
+  output_dir: output/PAN续训实验/P0_pan_domain_multiscale
+  epochs: 10
+  batch_size: 16
+  grad_accum_steps: 4
+  num_workers: 6
+  lr: 1.0e-5
+  lr_encoder: 2.0e-6
+  lr_scheduler: cosine
+  lr_scheduler_kwargs:
+    min_factor: 0.1
+  warmup_epochs: 1.0
+  weight_decay: 1.0e-4
+  clip_max_norm: 0.1
+  eval_interval: 1
+  checkpoint_interval: 5
+  skip_best_epochs: 1
+  use_ema: true
+  ema_decay: 0.99
+  ema_tau: 100
+  seed: 42
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  compute_val_loss: false
+
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: true
+  expanded_scales: false
+  scale_jitter: true
+
+  # HM/LQS 样本很少，仅做平方根频率过采样；MS/QHS 图仍各保留一次。
+  class_balanced_sampling: true
+  class_balanced_threshold: null
+  class_balanced_class_ids: [0, 1]
+
+  class_balance_enabled: false
+  logit_adjustment_enabled: false
+  sscl_enabled: false
+  sscl_hard_neg_enabled: false
+
+test:
+  dataset: shwx
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test
+  resolution: 1024
+  checkpoint: output/PAN续训实验/P0_pan_domain_multiscale/checkpoint_best_total.pth
+  output_dir: output/PAN续训实验/P0_pan_domain_multiscale/full_test
+  conf_threshold: 0.25
+  class_conf_thresholds: {}
+  device: cuda:0
+  batch_size: 32
+  num_workers: 12
+  prefetch_factor: 3
+  use_fp16: false
+  save_fp_fn: false
+  save_yolo_preds: false

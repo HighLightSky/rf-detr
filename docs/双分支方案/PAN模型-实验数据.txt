@@ -1,0 +1,230 @@
+================================================================================
+RF-DETR 测试结果报告
+生成时间: 2026-08-20 12:19:51
+数据集: shwx
+权重: /home/liu/wzt/rf-detr/output/sscl-macro-balanced-v3-ship-hardneg/checkpoint_best_total.pth
+测试分辨率: 1024
+数据集目录: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test
+================================================================================
+测试图像数: 1344
+真实框数: 7171
+预测框数: 7259
+置信度阈值: 0.25
+IoU 阈值: ship=0.50，aircraft=0.50，vehicle=0.35
+================================================================================
+推理测速结果
+GPU 批量大小: 32  |  CPU 预取 worker 数: 12
+推理吞吐: 63.7 img/s  （1312 张 / 20.6s）
+================================================================================
+比赛指标评估结果（测试集）
+all        TP=6804   FP=455    FN=367    Recall=0.9488 FDR=0.0627 Precision=0.9373
+aircraft   TP=5253   FP=98     FN=25     Recall=0.9953 FDR=0.0183 Precision=0.9817
+ship       TP=1415   FP=298    FN=311    Recall=0.8198 FDR=0.1740 Precision=0.8260
+vehicle    TP=136    FP=59     FN=31     Recall=0.8144 FDR=0.3026 Precision=0.6974
+--------------------------------------------------------------------------------
+每个大类下小类指标的平均值（macro 平均）
+--------------------------------------------------------------------------------
+ship       avgTP=353.75 avgFP= 74.50 avgFN= 77.75 avgRecall=0.8664 avgFDR=0.0961 avgPrecision=0.9039
+aircraft   avgTP=262.65 avgFP=  4.90 avgFN=  1.25 avgRecall=0.9957 avgFDR=0.0192 avgPrecision=0.9808
+vehicle    avgTP=136.00 avgFP= 59.00 avgFN= 31.00 avgRecall=0.8144 avgFDR=0.3026 avgPrecision=0.6974
+--------------------------------------------------------------------------------
+总指标（各大类平均指标再取算术平均，即（船+飞机+车辆）/3）
+--------------------------------------------------------------------------------
+total      avgTP=250.80 avgFP= 46.13 avgFN= 36.67 avgRecall=0.8922 avgFDR=0.1393 avgPrecision=0.8607
+--------------------------------------------------------------------------------
+细粒度类别指标
+--------------------------------------------------------------------------------
+A10_B-1B   TP=223    FP=1      FN=0      Recall=1.0000 FDR=0.0045 Precision=0.9955
+A11_E-8    TP=161    FP=4      FN=2      Recall=0.9877 FDR=0.0242 Precision=0.9758
+A12_TU-22  TP=163    FP=3      FN=0      Recall=1.0000 FDR=0.0181 Precision=0.9819
+A13_F-15   TP=344    FP=6      FN=2      Recall=0.9942 FDR=0.0171 Precision=0.9829
+A14_KC-135 TP=440    FP=12     FN=1      Recall=0.9977 FDR=0.0265 Precision=0.9735
+A15_F-22   TP=171    FP=9      FN=1      Recall=0.9942 FDR=0.0500 Precision=0.9500
+A16_FA-18  TP=600    FP=4      FN=0      Recall=1.0000 FDR=0.0066 Precision=0.9934
+A17_TU-95  TP=313    FP=1      FN=0      Recall=1.0000 FDR=0.0032 Precision=0.9968
+A18_KC-10  TP=89     FP=0      FN=0      Recall=1.0000 FDR=0.0000 Precision=1.0000
+A19_SU-34  TP=260    FP=19     FN=6      Recall=0.9774 FDR=0.0681 Precision=0.9319
+A1_SU-35   TP=362    FP=14     FN=10     Recall=0.9731 FDR=0.0372 Precision=0.9628
+A20_SU-24  TP=226    FP=2      FN=1      Recall=0.9956 FDR=0.0088 Precision=0.9912
+A2_C-130   TP=420    FP=1      FN=1      Recall=0.9976 FDR=0.0024 Precision=0.9976
+A3_C-17    TP=291    FP=1      FN=0      Recall=1.0000 FDR=0.0034 Precision=0.9966
+A4_C-5     TP=148    FP=4      FN=0      Recall=1.0000 FDR=0.0263 Precision=0.9737
+A5_F-16    TP=317    FP=3      FN=1      Recall=0.9969 FDR=0.0094 Precision=0.9906
+A6_TU-160  TP=126    FP=1      FN=0      Recall=1.0000 FDR=0.0079 Precision=0.9921
+A7_E-3     TP=151    FP=7      FN=0      Recall=1.0000 FDR=0.0443 Precision=0.9557
+A8_B-52    TP=205    FP=2      FN=0      Recall=1.0000 FDR=0.0097 Precision=0.9903
+A9_P-3C    TP=243    FP=4      FN=0      Recall=1.0000 FDR=0.0162 Precision=0.9838
+FSC        TP=136    FP=59     FN=31     Recall=0.8144 FDR=0.3026 Precision=0.6974
+HM         TP=10     FP=0      FN=1      Recall=0.9091 FDR=0.0000 Precision=1.0000
+LQS        TP=12     FP=1      FN=1      Recall=0.9231 FDR=0.0769 Precision=0.9231
+MS         TP=1187   FP=268    FN=262    Recall=0.8192 FDR=0.1842 Precision=0.8158
+QHS        TP=206    FP=29     FN=47     Recall=0.8142 FDR=0.1234 Precision=0.8766
+================================================================================
+生成的可视化文件
+混淆矩阵: /home/liu/wzt/rf-detr/output/experiment_comparison_20260820/backfill_results/090/confusion_matrix.png
+FP 可视化目录: /home/liu/wzt/rf-detr/output/experiment_comparison_20260820/backfill_results/090/FP
+FN 可视化目录: /home/liu/wzt/rf-detr/output/experiment_comparison_20260820/backfill_results/090/FN
+
+
+================================================================================
+历史诊断 P1：低虚警权重的召回修复（逐类阈值校准，已废弃）
+生成时间: 2026-08-20 17:01:54
+数据集: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test（1,344 张）
+注意: full_test 合并了原 val/test，本实验按当前约定用它选 checkpoint 和校准阈值，数值视为内部选型结果。
+================================================================================
+训练配置: configs/experiments/双分支/PAN续训实验/P1_pan_lowfdr_recall_repair.yaml
+评测配置: configs/experiments/双分支/PAN续训实验/test_p1_calibrated.yaml（仅保留作诊断）
+PAN 权重: output/PAN续训实验/P1_pan_lowfdr_recall_repair/checkpoint_candidate_calibrated.pth
+RGB 权重: output/proto_guidance_alignment_repair/00_baseline_1024/checkpoint_best_total.pth
+评测报告: output/PAN续训实验/P1_pan_lowfdr_recall_repair/full_test_calibrated/test_result.txt
+逐类阈值: HM=0.30，LQS=0.25，QHS=0.27，MS=0.228（不符合当前固定 0.25 约束）
+
+同口径基准: output/dual-v3-pan-proto00-rgb-1024/test_dual/test_result.txt
+--------------------------------------------------------------------------------
+指标        当前 PAN                 P1 校准候选             变化
+--------------------------------------------------------------------------------
+ship       TP=1415 FP=298          TP=1420 FP=298          TP +5，FP 不变
+ship R/FDR 0.8198 / 0.1740        0.8227 / 0.1735        Recall +0.0029，FDR -0.0005
+macro R/F  0.8664 / 0.0961        0.8705 / 0.0956        Recall +0.0041，FDR -0.0005
+HM         10/0/1 R=0.9091        10/0/1 R=0.9091        持平
+LQS        12/1/1 R=0.9231        12/1/1 R=0.9231        持平
+MS         1187/268/262            1188/268/261            TP +1，FP 不变
+MS R/FDR   0.8192 / 0.1842        0.8199 / 0.1841        Recall +0.0007，FDR -0.0001
+QHS        206/29/47               210/29/43               TP +4，FP 不变
+QHS R/FDR  0.8142 / 0.1234        0.8300 / 0.1213        Recall +0.0158，FDR -0.0021
+
+结论:
+1. 该结果只说明离线逐类阈值可以改变统计口径，不能作为模型能力提升。
+2. 按当前要求固定 conf=0.25 后，P1 不构成整体超越，禁止用于闭集最终模型或双分支报告。
+3. 后续统一续训必须删除 class_conf_thresholds，固定使用 0.25 重新评估。
+
+================================================================================
+PAN 统一续训 v1（固定 0.25，失败消融）
+================================================================================
+配置: configs/experiments/双分支/PAN续训实验/PAN统一续训-v1.yaml
+初始化: output/sscl-macro-balanced-v3-ship-hardneg/checkpoint_best_total.pth
+数据: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test（全局 25 类）
+状态: 已停止。MS 难例占比约 95%，固定 0.25 下召回明显下降，不进入最终候选。
+
+本实验不使用蒸馏，不切换到仅含四类标签的 PAN 缓存，也不进行逐类阈值校准。一次性续训 10 epoch：
+ProtoGuidance 仅对 0-3 船舶类做 foreground-semantic 位置引导并关闭 content residual；SSCL 保留
+船舶多原型、HM/LQS 与 QHS/MS 易混组；难例抑制从 epoch 3 启动，只使用 IoU[0,0.08] 的低 IoU
+候选，MS 使用更宽松 margin 和更小损失权重以保护密集小目标。训练仍保留 25 类检测头和全局数据，
+非船类只要求不发生灾难性退化。所有中间 checkpoint 和最终双分支评测均固定 conf=0.25，full_test
+只作内部选模，不改变阈值。
+
+v1 epoch 1 regular（难例尚未生效）:
+ship TP=1422 FP=299 FN=304，Recall=0.8239，FDR=0.1737。
+HM=10/1/1，LQS=12/1/1，MS=1185/258/264，QHS=215/39/38。
+
+v1 epoch 3 EMA（首个难例 epoch）:
+ship TP=1393 FP=253 FN=333，Recall=0.8071，FDR=0.1537。
+MS=1156/211/293。训练监控中 MS 每图难例 0.0509，总难例 0.0536，说明低虚警来自整体压低
+MS 分数，召回损失不可接受。结论：MS 禁止加入在线 hard-negative。
+
+================================================================================
+PAN 统一续训 v2（固定 0.25，旧 PAN 起点的边界诊断）
+================================================================================
+配置: configs/experiments/双分支/PAN续训实验/PAN统一续训-v2.yaml
+输出: output/PAN续训实验/PAN统一续训-v2-final
+关键修订: group_detr=1；仅 HM/LQS 过采样；难例目标为 HM/LQS/QHS，排除 MS；不使用蒸馏。
+
+v2 epoch 1 regular（难例尚未生效）:
+ship TP=1424 FP=301 FN=302，Recall=0.8250，FDR=0.1745。
+HM=10/1/1，LQS=12/1/1，MS=1191/267/258，QHS=211/32/42。
+相对当前 PAN：船舶 TP +9、FP +3；MS TP +4 且 FP -1；QHS TP +5、FP +3。说明单阶段的
+原型+SSCL 召回修复有效，后半程只需弱抑制 QHS 新增虚警。
+
+v2 首个 hard-negative epoch 训练监控:
+每图总难例 0.00253；HM=0、LQS=0、QHS=0.00253、MS=0；平均 IoU=0；未加权 logit loss=0.0364。
+候选稀疏且只作用 QHS，未出现 v1 的 MS 召回风险。该实验只用于确定 MS 必须排除、难例损失应晚启用，
+不作为从 120 epoch 基线稳定复现 PAN 的最终训练路径。
+
+================================================================================
+PAN 从 120ep 基线单次续训 v1（固定 0.25，正式复现主线）
+================================================================================
+配置: configs/experiments/双分支/PAN续训实验/PAN从120ep单阶段复现-v1.yaml
+初始化: output/proto_guidance_alignment_repair/00_baseline_1024/checkpoint_best_total.pth
+输出: output/PAN续训实验/PAN从120ep单阶段复现-v1
+数据: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test（全局 25 类）
+
+该方案一次启动 20 epoch，中途不更换 checkpoint、不重建优化器、不使用蒸馏。ProtoGuidance 在同一 run
+内 warm up；SSCL 从 epoch 3 参与损失；排除 MS 的稀疏 hard-negative 从 epoch 10 参与损失。上述均为
+单次训练内的损失门控，不是多段串联训练。full_test 统一固定 conf=0.25，class_conf_thresholds 为空。
+
+epoch 3 regular（hard-negative 尚未生效）:
+ship TP=1428 FP=316 FN=298，Recall=0.8273，FDR=0.1812。
+HM=10/3/1，LQS=12/2/1，MS=1187/260/262，QHS=219/51/34。
+相对当前 PAN：船舶 TP +13、Recall +0.0075；MS Recall 持平且 FP -8；QHS TP +13、Recall +0.0514，
+但新增 QHS/稀有类虚警使船舶 FP +18。该 checkpoint 证明从 120ep 基线可以在一次 run 内复现并超过
+当前召回，后半程只需在不压 MS 的前提下消除新增虚警。最终候选待 hard-negative 生效后固定 0.25 复测。
+
+epoch 15 regular（v1 最均衡点）:
+ship TP=1423 FP=303 FN=303，Recall=0.8244，FDR=0.1756。
+HM=10/2/1，LQS=12/1/1，MS=1184/260/265，QHS=217/40/36。
+相对旧 PAN 为 TP +8、FP +5；相对 120ep 基线为 TP -1、FP -17。说明晚期稀疏 QHS 难例能降低
+虚警，但 20 epoch 轨迹对 MS 略有过拟合，因此继续设计更早启用且带类别缺席保护的 v2。
+
+================================================================================
+PAN 从 120ep 基线单次续训 v2（固定 0.25，当前推荐）
+================================================================================
+配置: configs/experiments/双分支/PAN续训实验/PAN从120ep单阶段复现-v2-背景抑制.yaml
+初始化: output/proto_guidance_alignment_repair/00_baseline_1024/checkpoint_best_total.pth
+输出: output/PAN续训实验/PAN从120ep单阶段复现-v2-背景抑制
+选定权重: checkpoint_pan_selected_fixed025.pth（epoch 7 regular）
+
+关键修订: hard-negative 从 epoch 6 启用；只抑制当前图 GT 中缺席的 HM/LQS/QHS 类别；IoU 带为
+[0,0.08]；MS 排除；logit/prototype 权重降为 0.02/0.01；不使用蒸馏。训练仍是一次 14 epoch run，
+不存在中途换 checkpoint 或重建优化器。自动 best 只按全类 mAP，不用于最终 PAN 选模。
+
+固定 0.25 同口径对比:
+--------------------------------------------------------------------------------
+权重                ship TP/FP/FN       Recall / FDR       MS TP/FP       QHS TP/FP
+--------------------------------------------------------------------------------
+120ep 基线           1424/320/302        0.8250 / 0.1835    1185/270       217/45
+旧 PAN               1415/298/311        0.8198 / 0.1740    1187/268       206/29
+v2 epoch 7（选定）   1427/310/299        0.8268 / 0.1785    1188/261       217/45
+v2 epoch 13          1421/304/305        0.8233 / 0.1762    1182/255       217/45
+--------------------------------------------------------------------------------
+
+结论:
+1. 相对 120ep 基线，选定权重 TP +3、FP -10，召回和虚警同时改善。
+2. 相对旧 PAN，选定权重 TP +12、Recall +0.0070，但 FP +12、FDR +0.0045；属于召回优先的稳定复现，
+   尚未形成严格 Pareto 超越。
+3. HM/LQS Recall 分别保持 0.9091/0.9231；MS TP +1 且 FP -7；QHS TP +11、Recall 从 0.8142 提升
+   到 0.8577，但 FP 从 29 增至 45，是后续仍可改进的主要来源。
+4. epoch 13 虽比 epoch 7 少 6 FP，却损失 6 TP，且 MS Recall 下降，因此不能用最后一轮替代 epoch 7。
+
+PAN 单模型 25 类保留能力（固定 0.25）:
+--------------------------------------------------------------------------------
+权重                all TP/FP     aircraft TP/FP    ship TP/FP     FSC TP/FP
+--------------------------------------------------------------------------------
+120ep 基线           6816/479      5255/102          1423/321       138/56
+v2 epoch 7（选定）   6823/459      5255/90           1426/309       142/60
+--------------------------------------------------------------------------------
+选定权重全类 Recall/FDR 为 0.9515/0.0630，基线为 0.9505/0.0657。飞机 TP 持平且 FP -12；
+船舶 TP +3、FP -12；FSC TP +4、FP +4。25 类识别能力没有崩溃，非船类的变化符合 PAN 分支保底定位。
+报告: output/PAN续训实验/PAN从120ep单阶段复现-v2-背景抑制/full_test_selected_fixed025/test_result.txt
+
+报告口径说明:
+`full_test_selected_fixed025/test_result.txt` 是选定 PAN 权重的单模型 25 类评测，结果为全类
+6823/459、船舶 1426/309；`full_test_selected_dual_fixed025/test_result.txt` 是同一权重接入 RGB+PAN
+路由后的双分支评测，结果为全类 6802/469、船舶 1427/310。前者用于衡量 PAN 自身质量，后者用于衡量
+最终双分支部署效果。两份报告的差异来自模态路由与结果合并，不是训练权重差异。
+
+`selected_fixed025` 命名含义:
+- `selected`: 从同一 14 epoch 单次训练的周期 checkpoint 中按固定阈值船舶指标选出的权重，不是自动 mAP best。
+- `fixed025`: 评测使用固定置信度阈值 `conf=0.25`，且 `class_conf_thresholds={}`；它不是训练阶段名，也不是
+  对预测结果后处理调阈值。
+- 该文件实际来源为 epoch 7 regular checkpoint：
+  `checkpoint_epoch7_regular_candidate.pth` → `checkpoint_pan_selected_fixed025.pth`。
+
+================================================================================
+PAN 从 120ep 基线单次续训 v3（扩大 IoU 带，失败消融）
+================================================================================
+配置: configs/experiments/双分支/PAN续训实验/PAN从120ep单阶段复现-v3-近目标背景抑制.yaml
+状态: 已在 epoch 6 后停止，不进入最终候选。
+
+将类别缺席保护下的 hard-negative IoU 上界从 0.08 扩大到 0.30。固定 0.25 下，epoch 3 抑制前为
+1428/318，epoch 5 抑制后为 1427/315：只减少 3 FP 并损失 1 TP，且差于 v2 epoch 7 的 1427/310。
+结论：剩余虚警主要不是可安全扩大挖掘的跨类近目标背景；继续扩大带宽收益不足，并增加误伤边缘真阳风险。

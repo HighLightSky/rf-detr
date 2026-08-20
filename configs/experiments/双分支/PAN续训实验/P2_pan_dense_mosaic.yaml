@@ -1,0 +1,71 @@
+# PAN 续训 P2：从已超越当前方案的 P1 快照出发，短程验证低概率 mosaic。
+# 目标是扩大密集小 MS 的召回余量；若 full_test 不改善则直接舍弃。
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 1024
+  gradient_checkpointing: true
+  freeze_encoder: false
+  pretrain_weights: output/PAN续训实验/P1_pan_lowfdr_recall_repair/checkpoint_candidate_calibrated.pth
+  proto_guidance_enabled: false
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test/.rfdetr_dual_cache/shwx_v1/pan
+  dataset_file: yolo
+  output_dir: output/PAN续训实验/P2_pan_dense_mosaic
+  epochs: 5
+  batch_size: 8
+  grad_accum_steps: 8
+  num_workers: 4
+  lr: 3.0e-6
+  lr_encoder: 6.0e-7
+  lr_scheduler: cosine
+  lr_scheduler_kwargs:
+    min_factor: 0.1
+  warmup_epochs: 0.5
+  weight_decay: 1.0e-4
+  clip_max_norm: 0.1
+  eval_interval: 1
+  checkpoint_interval: 5
+  skip_best_epochs: 1
+  use_ema: true
+  ema_decay: 0.99
+  ema_tau: 100
+  seed: 44
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  compute_val_loss: false
+
+  aug_config: AERIAL
+  mosaic_p: 0.1
+  multi_scale: true
+  expanded_scales: false
+  scale_jitter: true
+
+  class_balanced_sampling: true
+  class_balanced_threshold: null
+  class_balanced_class_ids: [0, 1]
+
+  class_balance_enabled: false
+  logit_adjustment_enabled: false
+  sscl_enabled: false
+  sscl_hard_neg_enabled: false
+
+test:
+  dataset: shwx
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test
+  resolution: 1024
+  checkpoint: output/PAN续训实验/P2_pan_dense_mosaic/checkpoint_best_total.pth
+  output_dir: output/PAN续训实验/P2_pan_dense_mosaic/full_test
+  conf_threshold: 0.25
+  class_conf_thresholds: {}
+  device: cuda:0
+  batch_size: 32
+  num_workers: 12
+  prefetch_factor: 3
+  use_fp16: false
+  save_fp_fn: false
+  save_yolo_preds: false

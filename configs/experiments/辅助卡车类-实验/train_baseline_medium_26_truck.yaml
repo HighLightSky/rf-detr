@@ -8,9 +8,9 @@ model:
   freeze_encoder: false
 
 train:
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-truck
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-truck-safe
   dataset_file: yolo
-  output_dir: output/0818-SHWX-medium-baseline-26class-truck-1024
+  output_dir: output/0819-SHWX-medium-baseline-truck-safe
   epochs: 120
   batch_size: 16
   grad_accum_steps: 4
@@ -35,7 +35,7 @@ train:
   mosaic_p: 0.1
   class_balanced_sampling: true
   class_balanced_threshold: null
-  class_balanced_class_ids: [0, 1, 24, 25]
+  class_balanced_class_ids: [0, 1]
   dataset_cache_mode: raw
   dataset_cache_dir: null
   dataset_cache_rebuild: false
