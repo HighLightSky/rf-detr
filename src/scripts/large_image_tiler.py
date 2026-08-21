@@ -3,7 +3,7 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-"""大图目标检测推理器：nano 边界检测切分 + 目标检测器逐裁窗推理。
+"""大图目标检测推理器：可配置边界检测切分 + 目标检测器逐裁窗推理。
 
 复用 ``large_cut_pipeline`` 的切分方案（边界检测 → 裁切+padding → 目标检测 →
 坐标映射回原图），但面向测试集批量评估优化：
@@ -31,6 +31,7 @@ from scripts.large_cut_pipeline import (
     infer_detector_on_crops,
     map_boxes_to_original,
     predict_batched_letterbox,
+    predict_yolo_boundaries,
 )
 from val.competition_metrics import BoxRecord
 
@@ -40,7 +41,8 @@ class LargeImageTiler:
 
     Args:
         detector_model: 已加载的目标检测器（RFDETR 实例，如 SHWX 25 类）。
-        boundary_checkpoint: nano 边界检测器 checkpoint 路径。
+        boundary_checkpoint: 边界检测器 checkpoint 路径。
+        boundary_backend: 边界模型后端，支持 ``rfdetr`` 与 ``yolo``。
         boundary_resolution: 边界检测器输入分辨率（须与训练一致，默认 704）。
         boundary_conf: 边界框置信度阈值。
         detector_conf: 目标检测置信度阈值。
@@ -50,6 +52,7 @@ class LargeImageTiler:
         device: 推理设备。
         batch_size: 边界检测器 GPU 批量大小。
         num_workers: 边界检测器预取 worker 数。
+        detector_batch_size: 小图目标检测器单次处理的最大裁窗数。
         reason_plugin: 可选的已加载 FFT 一致性插件；用于裁窗目标检测。
         reason_class_ids: 插件重打分的类别；``None`` 表示全部类别。
         reason_conf_low: 插件低置信候选下限；``None`` 使用插件内置值。
@@ -60,6 +63,7 @@ class LargeImageTiler:
         detector_model: Any,
         boundary_checkpoint: str | Path,
         *,
+        boundary_backend: str = "rfdetr",
         boundary_resolution: int = 704,
         boundary_conf: float = 0.25,
         detector_conf: float = 0.25,
@@ -69,6 +73,7 @@ class LargeImageTiler:
         device: str = "cuda:0",
         batch_size: int = 8,
         num_workers: int = 4,
+        detector_batch_size: int | None = 8,
         reason_plugin: Any | None = None,
         reason_class_ids: tuple[int, ...] | None = None,
         reason_conf_low: float | None = None,
@@ -77,6 +82,9 @@ class LargeImageTiler:
 
         self.detector_model = detector_model
         self.boundary_checkpoint = str(boundary_checkpoint)
+        self.boundary_backend = boundary_backend.lower()
+        if self.boundary_backend not in {"rfdetr", "yolo"}:
+            raise ValueError(f"boundary_backend 必须为 rfdetr 或 yolo，实际为 {boundary_backend!r}")
         self.boundary_resolution = boundary_resolution
         self.boundary_conf = boundary_conf
         self.detector_conf = detector_conf
@@ -86,16 +94,20 @@ class LargeImageTiler:
         self.device = device
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.detector_batch_size = detector_batch_size
         self.reason_plugin = reason_plugin
         self.reason_class_ids = reason_class_ids
         self.reason_conf_low = reason_conf_low
 
-        # nano 边界检测器只加载一次（所有大图共用）
+        # 边界检测器只加载一次（所有大图共用）
         print(f"[i] 加载大图边界检测器: {self.boundary_checkpoint}")
-        self.boundary_model = RFDETR.from_checkpoint(
-            self.boundary_checkpoint,
-            resolution=self.boundary_resolution,
-        )
+        if self.boundary_backend == "yolo":
+            from ultralytics import YOLO
+
+            self.boundary_model = YOLO(self.boundary_checkpoint)
+        else:
+            self.boundary_model = RFDETR.from_checkpoint(self.boundary_checkpoint, resolution=self.boundary_resolution)
+        self.last_stats: dict[str, float | str] = {}
 
     def predict(
         self,
@@ -118,16 +130,28 @@ class LargeImageTiler:
             return [], {}, {}
 
         # 1. 所有大图一次性批量边界检测（letterbox 预处理）
-        boundary_results = predict_batched_letterbox(
-            self.boundary_model,
-            image_paths,
-            device=self.device,
-            resolution=self.boundary_resolution,
-            conf_threshold=self.boundary_conf,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            square_stretch=self.square_stretch,
-        )
+        boundary_t0 = time.perf_counter()
+        if self.boundary_backend == "yolo":
+            boundary_results = predict_yolo_boundaries(
+                self.boundary_model,
+                image_paths,
+                device=self.device,
+                resolution=self.boundary_resolution,
+                conf_threshold=self.boundary_conf,
+                batch_size=self.batch_size,
+            )
+        else:
+            boundary_results = predict_batched_letterbox(
+                self.boundary_model,
+                image_paths,
+                device=self.device,
+                resolution=self.boundary_resolution,
+                conf_threshold=self.boundary_conf,
+                batch_size=self.batch_size,
+                num_workers=self.num_workers,
+                square_stretch=self.square_stretch,
+            )
+        boundary_elapsed = time.perf_counter() - boundary_t0
         boundary_by_id = {r["image_id"]: r for r in boundary_results}
 
         pred_records: list[BoxRecord] = []
@@ -177,6 +201,7 @@ class LargeImageTiler:
                 self.detector_model,
                 crops_rgb,
                 self.detector_conf,
+                batch_size=self.detector_batch_size,
                 reason_plugin=self.reason_plugin,
                 reason_class_ids=self.reason_class_ids,
                 reason_conf_low=self.reason_conf_low,
@@ -195,5 +220,12 @@ class LargeImageTiler:
                             score=float(score),
                         )
                     )
-            per_image_seconds[stem] = time.perf_counter() - t0
+            # 边界模型是批量运行的，按图均摊其耗时以得到端到端单图口径。
+            per_image_seconds[stem] = time.perf_counter() - t0 + boundary_elapsed / len(image_paths)
+        self.last_stats = {
+            "boundary_backend": self.boundary_backend,
+            "boundary_seconds": boundary_elapsed,
+            "end_to_end_seconds": sum(per_image_seconds.values()),
+            "image_count": float(len(per_image_seconds)),
+        }
         return pred_records, per_image_seconds, crop_boxes_by_image

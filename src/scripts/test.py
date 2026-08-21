@@ -134,6 +134,7 @@ def main() -> None:
         large_image_cfg = eval_lib.LargeImageCfg(
             min_side=int(test_cfg.get("large_image_min_side", 2000)),
             boundary_checkpoint=test_cfg.get("boundary_checkpoint"),
+            boundary_backend=str(test_cfg.get("boundary_backend", "rfdetr")),
             boundary_resolution=int(test_cfg.get("boundary_resolution", 704)),
             boundary_conf=float(test_cfg.get("boundary_conf", 0.25)),
             detector_conf=float(test_cfg.get("detector_conf", 0.25)),
@@ -142,6 +143,11 @@ def main() -> None:
             square_stretch=bool(test_cfg.get("tiling_square_stretch", False)),
             batch_size=int(test_cfg.get("tiling_batch_size", 8)),
             num_workers=int(test_cfg.get("tiling_num_workers", 4)),
+            detector_batch_size=(
+                int(test_cfg["tiling_detector_batch_size"])
+                if test_cfg.get("tiling_detector_batch_size") is not None
+                else None
+            ),
         )
 
     # test.resolution 可选：显式指定推理输入分辨率（须与训练分辨率一致，

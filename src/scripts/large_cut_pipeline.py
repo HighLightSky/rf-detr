@@ -33,6 +33,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -289,21 +290,85 @@ def predict_batched_letterbox(
     return results
 
 
+def predict_yolo_boundaries(
+    model: Any,
+    image_paths: list[Path],
+    device: str,
+    resolution: int,
+    conf_threshold: float,
+    batch_size: int,
+) -> list[dict[str, Any]]:
+    """用 Ultralytics YOLO 批量预测裁窗边界并统一为原图坐标结果。
+
+    Ultralytics 的 ``Results.boxes.xyxy`` 已经映射回输入原图，因此统一结果中
+    使用 ``scale=1`` 且不设置 padding，使其可直接复用 RF-DETR 边界结果的
+    后续裁切流程。
+
+    Args:
+        model: 已加载的 ``ultralytics.YOLO`` 实例。
+        image_paths: 待推理图像路径列表。
+        device: 推理设备（如 ``"cuda:0"``）。
+        resolution: YOLO 推理分辨率。
+        conf_threshold: 候选框置信度下限。
+        batch_size: GPU 单次前向图像数。
+
+    Returns:
+        与 :func:`predict_batched_letterbox` 字段兼容的结果列表，其中框坐标
+        已位于原图空间。
+    """
+    if not image_paths:
+        return []
+
+    results: list[dict[str, Any]] = []
+    # 超大图路径一次性传给 Ultralytics 会让其数据集预取全部原图，
+    # 在部分版本中造成异常显存峰值；分块调用保持显存上界稳定。
+    chunk_size = max(1, min(batch_size, 8))
+    for start in range(0, len(image_paths), chunk_size):
+        chunk = image_paths[start : start + chunk_size]
+        predictions = model.predict(
+            source=[str(path) for path in chunk],
+            imgsz=resolution,
+            conf=conf_threshold,
+            iou=0.5,
+            max_det=500,
+            device=device,
+            batch=min(batch_size, len(chunk)),
+            stream=True,
+            verbose=False,
+        )
+        for prediction in predictions:
+            boxes = prediction.boxes
+            results.append(
+                {
+                    "image_id": Path(prediction.path).stem,
+                    "boxes": boxes.xyxy.cpu().numpy(),
+                    "scores": boxes.conf.cpu().numpy(),
+                    "class_ids": boxes.cls.cpu().numpy().astype(np.int64, copy=False),
+                    "scale": 1.0,
+                    "pad_x": 0,
+                    "pad_y": 0,
+                }
+            )
+    return results
+
+
 def infer_detector_on_crops(
-    model,
+    model: Any,
     crops_rgb: list[np.ndarray],
     conf: float,
     *,
-    reason_plugin=None,
+    batch_size: int | None = None,
+    reason_plugin: Any | None = None,
     reason_class_ids: tuple[int, ...] | None = None,
     reason_conf_low: float | None = None,
-) -> list:
+) -> list[Any]:
     """对一组裁窗批量运行目标检测器。
 
     Args:
         model: 已加载的 RFDETR 实例（目标检测器，如 SHWX 25 类）。
         crops_rgb: RGB 裁窗列表（任意尺寸，内部自动 resize 到模型分辨率）。
         conf: 置信度阈值。
+        batch_size: 单次送入目标检测器的最大裁窗数；``None`` 表示一次处理全部。
         reason_plugin: 可选的已加载 FFT 一致性插件。
         reason_class_ids: 插件重打分的类别；``None`` 表示全部类别。
         reason_conf_low: 插件低置信候选下限；``None`` 使用插件内置值。
@@ -326,10 +391,17 @@ def infer_detector_on_crops(
                 "reason_conf_low": reason_conf_low,
             }
         )
-    detections = model.predict(crops_rgb, **predict_kwargs)
-    if not isinstance(detections, list):
-        detections = [detections]
-    return detections
+    chunk_size = len(crops_rgb) if batch_size is None else batch_size
+    if chunk_size <= 0:
+        raise ValueError(f"batch_size 必须为正整数或 None，实际为 {batch_size}")
+
+    all_detections: list[Any] = []
+    for start in range(0, len(crops_rgb), chunk_size):
+        detections = model.predict(crops_rgb[start : start + chunk_size], **predict_kwargs)
+        if not isinstance(detections, list):
+            detections = [detections]
+        all_detections.extend(detections)
+    return all_detections
 
 
 def _collect_input_images(input_path: Path) -> list[Path]:

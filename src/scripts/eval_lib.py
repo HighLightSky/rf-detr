@@ -344,11 +344,12 @@ class ReasonPluginCfg:
 
 @dataclass
 class LargeImageCfg:
-    """大图切分测试配置（nano 边界检测 → 裁切 → 目标检测 → 映射回原图）。
+    """大图切分测试配置（边界检测 → 裁切 → 目标检测 → 映射回原图）。
 
     Attributes:
         min_side: 大图判定阈值（长边像素数），长边 ≥ 该值的图像走切分流程。
-        boundary_checkpoint: nano 边界检测器 checkpoint 路径（切分流程必需）。
+        boundary_checkpoint: 边界检测器 checkpoint 路径（切分流程必需）。
+        boundary_backend: 边界模型后端，支持 ``rfdetr`` 与 ``yolo``。
         boundary_resolution: 边界检测器输入分辨率（须与训练一致）。
         boundary_conf: 边界框置信度阈值。
         detector_conf: 裁窗目标检测置信度阈值。
@@ -357,10 +358,12 @@ class LargeImageCfg:
         square_stretch: 边界检测用方形拉伸替代 letterbox。
         batch_size: 边界检测器 GPU 批量大小。
         num_workers: 边界检测器预取 worker 数。
+        detector_batch_size: 小图目标检测器单次处理的最大裁窗数。
     """
 
     min_side: int = 2000
     boundary_checkpoint: str | None = None
+    boundary_backend: str = "rfdetr"
     boundary_resolution: int = 704
     boundary_conf: float = 0.25
     detector_conf: float = 0.25
@@ -369,6 +372,7 @@ class LargeImageCfg:
     square_stretch: bool = False
     batch_size: int = 8
     num_workers: int = 4
+    detector_batch_size: int | None = 8
 
 
 @dataclass
@@ -818,6 +822,14 @@ def build_test_report(
             f"平均 {large_image_stats['avg']:.2f}s | 最大 {large_image_stats['max']:.2f}s | "
             f"合计 {large_image_stats['total']:.2f}s"
         )
+        if "boundary_seconds" in large_image_stats:
+            end_to_end = float(large_image_stats.get("end_to_end_seconds", large_image_stats["total"]))
+            count = max(float(large_image_stats["count"]), 1.0)
+            report_lines.append(
+                "大图端到端计时（边界检测+裁切+小图推理，边界批量均摊）: "
+                f"平均 {end_to_end / count:.2f}s | 合计 {end_to_end:.2f}s | "
+                f"边界模型合计 {float(large_image_stats['boundary_seconds']):.2f}s"
+            )
     report_lines.append(sep)
 
     # ── 比赛指标评估结果（大类聚合）──────────────────────────────────
@@ -1470,6 +1482,7 @@ def run_evaluation(
         tiler = LargeImageTiler(
             model,
             large_image_cfg.boundary_checkpoint,
+            boundary_backend=large_image_cfg.boundary_backend,
             boundary_resolution=large_image_cfg.boundary_resolution,
             boundary_conf=large_image_cfg.boundary_conf,
             detector_conf=large_image_cfg.detector_conf,
@@ -1479,6 +1492,7 @@ def run_evaluation(
             device=device,
             batch_size=large_image_cfg.batch_size,
             num_workers=large_image_cfg.num_workers,
+            detector_batch_size=large_image_cfg.detector_batch_size,
             reason_plugin=reason_plugin,
             reason_class_ids=reason_plugin.config.reason_class_ids if reason_plugin is not None else None,
             reason_conf_low=reason_plugin.config.conf_low if reason_plugin is not None else None,
@@ -1492,6 +1506,8 @@ def run_evaluation(
                 "avg": sum(durations) / len(durations),
                 "max": max(durations),
                 "total": sum(durations),
+                "boundary_seconds": float(tiler.last_stats.get("boundary_seconds", 0.0)),
+                "end_to_end_seconds": float(tiler.last_stats.get("end_to_end_seconds", sum(durations))),
             }
     else:
         if large_image_cfg is not None and large_image_ids and not large_image_cfg.boundary_checkpoint:

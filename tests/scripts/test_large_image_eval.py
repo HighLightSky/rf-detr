@@ -32,6 +32,7 @@ def test_large_image_cfg_defaults() -> None:
     cfg = eval_lib.LargeImageCfg()
     assert cfg.min_side == 2000
     assert cfg.boundary_checkpoint is None
+    assert cfg.boundary_backend == "rfdetr"
     assert cfg.boundary_resolution == 704
     assert cfg.boundary_conf == 0.25
     assert cfg.detector_conf == 0.25
@@ -39,6 +40,7 @@ def test_large_image_cfg_defaults() -> None:
     assert cfg.nms_iou == 0.0
     assert cfg.batch_size == 8
     assert cfg.num_workers == 4
+    assert cfg.detector_batch_size == 8
 
 
 def test_classify_large_images_with_size_map() -> None:

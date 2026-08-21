@@ -8,10 +8,19 @@
 覆盖 ``large_cut_pipeline.py`` 的核心几何函数（不依赖 GPU/模型）：letterbox 尺寸、坐标往返映射、裁窗 clamp。
 """
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
-from scripts.large_cut_pipeline import crop_with_padding, letterbox_resize, map_boxes_to_original
+from scripts.large_cut_pipeline import (
+    crop_with_padding,
+    infer_detector_on_crops,
+    letterbox_resize,
+    map_boxes_to_original,
+    predict_yolo_boundaries,
+)
 
 
 class TestLetterboxResize:
@@ -125,3 +134,56 @@ class TestCropWithPadding:
         crop, crop_xyxy = crop_with_padding(image, (10, 10, 40, 40), padding=0)
         assert crop_xyxy == (10, 10, 40, 40)
         assert crop.shape[:2] == (30, 30)
+
+
+class TestYoloBoundaryPrediction:
+    """YOLO 边界检测输出适配。"""
+
+    def test_returns_original_coordinate_records(self) -> None:
+        """Ultralytics 返回的原图坐标应保持不变并按输入图像组织。"""
+        boxes = SimpleNamespace(
+            xyxy=SimpleNamespace(cpu=lambda: SimpleNamespace(numpy=lambda: np.array([[1.0, 2.0, 30.0, 40.0]]))),
+            conf=SimpleNamespace(cpu=lambda: SimpleNamespace(numpy=lambda: np.array([0.9]))),
+            cls=SimpleNamespace(cpu=lambda: SimpleNamespace(numpy=lambda: np.array([0.0]))),
+        )
+        model = SimpleNamespace(
+            predict=lambda **kwargs: [SimpleNamespace(path="/tmp/example.jpg", boxes=boxes)],
+        )
+
+        results = predict_yolo_boundaries(
+            model,
+            [Path("/tmp/example.jpg")],
+            device="cuda:0",
+            resolution=704,
+            conf_threshold=0.1,
+            batch_size=8,
+        )
+
+        assert len(results) == 1
+        assert results[0]["image_id"] == "example"
+        assert np.array_equal(results[0]["boxes"], np.array([[1.0, 2.0, 30.0, 40.0]]))
+        assert results[0]["scale"] == 1.0
+        assert results[0]["pad_x"] == 0
+        assert results[0]["pad_y"] == 0
+
+
+class TestCropDetectorBatching:
+    """裁窗目标检测的显存受控分批逻辑。"""
+
+    def test_splits_crops_and_preserves_order(self) -> None:
+        """裁窗数超过批量上限时应分块调用模型并保持输出顺序。"""
+        call_sizes: list[int] = []
+
+        class FakeModel:
+            """记录每次调用批量大小的假检测器。"""
+
+            def predict(self, crops: list[np.ndarray], **kwargs: object) -> list[int]:
+                """返回每个裁窗首像素作为顺序标识。"""
+                call_sizes.append(len(crops))
+                return [int(crop[0, 0, 0]) for crop in crops]
+
+        crops = [np.full((2, 2, 3), index, dtype=np.uint8) for index in range(5)]
+        outputs = infer_detector_on_crops(FakeModel(), crops, conf=0.25, batch_size=2)
+
+        assert call_sizes == [2, 2, 1]
+        assert outputs == [0, 1, 2, 3, 4]
