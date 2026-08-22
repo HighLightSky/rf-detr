@@ -24,16 +24,66 @@
 
 ## 二、公共前置条件
 
-下面已提前核对存在，缺失时训练/评估会报错：
+### 2.1 必须提供的输入（仓库外）
 
-- 起始权重：`output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024/checkpoint_best_total.pth`
-- 原型产物：`data/proto_guidance_shwx_1024_from120ep.pt`
-- 语义矩阵：`data/semantic_matrix_shwx.pt`
-- 训练集：`/home/liu/wzt/datasets/SHWX-dataset-dict-redo`（yolo 布局）
-- 测试集：`/home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test`
-- 后处理插件（仅 I 用到）：`output/0818reasoning-candidate/reason_plugin_fsc.pth`
+> 本文所有 `<...>` 均为占位符，请按你本机实际情况替换（如 `<训练集根目录>` → 你的训练集路径）。命令行只带 `<...>` 的地方需手动补全，训练/评估配置 yaml 里的 `train.dataset_dir` / `test.dataset_dir` 也要同步改成同一份。
+
+- **起始权重（120ep baseline）**：`output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024/checkpoint_best_total.pth`
+  这是 A–I 共用的 `pretrain_weights`，也是下面所有产物的构建来源。
+- **训练集**：`<训练集根目录>`（yolo 布局，含 `data.yaml`）
+- **测试集**：`<测试集根目录>`
+- **CLIP 本地缓存**：`data/clip/clip-vit-large-patch14`（构建语义矩阵与文本原型需要；缺失可用 `--model` 指向别处）
+
+### 2.2 从 baseline 120ep 权重构建的产物（若缺失）
+
+下面三个产物若不存在，按依赖顺序从上面的 baseline 重建。三者都不是训练产物的替代品——它们参与训练时也必须来自**同一份 baseline、同一分辨率**，否则特征空间不一致会导致原型/对齐失效。
 
 各配置里的 `pretrain_weights`、`dataset_dir` 均为相对项目根或绝对路径，`/` 开头的绝对路径原样使用，其余相对路径以项目根解析。
+
+#### 产物① 多模态原型产物 `data/proto_guidance_shwx_1024_from120ep.pt`（B–I 全部用到）
+
+由 `stage0_build_proto_guidance.py` 用 baseline 权重在**训练同分辨率 1024**下跑训练集，按 GT 框 masked average pool 提取 P4 特征并余弦 k-means 聚类成 `num_slots=10` 的视觉槽位原型，加上 CLIP 文本原型。**必须与训练侧用同一个 baseline checkpoint + 同一个 `RFDETR_PROTO_RESOLUTION`**：
+
+```bash
+RFDETR_PROTO_CHECKPOINT="output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024/checkpoint_best_total.pth" \
+RFDETR_PROTO_RESOLUTION=1024 \
+RFDETR_PROTO_DATASET_DIR=<训练集根目录> \
+RFDETR_PROTO_OUTPUT=data/proto_guidance_shwx_1024_from120ep.pt \
+uv run src/scripts/semantic_experiments/stage0_build_proto_guidance.py
+```
+
+（`NUM_SLOTS`、`BATCH_SIZE`、`NUM_WORKERS` 等默认值即与配置一致，一般无需改。）
+
+#### 产物② 语义矩阵 `data/semantic_matrix_shwx.pt`（G / H / I 用到）
+
+纯 CLIP 文本编码，两两算类别余弦相似度，**与 baseline 无关**：
+
+```bash
+uv run src/scripts/data_prep/build_semantic_matrix.py --dataset shwx --output data/semantic_matrix_shwx.pt
+```
+
+#### 产物③ FSC 后处理插件 `output/0818reasoning-candidate/reason_plugin_fsc.pth`（仅 I 的 `test:` 段用到）
+
+需要一个「冻结检测器」先跑出候选缓存，再用该缓存训练插件，分两步：
+
+```bash
+# 3a. 用冻结 baseline 跑训练集，生成候选缓存（A 清晰 / B 模糊 + GT 匹配标签）
+uv run src/scripts/reasoning/build_reason_candidates.py \
+  --checkpoint output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024/checkpoint_best_total.pth \
+  --dataset_dir <训练集根目录> \
+  --split train --output output/reason_candidates_fsc.npz
+
+# 3b. 用候选缓存训练 FSC 专用插件（class_ids=[24]=FSC 重打分类别）
+uv run src/scripts/reasoning/train_reason_plugin.py \
+  --candidates output/reason_candidates_fsc.npz \
+  --checkpoint output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024/checkpoint_best_total.pth \
+  --dataset_dir <训练集根目录> \
+  --fsc_only --fsc_class_name FSC \
+  --output output/0818reasoning-candidate/reason_plugin_fsc.pth \
+  --epochs 30 --batch_size 8
+```
+
+> 提醒：插件在推理时读「被评估模型」的 `class_embed.weight`。若希望它服务于训练得到的 **I-full** 模型，最好用 I-full 训练产物的 `checkpoint_best_total.pth` 重跑 3a/3b（保持候选来源与 `class_embed` 一致），否则沿用 baseline 生成也基本可用。产物③只在最后评估 I 时启用，做 A–H 可先跳过。
 
 ## 三、运行顺序（一个一个跑）
 
@@ -41,10 +91,10 @@
 
 ```bash
 # 训练
-python src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/A_仅基座RFDETR.yaml"
+uv run src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/A_仅基座RFDETR.yaml"
 
 # 评估（比赛口径，SHWX 大图切分管线）
-python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
+uv run src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
   --set test.checkpoint=output/0822-proto-sscl-hn-ablation/A-baseline/checkpoint_best_total.pth \
   --set test.output_dir=output/0822-proto-sscl-hn-ablation/A-baseline-eval
 ```
@@ -52,9 +102,9 @@ python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
 ### 实验 B：原型特征选择增强（position 召回入口）
 
 ```bash
-python src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/B_原型特征选择增强.yaml"
+uv run src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/B_原型特征选择增强.yaml"
 
-python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
+uv run src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
   --set test.checkpoint=output/0822-proto-sscl-hn-ablation/B-position/checkpoint_best_total.pth \
   --set test.output_dir=output/0822-proto-sscl-hn-ablation/B-position-eval
 ```
@@ -62,9 +112,9 @@ python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
 ### 实验 C：原型语义信息增强（content 内容注入）
 
 ```bash
-python src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/C_原型语义信息增强.yaml"
+uv run src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/C_原型语义信息增强.yaml"
 
-python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
+uv run src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
   --set test.checkpoint=output/0822-proto-sscl-hn-ablation/C-content/checkpoint_best_total.pth \
   --set test.output_dir=output/0822-proto-sscl-hn-ablation/C-content-eval
 ```
@@ -72,9 +122,9 @@ python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
 ### 实验 D：原型前向注入（无损失，共同底座）
 
 ```bash
-python src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/D_原型前向注入无损失.yaml"
+uv run src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/D_原型前向注入无损失.yaml"
 
-python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
+uv run src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
   --set test.checkpoint=output/0822-proto-sscl-hn-ablation/D-forward-only/checkpoint_best_total.pth \
   --set test.output_dir=output/0822-proto-sscl-hn-ablation/D-forward-only-eval
 ```
@@ -82,9 +132,9 @@ python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
 ### 实验 E：原型前向 + 稠密对齐（dense）
 
 ```bash
-python src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/E_原型前向加稠密对齐.yaml"
+uv run src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/E_原型前向加稠密对齐.yaml"
 
-python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
+uv run src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
   --set test.checkpoint=output/0822-proto-sscl-hn-ablation/E-dense/checkpoint_best_total.pth \
   --set test.output_dir=output/0822-proto-sscl-hn-ablation/E-dense-eval
 ```
@@ -92,9 +142,9 @@ python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
 ### 实验 F：原型前向 + 辅助分类损失（aux）
 
 ```bash
-python src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/F_原型前向加辅助分类损失.yaml"
+uv run src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/F_原型前向加辅助分类损失.yaml"
 
-python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
+uv run src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
   --set test.checkpoint=output/0822-proto-sscl-hn-ablation/F-proto-aux/checkpoint_best_total.pth \
   --set test.output_dir=output/0822-proto-sscl-hn-ablation/F-proto-aux-eval
 ```
@@ -102,9 +152,9 @@ python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
 ### 实验 G：原型前向 + SSCL
 
 ```bash
-python src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/G_原型前向加SSCL.yaml"
+uv run src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/G_原型前向加SSCL.yaml"
 
-python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
+uv run src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
   --set test.checkpoint=output/0822-proto-sscl-hn-ablation/G-sscl/checkpoint_best_total.pth \
   --set test.output_dir=output/0822-proto-sscl-hn-ablation/G-sscl-eval
 ```
@@ -112,9 +162,9 @@ python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
 ### 实验 H：原型前向 + 难负样本抑制（HN）
 
 ```bash
-python src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/H_原型前向加难负样本抑制.yaml"
+uv run src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/H_原型前向加难负样本抑制.yaml"
 
-python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
+uv run src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
   --set test.checkpoint=output/0822-proto-sscl-hn-ablation/H-hard-neg/checkpoint_best_total.pth \
   --set test.output_dir=output/0822-proto-sscl-hn-ablation/H-hard-neg-eval
 ```
@@ -125,10 +175,10 @@ python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml \
 
 ```bash
 # 训练
-python src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/I_完整方案加后处理插件.yaml"
+uv run src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/I_完整方案加后处理插件.yaml"
 
 # 评估（自带 FSC 后处理插件）
-python src/scripts/test.py -c "configs/experiments/0822proto+SSCL+HN消融/I_完整方案加后处理插件.yaml"
+uv run src/scripts/test.py -c "configs/experiments/0822proto+SSCL+HN消融/I_完整方案加后处理插件.yaml"
 ```
 
 ## 四、关于 best_metric（用 F1 选最佳轮）
@@ -136,7 +186,7 @@ python src/scripts/test.py -c "configs/experiments/0822proto+SSCL+HN消融/I_完
 这批配置默认走 `best_metric: map`（普通检测看 `val/mAP_50_95`，带 regular/EMA 双轨选权）。若希望**用 F1 挑最佳权重**（例如看重舰船细分类的混淆控制），给训练命令追加 `--set train.best_metric=f1` 即可，例如：
 
 ```bash
-python src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/D_原型前向注入无损失.yaml" \
+uv run src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/D_原型前向注入无损失.yaml" \
   --set train.best_metric=f1
 ```
 
@@ -146,13 +196,13 @@ python src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/D_�
 
 - **检查配置展开**：任何实验训练前可用 `--dump-kwargs` 只打印展开后的 model/train kwargs，不真正训练：
   ```bash
-  python src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/A_仅基座RFDETR.yaml" --dump-kwargs
+  uv run src/scripts/train.py -c "configs/experiments/0822proto+SSCL+HN消融/A_仅基座RFDETR.yaml" --dump-kwargs
   ```
 - **输出目录**：训练产物与 `training_config.json` 都在 `output/0822-proto-sscl-hn-ablation/<实验名>/`，评估结果在加 `-eval` 后缀的目录。
 - **最佳权重**：每次训练会写 `checkpoint_best_total.pth`（最终用于推理）/ `checkpoint_best_regular.pth`（普通模型）/ `checkpoint_best_ema.pth`（EMA 模型）。上面的评估命令统一取 `checkpoint_best_total.pth`。
 - **逐类阈值**：如需逐类重标定，运行
   ```bash
-  python src/scripts/evaluation/calibrate_thresholds.py output/0822-proto-sscl-hn-ablation/<实验名>/checkpoint_best_total.pth \
+  uv run src/scripts/evaluation/calibrate_thresholds.py output/0822-proto-sscl-hn-ablation/<实验名>/checkpoint_best_total.pth \
       --bias-json output/0822-proto-sscl-hn-ablation/<实验名>/class_counts.json --bias-k 1.0
   ```
   产物可贴回 `test_shwx.yaml` 的 `class_conf_thresholds`。
