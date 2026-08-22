@@ -6,7 +6,7 @@
 #   RFDETR_PROTO_RESOLUTION=1024 \
 #   RFDETR_PROTO_CHECKPOINT=output/0818-SHWX-medium-baseline-26class-truck-1024/checkpoint_best_total.pth \
 #   RFDETR_PROTO_OUTPUT=data/proto_guidance_shwx_truck_26.pt \
-#   python src/scripts/ret-sscl/stage0_build_proto_guidance.py
+#   python src/scripts/semantic_experiments/stage0_build_proto_guidance.py
 # 用法：python src/scripts/train.py -c configs/experiments/proto_guidance_E4-hardneg-fsc_26_truck.yaml
 model:
   variant: medium

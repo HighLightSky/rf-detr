@@ -17,7 +17,7 @@ recall，输出 Markdown 对比表 + CSV。
 4. HM/LQS precision > P1（细粒度精度提升——语义头的核心卖点）
 
 用法：
-    python src/scripts/ret-sscl/eval_ablation.py
+    python src/scripts/semantic_experiments/eval_ablation.py
 """
 
 from __future__ import annotations

@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 # ── 路径配置 ───────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = PROJECT_ROOT / "src"
 METRICS_CSV = PROJECT_ROOT / "output" / "0724-shwx-rfdetr_medium" / "metrics.csv"
 OUTPUT_DIR = PROJECT_ROOT / "output" / "0724-shwx-rfdetr_medium" / "plots"

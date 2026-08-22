@@ -18,7 +18,7 @@ CLIP 对遥感提示词（``sscl/prompts/shwx.yaml``）编码取平均，保持�
 - ``RFDETRDataModule`` 构建训练集 DataLoader（与训练相同的数据分布）。
 
 用法：
-    python src/scripts/ret-sscl/stage0_build_proto_guidance.py
+    python src/scripts/semantic_experiments/stage0_build_proto_guidance.py
 
 输出：
     data/proto_guidance_shwx.pt —— 含 ``visual_prototypes [C, M, d]``、

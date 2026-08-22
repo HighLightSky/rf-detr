@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from scripts.eval_lib import ReasonPluginCfg, _rescore_reason_candidates
-from scripts.large_cut_pipeline import infer_detector_on_crops
+from scripts.large_cut.large_cut_pipeline import infer_detector_on_crops
 
 
 class _FakeReasonPlugin:

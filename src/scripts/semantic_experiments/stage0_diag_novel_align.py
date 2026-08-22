@@ -17,7 +17,7 @@
 若舰船类同类对齐度 ≈ 0 或为负 → 坐实"文本派生舰船方向不可用"的根因。
 
 用法：
-    python src/scripts/ret-sscl/stage0_diag_novel_align.py
+    python src/scripts/semantic_experiments/stage0_diag_novel_align.py
 """
 
 from __future__ import annotations

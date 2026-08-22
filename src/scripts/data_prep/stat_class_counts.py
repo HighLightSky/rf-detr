@@ -22,7 +22,7 @@
 样本数 N_ref（避免直接用 N_max 使权重过大）。
 
 用法：
-    python src/scripts/stat_class_counts.py <labels_dir> <output_json> [num_classes] [class_names_csv]
+    python src/scripts/data_prep/stat_class_counts.py <labels_dir> <output_json> [num_classes] [class_names_csv]
 
 - labels_dir：YOLO 训练集标签目录（``*.txt``）。
 - output_json：输出 JSON 路径，建议写到实验目录（随实验保存，避免手写错）。

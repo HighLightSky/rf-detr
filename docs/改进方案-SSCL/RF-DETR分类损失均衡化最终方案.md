@@ -104,9 +104,9 @@ logit_adjustment_warmup_epochs: float = 1.0
 | `src/rfdetr/models/criterion.py`                   | `__init__` 新参数 + `_build_class_balance_buffers` 预计算权重/bias buffer（`persistent=False`）；`loss_labels` ia_bce 分支：P0 在 `pos_weights[tuple(pos_ind)]` 赋值后乘 `class_balance_weights[target_classes_o]`；P1 用**局部** `adjusted_logits = src_logits + warmup·bias` 计算损失（绝不原地改 `outputs["pred_logits"]`，会污染推理输出）；`set_la_warmup_factor()` 每步更新 |
 | `src/rfdetr/models/lwdetr.py`                      | `build_criterion_and_postprocessors` 读配置、加载 counts JSON（每个 rank 同一文件，DDP 一致）                                                                                                                                                                                                                                                                                     |
 | `src/rfdetr/training/module_model.py`              | `_compute_train_losses` 按 `global_step / (warmup_epochs × steps_per_epoch)` 设 warmup                                                                                                                                                                                                                                                                                            |
-| `src/scripts/stat_class_counts.py`                 | 新增：训练集类别统计 → `class_counts.json`（含 n_ref）                                                                                                                                                                                                                                                                                                                            |
+| `src/scripts/data_prep/stat_class_counts.py`                 | 新增：训练集类别统计 → `class_counts.json`（含 n_ref）                                                                                                                                                                                                                                                                                                                            |
 | `src/scripts/train_sscl_class_balance.py`          | 新增：0807 同配方 + 均衡开关，训练前自动统计类别数                                                                                                                                                                                                                                                                                                                                |
-| `src/scripts/calibrate_thresholds.py`              | 新增：推理一次 → 离线坐标上升搜逐类阈值（含 LA 推理侧 bias 对照）                                                                                                                                                                                                                                                                                                                 |
+| `src/scripts/evaluation/calibrate_thresholds.py`              | 新增：推理一次 → 离线坐标上升搜逐类阈值（含 LA 推理侧 bias 对照）                                                                                                                                                                                                                                                                                                                 |
 | `src/scripts/test.py`                              | 可选 `LOGIT_ADJUSTMENT_BIAS_PATH/K/TAU/CLIP` 常量（默认 None）                                                                                                                                                                                                                                                                                                                    |
 | `tests/models/test_criterion.py`、`tests/scripts/` | P0/P1 数值与回归测试、统计脚本测试、选优逻辑测试                                                                                                                                                                                                                                                                                                                                  |
 
@@ -121,7 +121,7 @@ logit_adjustment_warmup_epochs: float = 1.0
 
 ```bash
 # ① 生成类别统计（训练脚本会自动做，独立跑可审计）
-uv run python src/scripts/stat_class_counts.py \
+uv run python src/scripts/data_prep/stat_class_counts.py \
     /home/liu/wzt/datasets/SHWX-dataset-dict/labels/train \
     output/<实验目录>/class_counts.json 25 "HM,LQS,QHS,MS,A1_SU-35,...,FSC"
 
@@ -132,7 +132,7 @@ uv run python src/scripts/train_sscl_class_balance.py
 # ④ E3：E1 + LA（LOGIT_ADJUSTMENT_ENABLED=True, TAU=0.1, CLIP=1.0, WARMUP=1.0）
 
 # ⑤ 训练后：逐类阈值重标定（必做，loss 变了分数分布必变）
-uv run python src/scripts/calibrate_thresholds.py output/<实验目录>/checkpoint_best_total.pth
+uv run python src/scripts/evaluation/calibrate_thresholds.py output/<实验目录>/checkpoint_best_total.pth
 
 # ⑥ 把重标定输出的 CLASS_CONF_THRESHOLDS 贴入 test.py 后跑标准评估
 uv run python src/scripts/test.py output/<实验目录>/checkpoint_best_total.pth

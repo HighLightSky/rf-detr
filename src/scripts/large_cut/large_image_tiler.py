@@ -25,7 +25,7 @@ from typing import Any
 
 import cv2
 
-from scripts.large_cut_pipeline import (
+from scripts.large_cut.large_cut_pipeline import (
     _nms_boxes,
     crop_with_padding,
     infer_detector_on_crops,

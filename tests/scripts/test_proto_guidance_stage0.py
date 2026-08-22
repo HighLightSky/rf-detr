@@ -16,7 +16,7 @@ import pytest
 
 def _load_stage0_module() -> ModuleType:
     """按文件路径加载带连字符目录下的阶段 0 脚本。"""
-    script_path = Path(__file__).resolve().parents[2] / "src/scripts/ret-sscl/stage0_build_proto_guidance.py"
+    script_path = Path(__file__).resolve().parents[2] / "src/scripts/semantic_experiments/stage0_build_proto_guidance.py"
     spec = importlib.util.spec_from_file_location("stage0_build_proto_guidance_test", script_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

@@ -16,11 +16,11 @@
     #    之后本脚本无需任何改动，只要传入 --dataset 即可复用。
 
     # 2. 构建矩阵（以 SHWX / DIOR 为例）
-    python src/scripts/build_semantic_matrix.py --dataset shwx
-    python src/scripts/build_semantic_matrix.py --dataset dior
+    python src/scripts/data_prep/build_semantic_matrix.py --dataset shwx
+    python src/scripts/data_prep/build_semantic_matrix.py --dataset dior
 
     # 3. 可选：指定 CLIP 模型（离线场景传本地缓存路径）与输出路径
-    python src/scripts/build_semantic_matrix.py --dataset dior \
+    python src/scripts/data_prep/build_semantic_matrix.py --dataset dior \
         --model /path/to/clip-vit-large-patch14 \
         --output data/semantic_matrix_dior.pt
 
@@ -47,7 +47,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # 将项目 src 目录加入 sys.path，便于直接运行脚本
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _SRC_DIR = _PROJECT_ROOT / "src"
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))

@@ -9,7 +9,7 @@
     1. 先生成测试预测（yolo_preds）：
        python src/scripts/test.py -c <测试配置(save_yolo_preds: true)>
     2. 扫描：
-       python src/scripts/eval_thresh_sweep.py <pred_dir> [--out <输出 json>]
+       python src/scripts/evaluation/eval_thresh_sweep.py <pred_dir> [--out <输出 json>]
 
 输出：
     - 基线（全 0.25）与候选逐类阈值下的比赛口径指标

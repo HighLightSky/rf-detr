@@ -14,7 +14,7 @@ IOU 阈值 0.5 反映"框是否找对位置"，0.75/0.90 反映"边界是否够�
 前向，方形拉伸预处理与训练一致），与 ``model.predict`` 逐像素一致。
 
 用法：
-    python src/scripts/eval_large_cut.py \
+    python src/scripts/large_cut/eval_large_cut.py \
         --checkpoint output/0814-large-cut-rfdetr-nano-704-rot90/checkpoint_best_total.pth
 
 输出：
@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 
 # ── 项目路径 ───────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))

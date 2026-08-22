@@ -16,7 +16,7 @@
   输出上做匹配（eval 模式 group_detr=1），提取 matched query 特征。
 
 用法：
-    python src/scripts/ret-sscl/stage0_collect_features.py
+    python src/scripts/semantic_experiments/stage0_collect_features.py
 
 输出：
     data/fsem_collect_0805.pt —— 含 ``features``/``labels``/``class_names``/
@@ -67,7 +67,7 @@ OUTPUT_FILE = str(Path("data/fsem_collect_0805_train_aug.pt").resolve())
 
 def main() -> None:
     """执行 base 类 matched query 特征收集并保存。"""
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = Path(__file__).resolve().parents[3]
 
     print(f"加载 Stage-1 checkpoint: {BASE_CHECKPOINT}")
     # 构造模型（关闭 gradient_checkpointing：仅前向，无内存压力，避免 eval+no_grad 下的不确定行为）

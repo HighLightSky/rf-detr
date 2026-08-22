@@ -18,10 +18,10 @@
 ``data.yaml.bak`` 再写入指向 split 子目录的新配置。
 
 用法：
-    python src/scripts/split_large_cut_dataset.py                          # 默认 8:1:1
-    python src/scripts/split_large_cut_dataset.py --ratios 0.8:0.1:0.1     # 比例可配置
-    python src/scripts/split_large_cut_dataset.py --force                  # 重建已有划分
-    python src/scripts/split_large_cut_dataset.py --dry-run                # 只打印计划
+    python src/scripts/large_cut/split_large_cut_dataset.py                          # 默认 8:1:1
+    python src/scripts/large_cut/split_large_cut_dataset.py --ratios 0.8:0.1:0.1     # 比例可配置
+    python src/scripts/large_cut/split_large_cut_dataset.py --force                  # 重建已有划分
+    python src/scripts/large_cut/split_large_cut_dataset.py --dry-run                # 只打印计划
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ import numpy as np
 import yaml
 
 # ── 项目路径 ───────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))

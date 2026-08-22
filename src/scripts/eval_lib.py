@@ -10,7 +10,7 @@
 1. **``test.py`` 薄模板**：读 yaml 配置后调用 ``run_evaluation`` 完成完整评估；
 2. **``analysis/`` 探针/诊断脚本**：复用 ``read_test_image_paths``、``build_image_size_map``、
    ``predict_batched_to_records`` 等推理函数；
-3. **``ret-sscl/`` 消融评估脚本**：复用推理管线与比赛指标计算。
+3. **``semantic_experiments/`` 消融评估脚本**：复用推理管线与比赛指标计算。
 
 推理阶段使用“多进程预取解码 + GPU 批量前向”的流水线：DataLoader 的多个 worker
 进程在后台并行完成图像解码与换色，float 化 / 缩放 / 归一化在 GPU 端批量执行，
@@ -1477,7 +1477,7 @@ def run_evaluation(
         else:
             small_records, throughput, gpu_util, timed_images = [], 0.0, None, 0
 
-        from scripts.large_image_tiler import LargeImageTiler
+        from scripts.large_cut.large_image_tiler import LargeImageTiler
 
         tiler = LargeImageTiler(
             model,

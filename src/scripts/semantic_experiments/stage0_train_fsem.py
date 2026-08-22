@@ -19,7 +19,7 @@ matched query 特征，绝不含少样本舰船类）。
 5. 保存 ``data/fsem_shwx.pt``、``data/channel_stats_shwx.pt`` 与 stage0 报告。
 
 用法：
-    python src/scripts/ret-sscl/stage0_train_fsem.py
+    python src/scripts/semantic_experiments/stage0_train_fsem.py
 """
 
 from __future__ import annotations

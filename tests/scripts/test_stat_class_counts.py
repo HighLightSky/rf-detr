@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from scripts.stat_class_counts import count_class_instances, write_counts_json
+from scripts.data_prep.stat_class_counts import count_class_instances, write_counts_json
 
 
 class TestCountClassInstances:

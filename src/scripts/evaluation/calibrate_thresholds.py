@@ -17,7 +17,7 @@ checkpoint 上完成"推理一次 → 离线阈值搜索"：
    k ∈ {0, 0.5, 1}，bias 由 class_counts.json 按训练同配方重建。
 
 用法：
-    python src/scripts/calibrate_thresholds.py <checkpoint.pth> [--bias-json class_counts.json] [--bias-k 0.5] [--output-dir <实验目录>]
+    python src/scripts/evaluation/calibrate_thresholds.py <checkpoint.pth> [--bias-json class_counts.json] [--bias-k 0.5] [--output-dir <实验目录>]
 
 输出：
 - calibrated_thresholds.json：{类别id: 阈值}（可直接贴入 test yaml 的 class_conf_thresholds）
@@ -34,7 +34,7 @@ import json
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))

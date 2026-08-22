@@ -20,7 +20,7 @@
     - ``output_dir/visualization/*.jpg``：边界框（青色）+ 检测框（类别色）叠加图。
 
 用法：
-    python src/scripts/large_cut_pipeline.py \
+    python src/scripts/large_cut/large_cut_pipeline.py \
         --input /path/to/large_image.jpg \
         --boundary-checkpoint output/0814-large-cut-rfdetr-nano-704-rot90/checkpoint_best_total.pth \
         --detector-checkpoint output/0813-SHWX-rfdetr-medium-baseline-精细标注/checkpoint_best_total.pth
@@ -42,7 +42,7 @@ import torchvision.transforms.functional as F  # noqa: N812
 from torch.utils.data import DataLoader, Dataset
 
 # ── 项目路径 ───────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))

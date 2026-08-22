@@ -156,6 +156,6 @@ predict:                            # predict.py 消费
 python src/scripts/train.py -c configs/experiments/xxx.yaml --dump-kwargs
 
 # 逐类阈值重标定（产物可贴入 test yaml 的 class_conf_thresholds）
-python src/scripts/calibrate_thresholds.py output/xxx/checkpoint_best_total.pth \
+python src/scripts/evaluation/calibrate_thresholds.py output/xxx/checkpoint_best_total.pth \
     --bias-json output/xxx/class_counts.json --bias-k 1.0
 ```

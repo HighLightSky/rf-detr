@@ -11,7 +11,7 @@
 2. SHWX 真正大图上的边界切分、裁窗检测和坐标回映射端到端结果。
 
 示例：
-    uv run python src/scripts/compare_large_cut_models.py \
+    uv run python src/scripts/large_cut/compare_large_cut_models.py \
         --detector-checkpoint output/.../checkpoint_best_total.pth
 """
 
@@ -29,14 +29,14 @@ from typing import Any
 import cv2
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from scripts.eval_large_cut import boxes_to_coco_gt, boxes_to_coco_pred, compute_coco_ap  # noqa: E402
+from scripts.large_cut.eval_large_cut import boxes_to_coco_gt, boxes_to_coco_pred, compute_coco_ap  # noqa: E402
 from scripts.eval_lib import build_image_size_map, read_test_image_paths  # noqa: E402
-from scripts.large_cut_pipeline import (  # noqa: E402
+from scripts.large_cut.large_cut_pipeline import (  # noqa: E402
     _nms_boxes,
     crop_with_padding,
     infer_detector_on_crops,

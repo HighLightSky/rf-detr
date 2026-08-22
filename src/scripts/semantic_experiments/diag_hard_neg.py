@@ -25,7 +25,7 @@
   产出不足，需要放宽。
 
 用法：
-    python src/scripts/ret-sscl/diag_hard_neg.py
+    python src/scripts/semantic_experiments/diag_hard_neg.py
 """
 
 from __future__ import annotations

@@ -10,7 +10,7 @@
 
 import pytest
 
-from scripts.eval_large_cut import (
+from scripts.large_cut.eval_large_cut import (
     boxes_to_coco_gt,
     boxes_to_coco_pred,
     compute_coco_ap,

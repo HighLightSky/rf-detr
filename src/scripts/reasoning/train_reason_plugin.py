@@ -316,9 +316,8 @@ class FscGtDataset(Dataset[dict[str, torch.Tensor]]):
         import sys
         from pathlib import Path
 
-        from eval_metrics import build_image_size_map, load_class_names, load_yolo_labels
-
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from scripts.eval_metrics import build_image_size_map, load_class_names, load_yolo_labels
         self.config = config
         self.num_classes = num_classes
         self.builder = CandidateBuilder(config)
@@ -707,7 +706,7 @@ def main() -> None:
             fsc_class_name=args.fsc_class_name,
         )
     elif args.fsc_train:
-        from eval_metrics import load_class_names
+        from scripts.eval_metrics import load_class_names
 
         fsc_id = load_class_names(args.dataset_dir).index(args.fsc_class_name)
         dataset = CandidateDataset(cache, config, args.num_classes, fsc_class_id=fsc_id)

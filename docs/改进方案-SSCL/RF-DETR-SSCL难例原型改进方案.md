@@ -114,7 +114,7 @@ LMP 的机制：难例 token 注入注意力 → query 对难例区域高响应 
 
 ### 4.1 前置离线验证（训练前，几分钟级，必做）
 
-脚本：`src/scripts/ret-sscl/diag_hard_neg.py`（无需训练）。
+脚本：`src/scripts/semantic_experiments/diag_hard_neg.py`（无需训练）。
 
 加载 0807 checkpoint 双源：检测权重 `checkpoint_best_total.pth` + 投影头/原型库 `last.ckpt`（best checkpoint 不含 SSCL 附加模块），在 SHWX 测试集逐图推理（eval 模式单组 query，直接取 `hs`/`pred_logits`/`pred_boxes`），执行与训练完全一致的难例选择，输出：
 
@@ -195,7 +195,7 @@ SSCL_HARD_NEG_TOPK=5 uv run python src/scripts/train_sscl_hardneg.py   # k=5
 
 ### 5.4 评估指标（不能只看 val mAP）
 
-`src/scripts/ret-sscl/eval_hardneg.py` 三向对照输出：
+`src/scripts/semantic_experiments/eval_hardneg.py` 三向对照输出：
 
 - 整体/舰船/飞机/车辆 P/R/F1、**fp_ship**；
 - HM/LQS/QHS/MS 逐类 P/R（SSCL 的主战场）、FSC recall；
@@ -221,8 +221,8 @@ SSCL_HARD_NEG_TOPK=5 uv run python src/scripts/train_sscl_hardneg.py   # k=5
 | `src/rfdetr/sscl/__init__.py`                   | 改   | 导出新模块                                                                                                                                       |
 | `src/rfdetr/training/module_model.py`           | 改   | `_setup_sscl` 建监控；`_select_hard_negatives` 批量选择；`_sscl_loss_callback` 接线（返回字典仍只含 `loss_sscl`）；`on_train_epoch_end` 冲刷监控 |
 | `src/scripts/train_sscl_hardneg.py`             | 新增 | 双臂训练脚本（env 参数化 k）                                                                                                                     |
-| `src/scripts/ret-sscl/diag_hard_neg.py`         | 新增 | 前置硬度验证脚本                                                                                                                                 |
-| `src/scripts/ret-sscl/eval_hardneg.py`          | 新增 | 三向对照评估脚本                                                                                                                                 |
+| `src/scripts/semantic_experiments/diag_hard_neg.py`         | 新增 | 前置硬度验证脚本                                                                                                                                 |
+| `src/scripts/semantic_experiments/eval_hardneg.py`          | 新增 | 三向对照评估脚本                                                                                                                                 |
 | `tests/models/test_sscl_hard_neg.py`            | 新增 | 损失级单测（9 项）                                                                                                                               |
 | `tests/models/test_hard_neg_selection.py`       | 新增 | 选择器单测（7 项）                                                                                                                               |
 | `tests/training/test_sscl_hard_neg_callback.py` | 新增 | 回调级单测 + config 校验（9 项）                                                                                                                 |

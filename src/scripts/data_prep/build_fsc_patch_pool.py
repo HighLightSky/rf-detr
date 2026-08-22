@@ -18,7 +18,7 @@
 - 负样本裁剪区与任何 GT 相交则丢弃（防止把真目标裁进负补丁）。
 
 用法：
-    python src/scripts/build_fsc_patch_pool.py \
+    python src/scripts/data_prep/build_fsc_patch_pool.py \
       --data-dir /home/liu/wzt/datasets/SHWX-dataset-dict-redo \
       --ckpt output/0816-SHWX-ProtoGuidance-1024/checkpoint_best_total.pth \
       --out-dir data/fsc_patch_pool

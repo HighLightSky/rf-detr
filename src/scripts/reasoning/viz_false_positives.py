@@ -34,9 +34,9 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from eval_metrics import (
+from scripts.eval_metrics import (
     IMAGE_EXTENSIONS,
     build_image_size_map,
     load_class_names,

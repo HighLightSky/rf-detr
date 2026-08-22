@@ -10,7 +10,7 @@
 
 import pytest
 
-from scripts.calibrate_thresholds import _select_best_candidate
+from scripts.evaluation.calibrate_thresholds import _select_best_candidate
 
 
 def _mk(recall: float, fdr: float) -> dict[str, float]:

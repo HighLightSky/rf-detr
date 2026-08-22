@@ -367,7 +367,7 @@ class RFDETRDataModule(LightningDataModule):
                     if not pool_dir:
                         raise ValueError(
                             "patch_paste_enabled=True 但 patch_paste_dir 未配置"
-                            "（先运行 src/scripts/build_fsc_patch_pool.py 生成补丁池）"
+                            "（先运行 src/scripts/data_prep/build_fsc_patch_pool.py 生成补丁池）"
                         )
                     from rfdetr.datasets.patch_paste import PatchPasteDataset
 

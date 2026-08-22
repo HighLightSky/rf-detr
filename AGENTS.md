@@ -189,6 +189,12 @@ uv run twine check --strict dist/*
 >
 > Internal package organization within `src/rfdetr/` is subject to change as this is an active research and development project.
 
+### Script Organization
+
+常用入口保留在 `src/scripts/` 外层：`train.py`、`test.py`、`train_dual_shwx.py`、`test_dual_shwx.py`。
+共享配置与评估模块（`expcfg.py`、`eval_lib.py`、`eval_metrics.py`、`predict.py`、`dual_shwx.py`）也保留在外层。
+其余脚本按用途归档到 `analysis/`、`data_prep/`、`evaluation/`、`large_cut/`、`reasoning/` 和 `semantic_experiments/`。
+
 ## Architecture & Conventions
 
 ### Key Patterns

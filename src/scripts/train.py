@@ -41,7 +41,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from scripts import expcfg  # noqa: E402
-from scripts.stat_class_counts import write_counts_json  # noqa: E402
+from scripts.data_prep.stat_class_counts import write_counts_json  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:

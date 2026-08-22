@@ -13,7 +13,7 @@
   与语义矩阵新方法一致）。
 
 用法：
-    python src/scripts/ret-sscl/stage0_build_proto_guidance_dior.py
+    python src/scripts/semantic_experiments/stage0_build_proto_guidance_dior.py
 
 输出：
     data/proto_guidance_dior.pt —— 含 ``visual_prototypes [C, M, d]``、

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from scripts.large_cut_pipeline import (
+from scripts.large_cut.large_cut_pipeline import (
     crop_with_padding,
     infer_detector_on_crops,
     letterbox_resize,

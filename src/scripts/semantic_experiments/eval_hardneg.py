@@ -13,7 +13,7 @@
 recall，Markdown + CSV 到 output/0810-SHWX-SSCL-HardNeg-compare/。
 
 用法：
-    python src/scripts/ret-sscl/eval_hardneg.py
+    python src/scripts/semantic_experiments/eval_hardneg.py
 """
 
 from __future__ import annotations

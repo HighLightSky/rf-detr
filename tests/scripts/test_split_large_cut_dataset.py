@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from scripts.split_large_cut_dataset import (
+from scripts.large_cut.split_large_cut_dataset import (
     create_split_links,
     parse_ratios,
     plan_split,
