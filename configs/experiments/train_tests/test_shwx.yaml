@@ -4,8 +4,8 @@ test:
   dataset: shwx # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test
   resolution: 1024
-  checkpoint: output/0821-多模态对齐二三阶段合并/checkpoint_best_total.pth
-  output_dir: output/0821-多模态对齐二三阶段合并
+  checkpoint: output/0822-多模态对齐第一步-E4方案/checkpoint_best_total.pth
+  output_dir: output/0822-多模态对齐第一步-E4方案
   conf_threshold: 0.25 # 全局置信度阈值
   class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}；可整段贴入 calibrate_thresholds 产物
   device: cuda:0 # 无 CUDA 时自动回退 CPU

@@ -42,7 +42,7 @@ model:
 train:
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
   dataset_file: yolo
-  output_dir: output/0821-多模态对齐第一步-E4方案
+  output_dir: output/0822-多模态对齐第一步-E4方案
   epochs: 20
   batch_size: 16
   grad_accum_steps: 4
