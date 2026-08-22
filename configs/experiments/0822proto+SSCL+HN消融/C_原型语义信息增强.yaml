@@ -1,0 +1,62 @@
+# C：基线加多模态原型库，仅验证原型注入 decoder query 内容的效果。
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 1024
+  gradient_checkpointing: true
+  pretrain_weights: output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024/checkpoint_best_total.pth
+
+  # 多模态原型前向引导
+  proto_guidance_enabled: true
+  proto_guidance_artifacts_path: data/proto_guidance_shwx_1024_from120ep.pt
+  proto_guidance_fusion_mode: simple
+  proto_guidance_num_slots: 10
+  proto_guidance_position_enabled: false
+  proto_guidance_content_enabled: true
+  proto_guidance_aux_loss_enabled: false
+  proto_guidance_dense_loss_enabled: false
+  proto_guidance_dense_foreground_loss_enabled: false
+  proto_guidance_tau_p: 0.2
+  proto_guidance_warmup_epochs: 2.0
+  proto_guidance_gamma_content_init: 0.05
+  proto_guidance_gamma_content_max: 1.0
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_file: yolo
+  output_dir: output/0822-proto-sscl-hn-ablation/C-content
+  epochs: 10
+  batch_size: 32
+  grad_accum_steps: 2
+  num_workers: 6
+  lr: 1e-5
+  lr_encoder: 1e-5
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  lr_scheduler: step
+  lr_scheduler_kwargs: {lr_drop: 8}
+  warmup_epochs: 0.0
+  seed: 42
+  tensorboard: true
+  wandb: false
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 1
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+
+  # 类均衡采样与数据增强控制
+  class_balanced_sampling: true
+  class_balanced_class_ids: [0, 1, 24]
+  patch_paste_enabled: false
+
+  # SSCL 与难负样本抑制
+  sscl_enabled: false
+  sscl_hard_neg_enabled: false
+
+  # 统一全量微调
+  sscl_freeze_strategy: none
