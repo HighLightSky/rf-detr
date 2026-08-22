@@ -212,8 +212,14 @@ def _append_training_callbacks(
         monitor_regular = "val/segm_mAP_50_95"
         early_stopping_monitor_ema = "val/ema_segm_mAP_50_95"
     else:
-        monitor_regular = "val/mAP_50_95"
-        early_stopping_monitor_ema = "val/ema_mAP_50_95"
+        if tc.best_metric == "f1":
+            if tc.eval_ema_only:
+                raise ValueError("best_metric='f1' cannot be used with eval_ema_only=True; use best_metric='map'.")
+            monitor_regular = "val/F1"
+            early_stopping_monitor_ema = None
+        else:
+            monitor_regular = "val/mAP_50_95"
+            early_stopping_monitor_ema = "val/ema_mAP_50_95"
     monitor_ema = early_stopping_monitor_ema if enable_ema else None
 
     best_model_smooth_alpha = tc.smooth_alpha
@@ -241,7 +247,7 @@ def _append_training_callbacks(
             RFDETREarlyStopping(
                 patience=tc.early_stopping_patience,
                 min_delta=tc.early_stopping_min_delta,
-                use_ema=tc.early_stopping_use_ema,
+                use_ema=tc.early_stopping_use_ema and early_stopping_monitor_ema is not None,
                 monitor_regular=monitor_regular,
                 monitor_ema=early_stopping_monitor_ema,
                 skip_best_epochs=tc.skip_best_epochs,

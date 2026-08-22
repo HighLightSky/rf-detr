@@ -1190,6 +1190,7 @@ class TrainConfig(BaseConfig):
     ema_tau: int = 100
     lr_drop: int = 100
     checkpoint_interval: int = Field(default=10, ge=1)
+    best_metric: Literal["f1", "map"] = "map"
     skip_best_epochs: int = Field(default=0, ge=0)
     smooth_alpha: float = 0.0
     warmup_epochs: float = 0.0
@@ -1218,12 +1219,10 @@ class TrainConfig(BaseConfig):
     # Validation-only: forward through the EMA model instead of the base model, and skip the
     # duplicate base-model forward pass COCOEvalCallback would otherwise also run — halves
     # per-batch validation compute when EMA is enabled. Requires use_ema=True.
-    # Metric-key remap: when active, val/mAP_50_95 (and val/segm_mAP_*) report EMA-model
-    # quality, not base-model quality — the base model is never evaluated this epoch. Best-
-    # checkpoint tracking follows: the "regular" checkpoint track sees no data (safely no-ops)
-    # while the EMA checkpoint track receives the real per-epoch EMA score. val/F1 is not
-    # remapped (no parallel EMA-tracked accumulator) and still reflects EMA-quality predictions
-    # under the regular key.
+    # 指标键重映射：启用后 val/mAP_50_95（及 val/segm_mAP_*）表示 EMA 模型质量，
+    # 不再表示基础模型质量；该轮不会执行基础模型前向。最佳权重跟踪也随之变化：
+    # regular 路径没有数据并安全跳过，EMA 路径接收真实的每轮 EMA 分数。
+    # 普通检测的 F1 选权没有对应的 EMA 累积器，因此禁止与此选项同时使用。
     eval_ema_only: bool = False
     num_workers: int = 2
     weight_decay: float = 1e-4

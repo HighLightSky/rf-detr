@@ -134,6 +134,21 @@ class _ResumeProbeCallback(Callback):
 class TestBestModelCallback:
     """Verify best-model checkpoint saving and selection."""
 
+    def test_f1_mode_total_uses_regular_checkpoint_without_ema_metric(self, tmp_path: Path) -> None:
+        """F1 模式的 total 选择不得比较 regular F1 与 EMA mAP。"""
+        cb = BestModelCallback(output_dir=str(tmp_path), monitor_regular="val/F1", monitor_ema=None)
+        pl_module = _make_pl_module()
+        trainer = _make_trainer({"val/F1": 0.8, "val/ema_mAP_50_95": 0.99})
+
+        cb.on_validation_end(trainer, pl_module)
+        cb.on_fit_end(trainer, pl_module)
+
+        total = tmp_path / "checkpoint_best_total.pth"
+        regular = tmp_path / "checkpoint_best_regular.pth"
+        assert total.exists()
+        assert regular.exists()
+        assert torch.load(total, weights_only=False)["best_total_source"] == "regular"
+
     def test_checkpoint_payload_includes_model_config_when_provided(self) -> None:
         """Saved ``.pth`` checkpoints should carry the architecture schema needed for reload."""
         trainer = _make_trainer({"val/mAP_50_95": 0.5})

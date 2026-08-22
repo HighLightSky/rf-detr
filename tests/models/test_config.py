@@ -209,6 +209,24 @@ class TestTrainConfigRejectsUnknownKwargs:
         with pytest.raises(ValidationError, match=r"Unknown parameter\(s\): 'epoch'"):
             TrainConfig(dataset_dir=str(tmp_path), output_dir=str(tmp_path), epoch=5)
 
+    @pytest.mark.parametrize("best_metric", ["f1", "map"])
+    def test_best_metric_accepts_supported_values(self, tmp_path, best_metric: str) -> None:
+        """TrainConfig 接受两个受支持的最佳权重指标。"""
+        config = TrainConfig(dataset_dir=str(tmp_path), output_dir=str(tmp_path), best_metric=best_metric)
+
+        assert config.best_metric == best_metric
+
+    def test_best_metric_defaults_to_map(self, tmp_path) -> None:
+        """普通检测默认按 mAP 选择最佳权重。"""
+        config = TrainConfig(dataset_dir=str(tmp_path), output_dir=str(tmp_path))
+
+        assert config.best_metric == "map"
+
+    def test_best_metric_rejects_unsupported_value(self, tmp_path) -> None:
+        """TrainConfig 拒绝不受支持的最佳权重指标名称。"""
+        with pytest.raises(ValidationError):
+            TrainConfig(dataset_dir=str(tmp_path), output_dir=str(tmp_path), best_metric="precision")
+
     def test_typo_error_lists_available_parameters(self, tmp_path) -> None:
         """The rejection message includes the available parameter list so the typo is easy to fix."""
         with pytest.raises(ValidationError, match=r"Available parameter\(s\):.*epochs"):

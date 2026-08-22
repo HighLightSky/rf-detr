@@ -123,6 +123,44 @@ class TestBuildTrainerCallbacks:
         types = [type(cb) for cb in trainer.callbacks]
         assert BestModelCallback in types
 
+    def test_detection_best_model_defaults_to_map_with_ema(self, tmp_path):
+        """普通检测默认按 regular/EMA mAP 选择。"""
+        trainer = build_trainer(_tc(tmp_path, use_ema=True), _mc())
+        best_cb = next(cb for cb in trainer.callbacks if isinstance(cb, BestModelCallback))
+
+        assert best_cb.monitor == "val/mAP_50_95"
+        assert best_cb._monitor_ema == "val/ema_mAP_50_95"
+
+    def test_detection_best_model_can_use_map_with_ema(self, tmp_path):
+        """map 选项保留 regular/EMA mAP 的最佳权重选择。"""
+        trainer = build_trainer(_tc(tmp_path, use_ema=True, best_metric="map"), _mc())
+        best_cb = next(cb for cb in trainer.callbacks if isinstance(cb, BestModelCallback))
+
+        assert best_cb.monitor == "val/mAP_50_95"
+        assert best_cb._monitor_ema == "val/ema_mAP_50_95"
+
+    def test_detection_map_allows_ema_only_validation(self, tmp_path):
+        """map 选项保留仅 EMA 验证的既有支持。"""
+        trainer = build_trainer(_tc(tmp_path, use_ema=True, best_metric="map", eval_ema_only=True), _mc())
+        best_cb = next(cb for cb in trainer.callbacks if isinstance(cb, BestModelCallback))
+
+        assert best_cb.monitor == "val/mAP_50_95"
+        assert best_cb._monitor_ema == "val/ema_mAP_50_95"
+
+    def test_detection_f1_early_stopping_does_not_use_ema_map(self, tmp_path):
+        """F1 早停不得比较 regular F1 与 EMA mAP。"""
+        trainer = build_trainer(_tc(tmp_path, use_ema=True, best_metric="f1", early_stopping=True), _mc())
+        early_stop_cb = next(cb for cb in trainer.callbacks if isinstance(cb, RFDETREarlyStopping))
+
+        assert early_stop_cb._monitor_regular == "val/F1"
+        assert early_stop_cb._monitor_ema is None
+        assert early_stop_cb._use_ema is False
+
+    def test_detection_f1_rejects_ema_only_validation(self, tmp_path):
+        """F1 选择拒绝仅 EMA 验证，避免保存未被验证的 regular 权重。"""
+        with pytest.raises(ValueError, match="best_metric='f1'"):
+            build_trainer(_tc(tmp_path, use_ema=True, best_metric="f1", eval_ema_only=True), _mc())
+
     def test_skip_best_epochs_forwarded_to_best_model_callback(self, tmp_path):
         """BestModelCallback receives skip_best_epochs from TrainConfig."""
         trainer = build_trainer(_tc(tmp_path, use_ema=False, skip_best_epochs=3), _mc())

@@ -123,6 +123,7 @@ For example, `RFDETRSegXLarge` uses `624x624`, which is valid because `624` is d
 | Parameter             | Type  | Default | Description                                                                                                                            |
 | --------------------- | ----- | ------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `checkpoint_interval` | `int` | `10`    | Frequency (in epochs) at which model checkpoints are saved. More frequent saves provide better coverage but consume more storage.      |
+| `best_metric`         | `"f1"` / `"map"` | `"map"` | Best-checkpoint metric for ordinary detection models. `map` monitors COCO `val/mAP_50_95` and preserves regular/EMA mAP selection; `f1` monitors `val/F1`. Segmentation and keypoint models keep their task-specific metrics. |
 | `skip_best_epochs`    | `int` | `0`     | Ignore the first N epochs when tracking best checkpoints and early-stopping patience. Useful when fine-tuning from a prior checkpoint. |
 
 ### Checkpoint Files
@@ -137,8 +138,9 @@ During training, multiple checkpoints are saved:
 | `checkpoint_best_regular.pth` | Best validation performance (raw weights) |
 | `checkpoint_best_total.pth`   | Final best model for inference            |
 
-Best validation performance uses the task metric for the model family: box mAP for detection/segmentation and COCO
-keypoint AP for keypoint preview.
+Best validation performance uses the configured metric for ordinary detection (`best_metric: map` by default), while
+segmentation and keypoint preview models continue to use their task-specific mAP/AP metrics. F1 selection cannot be
+combined with `eval_ema_only=True`; use `best_metric: map` for EMA-only validation.
 
 ## Early Stopping Parameters
 
@@ -284,6 +286,7 @@ Below is a summary table of all training parameters:
 | `use_ema`                    | bool                | True           | Enable Exponential Moving Average of weights.                                                                                         |
 | `gradient_checkpointing`     | bool                | False          | Trade compute for memory during backprop.                                                                                             |
 | `checkpoint_interval`        | int                 | 10             | Save checkpoint every N epochs.                                                                                                       |
+| `best_metric`                | `"f1"` / `"map"`    | `"map"`         | Best-checkpoint metric for ordinary detection; `map` monitors `val/mAP_50_95` with regular/EMA mAP selection, while `f1` monitors `val/F1`. Other model families keep task-specific metrics. |
 | `resume`                     | str                 | None           | Path to checkpoint for resuming training.                                                                                             |
 | `tensorboard`                | bool                | True           | Enable TensorBoard logging.                                                                                                           |
 | `wandb`                      | bool                | False          | Enable Weights & Biases logging.                                                                                                      |
@@ -292,7 +295,7 @@ Below is a summary table of all training parameters:
 | `early_stopping`             | bool                | False          | Enable early stopping.                                                                                                                |
 | `early_stopping_patience`    | int                 | 10             | Epochs without improvement before stopping.                                                                                           |
 | `early_stopping_min_delta`   | float               | 0.001          | Minimum validation metric change to qualify as improvement.                                                                           |
-| `early_stopping_use_ema`     | bool                | False          | Use EMA model for early stopping metrics.                                                                                             |
+| `early_stopping_use_ema`     | bool                | False          | Use EMA model for early stopping metrics. This applies when the selected metric has an EMA counterpart; F1 selection uses the regular metric. |
 | `eval_max_dets`              | int                 | 500            | Maximum detections per image considered during COCO evaluation.                                                                       |
 | `eval_interval`              | int                 | 1              | Skip the whole validation loop on epochs not a multiple of N; final epoch always validates.                                           |
 | `log_per_class_metrics`      | bool                | True           | Log per-class AP metrics; disable to also skip the underlying per-class compute.                                                      |

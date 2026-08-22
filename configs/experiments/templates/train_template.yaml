@@ -59,6 +59,7 @@ train:
   wandb: false
   # ── EMA / 验证 / 恢复 ──────────────────────────────────────────
   use_ema: true
+  best_metric: map # 普通检测 best 指标：f1 或 map；默认 map
   eval_interval: 1
   compute_val_loss: false # 关闭验证 loss 计算省显存
   resume: "" # last.ckpt 路径（相对项目根）实现续训
