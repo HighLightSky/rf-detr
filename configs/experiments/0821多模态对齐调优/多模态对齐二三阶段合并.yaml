@@ -8,7 +8,7 @@ model:
   resolution: 1024
   gradient_checkpointing: true
   # 直接从第一阶段 120 轮基线启动，不依赖第二阶段中间权重
-  pretrain_weights: output/0815-SHWX-rfdetr-medium-baseline-精细标注-1024/checkpoint_best_total.pth
+  pretrain_weights: output/0822-rfdetr-final-baseline/checkpoint_best_total.pth
 
   # 多模态原型引导：沿用 E4 配方
   proto_guidance_enabled: true
@@ -33,9 +33,9 @@ model:
   proto_guidance_tau_p: 0.2
 
 train:
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL
   dataset_file: yolo
-  output_dir: output/0821-多模态对齐二三阶段合并
+  output_dir: output/0823-final-多模态对齐二三阶段合并
   epochs: 20
   batch_size: 32
   grad_accum_steps: 2
@@ -86,7 +86,7 @@ train:
   sscl_hard_neg_topk: 5
   sscl_hard_neg_score_thresh: -0.7
   sscl_hard_neg_log_interval: 100
-  sscl_hard_neg_target_classes: [0, 1, 2, 24]
+  sscl_hard_neg_target_classes: [0, 1, 2, 3, 24]
   sscl_hard_neg_iou_low: 0.0
   sscl_hard_neg_iou_high: 0.15
   sscl_hard_neg_loss_lambda: 0.3

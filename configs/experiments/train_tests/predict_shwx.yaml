@@ -3,11 +3,11 @@
 #   python src/scripts/predict.py -c configs/experiments/predict_shwx.yaml --image /path/to/image.jpg
 #   python src/scripts/predict.py -c configs/experiments/predict_shwx.yaml --image /path/to/folder --conf 0.3
 predict:
-  checkpoint: output/0807-SHWX-SSCL-Proj-原型+实例正样本/checkpoint_best_total.pth
+  checkpoint: output/0822-rfdetr-final-baseline/checkpoint_best_total.pth
   # 相对项目根路径
   conf: 0.25
-  output_dir: output/0807-SHWX-SSCL-Proj-原型+实例正样本/predict
-  image: null # 通常由 --image 命令行提供；也可在此给默认
+  output_dir: output/0822-FINAL-baseline-predict
+  image: /home/liu/wzt/datasets/SHWX-FINAL-truck/images/train/fsc_TG-N25.20-E121.42-lv20-Google_crop0001.jpg
   class_names: shwx # 类别名来源：内置名 shwx/shwx_truck/dior，或 {label: 名称} 字典
   reason_plugin:
     enabled: false # 默认关闭；仅改为 true 时启用插件

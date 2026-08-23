@@ -10,7 +10,7 @@ model:
   resolution: 1024
   gradient_checkpointing: true
   # 从当前最优模型（E4-hard-neg 配方 1024）续训
-  pretrain_weights: /home/liu/wzt/rf-detr/output/0821-多模态对齐第一步-E4方案/checkpoint_best_total.pth
+  pretrain_weights: output/0823-final-多模态对齐第一步/checkpoint_best_total.pth
   # --- 多模态原型引导：全开（位置 + 辅助损失 + 内容增强） ---
   proto_guidance_enabled: true
   proto_guidance_artifacts_path: data/proto_guidance_shwx_1024_from120ep.pt
@@ -43,12 +43,12 @@ model:
   proto_guidance_tau_p: 0.2
 
 train:
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL
   dataset_file: yolo
-  output_dir: output/0821-多模态对齐第二步-加入发射车-SSCL只优化发射车
+  output_dir: output/0831-final-多模态对齐第二步
   epochs: 20
-  batch_size: 16
-  grad_accum_steps: 4
+  batch_size: 32
+  grad_accum_steps: 2
   num_workers: 6
   lr: 1e-5
   lr_encoder: 1e-5

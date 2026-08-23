@@ -109,7 +109,7 @@ test:
   batch_size: 32
   num_workers: 12
   reason_plugin:
-    enabled: true
+    enabled: false
     checkpoint: output/0818reasoning-candidate/reason_plugin_fsc.pth
     class_ids: [24]
     conf_low: null
