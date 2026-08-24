@@ -3,31 +3,17 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-"""测试评估库：比赛评分推理管线 + 数据集配置 + 指标计算（由原 test.py 拆分）。
+"""测试评估库，提供配置解析、统一批量推理和评测结果生成。
 
-本模块承载原 ``test.py`` 的全部函数与配置，供三个入口使用：
-
-1. **``test.py`` 薄模板**：读 yaml 配置后调用 ``run_evaluation`` 完成完整评估；
-2. **``analysis/`` 探针/诊断脚本**：复用 ``read_test_image_paths``、``build_image_size_map``、
-   ``predict_batched_to_records`` 等推理函数；
-3. **``semantic_experiments/`` 消融评估脚本**：复用推理管线与比赛指标计算。
-
-推理阶段使用“多进程预取解码 + GPU 批量前向”的流水线：DataLoader 的多个 worker
-进程在后台并行完成图像解码与换色，float 化 / 缩放 / 归一化在 GPU 端批量执行，
-从而隐藏 CPU 预处理延迟，让 GPU 持续满载。预测结果与逐张 ``model.predict``
-完全一致。
-
-模块级配置已收敛为三个 dataclass：
-
-- ``DatasetCfg``：数据集配置（原 ``DATASET_CONFIGS`` 条目解析后的形态）；
-- ``InferenceCfg``：推理参数（原 ``CONF_THRESHOLD``/``DEVICE``/``BATCH_SIZE``/
-  ``NUM_WORKERS``/``PREFETCH_FACTOR``/``USE_FP16`` 等模块级常量）；
-- ``LaBiasCfg``：推理侧 Logit Adjustment bias 参数（原 ``LOGIT_ADJUSTMENT_BIAS_*``
-  模块级常量，替代 calibrate_thresholds 临时改写的 save/restore 模式）。
+test.py、分析脚本和语义实验脚本都复用本模块。标准图片由 CPU worker 解码并组成
+固定批次，GPU 负责异步拷贝、预处理、detector 前向和阈值筛选；大图和 reason plugin
+也使用同一套批量 detector 接口。最后统一生成 BoxRecord 并计算比赛指标。
 """
 
 from __future__ import annotations
 
+import contextlib
+from concurrent.futures import Future, ThreadPoolExecutor
 import gc
 import json
 import os
@@ -35,11 +21,11 @@ import subprocess
 import sys
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 import cv2
 import numpy as np
@@ -47,7 +33,7 @@ import torch
 import torchvision.transforms.functional as F  # noqa: N812
 from torch.utils.data import DataLoader, Dataset
 
-# ── 项目路径 ───────────────────────────────────────────────────────
+# 项目根目录和模块路径。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
@@ -79,9 +65,7 @@ from visualization.detection import (  # noqa: E402
 def _label_keyed_names(names_by_id: dict[int, str]) -> dict[int, str]:
     """把 {类别id: 名称} 转成 {label: 名称}。
 
-    label 为按类别 id 排序后的连续索引（0..C-1），与训练时类别 remap 一致：
-    - SHWX: 类别 id 0-24 → label 0-24。
-    - DIOR: 类别 id 1-20 → label 0-19。
+    label 是按类别 id 排序后的连续索引，与训练时的类别 remap 一致。
 
     Args:
         names_by_id: {类别id: 名称} 映射。
@@ -92,9 +76,7 @@ def _label_keyed_names(names_by_id: dict[int, str]) -> dict[int, str]:
     return {label: names_by_id[cid] for label, cid in enumerate(sorted(names_by_id.keys()))}
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  各数据集配置 —— 所有参数统一在下方维护，新增数据集照格式添加即可
-# ══════════════════════════════════════════════════════════════════════
+# 各数据集配置集中维护，新增数据集时沿用现有字段。
 DATASET_CONFIGS: dict[str, dict[str, Any]] = {
     "shwx": {
         "data_dir": "/home/liu/wzt/datasets/SHWX-dataset-dict",
@@ -269,8 +251,12 @@ class InferenceCfg:
         batch_size: GPU 单次前向的图像数。
         num_workers: CPU 预取 worker 进程数（建议等于 CPU 核数）。
         prefetch_factor: 每个 worker 在内存中预取的数据批数。
-        gpu_util_sample_interval: 后台采样 GPU 利用率的时间间隔（秒）。
-        use_fp16: 用 FP16 张量核加速推理（RTX 30 系约 2.5 倍提速）。
+        precision: 推理精度；``auto`` 在 CUDA 上优先选择 BF16，否则选择 FP16。
+        compile_model: 是否使用 ``torch.compile`` 优化 detector 前向。
+        copy_prefetch: 是否使用 CUDA copy stream 预取下一批数据。
+        warmup_batches: 不计入测速的真实 warmup 批次数。
+        progress_interval_s: 进度输出的最小时间间隔；小于等于 0 时关闭。
+        gpu_monitor_enabled: 是否启用后台 GPU 利用率采样。
     """
 
     device: str = "cuda:0"
@@ -279,8 +265,12 @@ class InferenceCfg:
     batch_size: int = 32
     num_workers: int = 12
     prefetch_factor: int = 3
-    gpu_util_sample_interval: float = 0.5
-    use_fp16: bool = False
+    precision: Literal["auto", "fp32", "fp16", "bf16"] = "auto"
+    compile_model: bool = False
+    copy_prefetch: bool = True
+    warmup_batches: int = 1
+    progress_interval_s: float = 1.0
+    gpu_monitor_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -358,7 +348,13 @@ class LargeImageCfg:
         square_stretch: 边界检测用方形拉伸替代 letterbox。
         batch_size: 边界检测器 GPU 批量大小。
         num_workers: 边界检测器预取 worker 数。
-        detector_batch_size: 小图目标检测器单次处理的最大裁窗数。
+        max_pending_crops: crop 元数据队列允许缓存的最大数量。
+        roi_backend: 大图 ROI 读取后端，支持 auto、pyvips、opencv。
+        proxy_max_side: 边界检测 proxy 最长边。
+        roi_output_size: ROI 输出尺寸，None 使用主检测分辨率。
+        roi_queue_size: ROI 像素队列上限。
+        roi_cache_dir: 可选 proxy 缓存目录。
+        strict_roi_backend: 严格要求 pyvips 时失败。
     """
 
     min_side: int = 2000
@@ -372,7 +368,13 @@ class LargeImageCfg:
     square_stretch: bool = False
     batch_size: int = 8
     num_workers: int = 4
-    detector_batch_size: int | None = 8
+    max_pending_crops: int = 128
+    roi_backend: str = "auto"
+    proxy_max_side: int | None = None
+    roi_output_size: int | None = None
+    roi_queue_size: int = 128
+    roi_cache_dir: str | None = None
+    strict_roi_backend: bool = False
 
 
 @dataclass
@@ -432,16 +434,13 @@ class LaBiasCfg:
             tau=self.tau,
             bias_clip=self.clip,
         )
-        # 补齐到分类头输出通道数（pred_logits 最后一维 = num_classes + 1，
-        # 含背景槽位；counts 只覆盖真实类别），背景槽位 bias 补 0。
+        # 补齐分类头的背景槽位 bias，保证 logits 长度与输出通道一致。
         if la_bias.numel() < num_logit_classes:
             la_bias = torch.cat([la_bias, torch.zeros(num_logit_classes - la_bias.numel(), dtype=la_bias.dtype)])
         return la_bias.to(device)
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  工具函数
-# ══════════════════════════════════════════════════════════════════════
+# 工具函数。
 
 
 def read_test_image_paths(image_dir: Path) -> list[Path]:
@@ -768,7 +767,7 @@ def build_test_report(
     dash = "-" * 80
     report_lines: list[str] = []
 
-    # ── 报告头 ──────────────────────────────────────────────────────
+    # 写入报告头和运行环境信息。
     report_lines.extend(
         [
             sep,
@@ -788,7 +787,7 @@ def build_test_report(
         )
         report_lines.append(f"大类与总指标排除的辅助类别: {excluded_names}")
 
-    # ── 测试数据概况 ────────────────────────────────────────────────
+    # 写入测试数据、阈值和 IoU 配置。
     report_lines.extend(
         [
             f"测试图像数: {len(test_image_paths)}",
@@ -809,9 +808,12 @@ def build_test_report(
         ]
     )
 
-    # ── 推理测速结果 ────────────────────────────────────────────────
+    # 写入批量推理吞吐和大图耗时。
     report_lines.append("推理测速结果")
-    report_lines.append(f"GPU 批量大小: {infer.batch_size}  |  CPU 预取 worker 数: {infer.num_workers}")
+    report_lines.append(
+        f"GPU 批量大小: {infer.batch_size}  |  CPU 预取 worker 数: {infer.num_workers}"
+        f"  |  精度: {infer.precision}  |  compile: {infer.compile_model}"
+    )
     elapsed = timed_images / throughput if throughput > 0 else 0.0
     report_lines.append(f"推理吞吐: {throughput:.1f} img/s  （{timed_images} 张 / {elapsed:.1f}s）")
     if gpu_util is not None:
@@ -822,6 +824,10 @@ def build_test_report(
             f"平均 {large_image_stats['avg']:.2f}s | 最大 {large_image_stats['max']:.2f}s | "
             f"合计 {large_image_stats['total']:.2f}s"
         )
+        if "detector_seconds" in large_image_stats:
+            report_lines.append(
+                f"统一 detector 阶段（小图+crop 混合）: {float(large_image_stats['detector_seconds']):.2f}s"
+            )
         if "boundary_seconds" in large_image_stats:
             end_to_end = float(large_image_stats.get("end_to_end_seconds", large_image_stats["total"]))
             count = max(float(large_image_stats["count"]), 1.0)
@@ -830,36 +836,40 @@ def build_test_report(
                 f"平均 {end_to_end / count:.2f}s | 合计 {end_to_end:.2f}s | "
                 f"边界模型合计 {float(large_image_stats['boundary_seconds']):.2f}s"
             )
+        if "proxy_seconds" in large_image_stats:
+            report_lines.append(f"proxy 读取合计: {float(large_image_stats['proxy_seconds']):.2f}s")
+        if "fallback_count" in large_image_stats:
+            report_lines.append(f"ROI 后端 fallback 图像数: {int(large_image_stats['fallback_count'])}")
     report_lines.append(sep)
 
-    # ── 比赛指标评估结果（大类聚合）──────────────────────────────────
+    # 写入比赛指标和大类聚合结果。
     report_lines.append("比赛指标评估结果（测试集）")
     report_lines.append(format_eval_line("all", eval_results["all"]))
     for group_name, group_result in eval_results["groups"].items():
         report_lines.append(format_eval_line(group_name, group_result))
     report_lines.append(dash)
 
-    # ── 每个大类下小类指标的平均值（macro 平均）──────────────────────
+    # 写入各大类的小类 macro 平均结果。
     report_lines.append("每个大类下小类指标的平均值（macro 平均）")
     report_lines.append(dash)
     for group_name, macro in group_macro.items():
         report_lines.append(format_macro_line(group_name, macro))
     report_lines.append(dash)
 
-    # ── 总指标（各大类平均指标再取平均）──────────────────────────────
+    # 写入所有大类 macro 的总平均结果。
     report_lines.append("总指标（各大类平均指标再取算术平均，即（船+飞机+车辆）/3）")
     report_lines.append(dash)
     report_lines.append(format_macro_line("total", total_macro))
     report_lines.append(dash)
 
-    # ── 细粒度类别指标 ──────────────────────────────────────────────
+    # 写入细粒度类别指标。
     report_lines.append("细粒度类别指标")
     report_lines.append(dash)
     for class_name in sorted(per_class_results["groups"].keys()):
         report_lines.append(format_eval_line(class_name, per_class_results["groups"][class_name]))
     report_lines.append(sep)
 
-    # ── 生成的可视化文件 ────────────────────────────────────────────
+    # 写入混淆矩阵和 FP/FN 文件路径。
     report_lines.append("生成的可视化文件")
     report_lines.append(f"混淆矩阵: {dataset.exp_output_dir / 'confusion_matrix.png'}")
     report_lines.append(f"FP 可视化目录: {dataset.exp_output_dir / 'FP'}")
@@ -881,25 +891,23 @@ def write_test_result(report_lines: list[str], output_path: Path) -> None:
     print(f"[完成] 测试结果已保存至: {output_path}")
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  RF-DETR 批量流水线推理（CPU 预取 + GPU 批量前向）
-# ══════════════════════════════════════════════════════════════════════
+# 统一批量推理：CPU 预取、CUDA 拷贝和 GPU 前向并行执行。
 
 
 class _InferenceDataset(Dataset):
     """在 DataLoader 子进程 worker 中读取并轻量预处理的测试图像数据集。
 
-    每个样本返回 ``(image_id, rgb_tensor, (height, width))``，其中
-    ``rgb_tensor`` 为 ``(C, H, W)`` 的 uint8 RGB 张量（零拷贝视图）。worker 只做
-    磁盘解码与 BGR→RGB 换色，float 化、缩放与归一化全部放到 GPU 端批量执行，
-    从而把 CPU 负载降到最低、让 GPU 持续饱和。测试集单轮完整推理一遍。
+    每个样本返回 ``(image_id, rgb_tensor, (height, width))``。标准检测路径会在
+    worker 中将图像调整为固定分辨率；reason plugin 路径保留原始尺寸以便裁剪 patch。
+    两种路径都返回连续的 uint8 RGB CHW 张量，测试集只遍历一轮。
 
     Args:
         image_paths: 测试图像路径列表。
     """
 
-    def __init__(self, image_paths: list[Path]) -> None:
+    def __init__(self, image_paths: list[Path], resize_resolution: int | None = None) -> None:
         self.image_paths = image_paths
+        self.resize_resolution = resize_resolution
 
     def __len__(self) -> int:
         return len(self.image_paths)
@@ -912,7 +920,13 @@ class _InferenceDataset(Dataset):
 
         height, width = image.shape[:2]
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        rgb_tensor = torch.from_numpy(image).permute(2, 0, 1)  # (C,H,W) uint8 视图
+        rgb_tensor = torch.from_numpy(image).permute(2, 0, 1).contiguous()  # (C,H,W) uint8 连续张量
+        if self.resize_resolution is not None:
+            rgb_tensor = F.resize(
+                rgb_tensor,
+                (self.resize_resolution, self.resize_resolution),
+                antialias=False,
+            )
         return image_path.stem, rgb_tensor, (height, width)
 
 
@@ -1038,6 +1052,34 @@ def _rescore_reason_candidates(
         return boxes, scores, class_ids
 
     adjusted_scores = scores.astype(np.float32, copy=True)
+    if hasattr(reason_plugin, "predict_detections_batch"):
+        threshold_array = np.asarray(
+            [class_conf_thresholds.get(int(label), conf_threshold) for label in class_ids]
+            if class_conf_thresholds
+            else np.full(scores.shape, conf_threshold, dtype=np.float32),
+            dtype=np.float32,
+        )
+        out_boxes, out_scores, out_class_ids = reason_plugin.predict_detections_batch(
+            [
+                {
+                    "image": source_image,
+                    "boxes": boxes,
+                    "scores": scores,
+                    "classes": class_ids,
+                }
+            ],
+            class_names,
+            class_embed_weight,
+            device,
+            target_thresholds=[threshold_array],
+            reason_class_ids=tuple(target_ids),
+            filter_final=False,
+        )[0]
+        if out_boxes.shape != boxes.shape or not np.array_equal(out_class_ids, class_ids):
+            raise RuntimeError("reason_plugin 在未筛选模式下必须保持候选框顺序与类别不变")
+        adjusted_scores[:] = out_scores
+        return boxes, adjusted_scores, class_ids
+
     threshold_groups: dict[float, list[int]] = {}
     for class_id in target_ids:
         threshold = (
@@ -1066,6 +1108,117 @@ def _rescore_reason_candidates(
     return boxes, adjusted_scores, class_ids
 
 
+class _InferenceRuntime:
+    """统一管理 detector 的设备、精度、编译和 CUDA 预取运行时。"""
+
+    def __init__(
+        self,
+        model: RFDETR,
+        device: str,
+        resolution: int,
+        batch_size: int,
+        precision: Literal["auto", "fp32", "fp16", "bf16"],
+        compile_model: bool,
+        copy_prefetch: bool,
+    ) -> None:
+        self.device = torch.device(device)
+        self.resolution = resolution
+        self.batch_size = batch_size
+        self.copy_prefetch = copy_prefetch and self.device.type == "cuda"
+        self.model = model.model.model.to(self.device).eval()
+        if self.device.type == "cuda":
+            torch.set_float32_matmul_precision("high")
+            torch.backends.cudnn.benchmark = True
+        self.autocast_dtype = self._resolve_precision(precision)
+        self.compiled = False
+        if compile_model and self.device.type == "cuda" and hasattr(torch, "compile"):
+            try:
+                self.model = torch.compile(self.model, dynamic=False)  # type: ignore[assignment]
+                self.compiled = True
+            except Exception as exc:
+                print(f"[w] torch.compile 失败，使用同一运行时的 eager 前向: {exc}", flush=True)
+        self.copy_stream = torch.cuda.Stream(device=self.device) if self.copy_prefetch else None
+        self._ready_event: torch.cuda.Event | None = None
+        self.means = torch.as_tensor(model.means, device=self.device, dtype=torch.float32).view(1, -1, 1, 1)
+        self.stds = torch.as_tensor(model.stds, device=self.device, dtype=torch.float32).view(1, -1, 1, 1)
+
+    def _resolve_precision(self, precision: Literal["auto", "fp32", "fp16", "bf16"]) -> torch.dtype | None:
+        """解析运行精度；CPU 始终使用 FP32。"""
+        if precision not in {"auto", "fp32", "fp16", "bf16"}:
+            raise ValueError(f"不支持的推理精度: {precision}")
+        if self.device.type != "cuda" or precision == "fp32":
+            return None
+        if precision == "auto":
+            return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        if precision == "fp16":
+            return torch.float16
+        if precision == "bf16":
+            if not torch.cuda.is_bf16_supported():
+                raise ValueError("当前 CUDA 设备不支持 BF16")
+            return torch.bfloat16
+        return None
+
+    @property
+    def autocast_context(self) -> Any:
+        """返回 detector 前向使用的 autocast 上下文。"""
+        if self.autocast_dtype is None:
+            return contextlib.nullcontext()
+        return torch.autocast(device_type="cuda", dtype=self.autocast_dtype)
+
+    def stage_batch(
+        self,
+        rgb_tensors: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        """在 copy stream 上完成 H2D 和 resize，并返回已就绪的 batch。"""
+        stream_context = torch.cuda.stream(self.copy_stream) if self.copy_stream is not None else contextlib.nullcontext()
+        with stream_context:
+            fixed_shape = all(tensor.shape[1:] == (self.resolution, self.resolution) for tensor in rgb_tensors)
+            if fixed_shape:
+                staged_batch = torch.stack(rgb_tensors).to(self.device, non_blocking=True).to(torch.float32).div_(255.0)
+                staged = list(staged_batch.unbind(0))
+            else:
+                staged = [
+                    F.resize(
+                        tensor.to(self.device, non_blocking=True).to(torch.float32).div_(255.0),
+                        (self.resolution, self.resolution),
+                        antialias=False,
+                    )
+                    for tensor in rgb_tensors
+                ]
+            if self.copy_stream is not None:
+                self._ready_event = torch.cuda.Event()
+                self._ready_event.record(self.copy_stream)
+        if self.copy_stream is not None and self._ready_event is not None:
+            torch.cuda.current_stream(self.device).wait_event(self._ready_event)
+        return staged
+
+    def forward(self, images: list[torch.Tensor]) -> tuple[dict[str, torch.Tensor], int]:
+        """完成归一化和 detector 前向，必要时对尾 batch 做零填充。"""
+        valid_count = len(images)
+        if valid_count == 0:
+            raise ValueError("推理 batch 不能为空")
+        if self.compiled and valid_count < self.batch_size:
+            padding = images[0].new_zeros((self.batch_size - valid_count, *images[0].shape))
+            images = images + list(padding)
+        batch_tensor = (torch.stack(images) - self.means) / self.stds
+        with torch.inference_mode(), self.autocast_context:
+            try:
+                predictions = self.model(batch_tensor)
+            except Exception:
+                if not self.compiled:
+                    raise
+                print("[w] 编译 detector 前向失败，回退同一 runtime 的未编译前向", flush=True)
+                self.model = getattr(self.model, "_orig_mod", self.model)
+                self.compiled = False
+                predictions = self.model(batch_tensor)
+        if valid_count != len(images):
+            predictions = {
+                key: value[:valid_count] if isinstance(value, torch.Tensor) and value.shape[0] == len(images) else value
+                for key, value in predictions.items()
+            }
+        return predictions, valid_count
+
+
 def predict_batched_to_records(
     model: RFDETR,
     image_paths: list[Path],
@@ -1078,27 +1231,20 @@ def predict_batched_to_records(
     la_bias: LaBiasCfg | torch.Tensor | None = None,
     num_classes: int = 25,
     prefetch_factor: int = 3,
-    gpu_util_sample_interval: float = 0.5,
-    use_fp16: bool = False,
+    precision: Literal["auto", "fp32", "fp16", "bf16"] = "auto",
+    compile_model: bool = False,
+    copy_prefetch: bool = True,
+    warmup_batches: int = 1,
+    progress_interval_s: float = 1.0,
+    gpu_monitor_enabled: bool = False,
     reason_plugin: Any | None = None,
     reason_class_embed: torch.Tensor | None = None,
     reason_class_names: list[str] | None = None,
 ) -> tuple[list[BoxRecord], float, float | None, int]:
-    """批量流水线推理：多进程预取解码 + GPU 批量前向，返回预测框与测速结果。
+    """执行一次完整批量推理并返回预测框、稳态吞吐和 GPU 采样结果。
 
-    相比逐张调用 ``model.predict``，本函数通过以下方式让 GPU 满载：
-
-    1. **多进程预取**：``num_workers`` 个 worker 进程在后台并行完成图像解码与
-       换色，与 GPU 计算重叠。
-    2. **批量前向**：多张图像组成一个 batch 一次性前向，放大 GPU 上的计算粒度
-       （batch=1 时单帧前向约 12ms，batch=16 时每帧仅约 5ms）。
-    3. **GPU 端预处理**：float 化、缩放、归一化全部在 GPU 批量执行，worker
-       只承担最轻量的解码工作。
-
-    预测结果与 ``model.predict`` 逐像素一致（相同的 uint8→float 转换、
-    ``antialias=False`` 缩放与归一化）。测试集完整单轮推理一遍，逐张收集
-    预测框；第一批作为流水线预热（触发 worker 启动与 pipeline 填充），其预测框
-    仍被收集，但不计入测速吞吐。
+    worker 负责解码和必要的固定尺寸调整，runtime 负责异步 H2D、归一化、detector
+    前向、LA bias、后处理和批量导出。首批真实数据可作为 warmup，但仍会计入预测结果。
 
     Args:
         model: 已加载的 RFDETR 实例（任意尺寸，nano/small/medium/large）。
@@ -1114,8 +1260,12 @@ def predict_batched_to_records(
             配方重建）或已构建好的 ``torch.Tensor``；``None`` 表示不生效。
         num_classes: 类别数（用于把 bias 补齐到分类头输出通道数）。
         prefetch_factor: 每个 worker 在内存中预取的数据批数。
-        gpu_util_sample_interval: 后台采样 GPU 利用率的时间间隔（秒）。
-        use_fp16: 用 FP16 张量核加速推理。
+        precision: 推理精度；``auto`` 在 CUDA 上优先使用 BF16，否则使用 FP16。
+        compile_model: 是否编译 detector 前向。
+        copy_prefetch: 是否使用 CUDA copy stream 预取 H2D 和 resize。
+        warmup_batches: 不计入吞吐的真实 warmup 批次数。
+        progress_interval_s: 进度输出的最小时间间隔。
+        gpu_monitor_enabled: 是否启用 GPU 利用率采样。
         reason_plugin: 可选的已加载 FFT 一致性插件；``None`` 时保持普通批量推理。
         reason_class_embed: 插件交叉注意力使用的冻结检测器类别嵌入矩阵。
         reason_class_names: 按类别索引排序的名称，用于插件调用。
@@ -1129,10 +1279,12 @@ def predict_batched_to_records(
     if reason_plugin is not None and (reason_class_embed is None or reason_class_names is None):
         raise ValueError("reason_plugin 需要 reason_class_embed 和 reason_class_names")
     resolution = int(model.model.resolution)
+    if batch_size <= 0:
+        raise ValueError(f"batch_size 必须为正整数，实际为 {batch_size}")
+    if warmup_batches < 0:
+        raise ValueError(f"warmup_batches 不能为负数，实际为 {warmup_batches}")
 
-    # [分类损失均衡化] 可选推理侧 LA bias：由 class_counts.json 按训练侧同配方
-    # 重建 logit bias，并在 postprocess/top-k 前修正 logits，确保被 bias 抬升
-    # 后才应进入 top-k 的稀有类候选不会被提前丢掉。
+    # 按训练侧配方构建 LA bias，并在 postprocess 前修正 logits。
     bias_tensor: torch.Tensor | None = None
     bias_k: float = 1.0
     if la_bias is not None:
@@ -1143,7 +1295,8 @@ def predict_batched_to_records(
             bias_k = la_bias.k
             print(f"[i] 推理侧 LA bias 生效: {la_bias.counts_path}（k={la_bias.k}）")
 
-    dataset = _InferenceDataset(image_paths)
+    dataset = _InferenceDataset(image_paths, resize_resolution=resolution if reason_plugin is None else None)
+    loader_context = "spawn" if num_workers > 0 and str(device).startswith("cuda") else None
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -1155,86 +1308,76 @@ def predict_batched_to_records(
         collate_fn=_inference_collate,
         worker_init_fn=_worker_init_fn,
         persistent_workers=num_workers > 0,
+        multiprocessing_context=loader_context,
     )
 
-    # 显式把权重放到目标设备并切换 eval 模式（绕过 predict() 的懒加载）。
-    # 注意：eval 模式下解码器仅使用单组 query（shape 为 num_queries），而训练模式
-    # 会输出全部 group 的 queries，因此 eval() 必须设置，否则输出形状会不一致。
-    model.model.model = model.model.model.to(device)
-    model.model.model.eval()
-    if use_fp16:
-        model.model.model = model.model.model.half()
-    model_dtype = next(model.model.model.parameters()).dtype
-    means: list[float] = model.means
-    stds: list[float] = model.stds
+    # 初始化统一 runtime，接管设备、精度、编译和 CUDA 拷贝流。
+    runtime = _InferenceRuntime(
+        model=model,
+        device=device,
+        resolution=resolution,
+        batch_size=batch_size,
+        precision=precision,
+        compile_model=compile_model,
+        copy_prefetch=copy_prefetch,
+    )
+    if bias_tensor is not None:
+        bias_tensor = bias_tensor.to(device=runtime.device, dtype=torch.float32)
 
-    # 预热前向：触发 CUDA 内核编译与 cuDNN autotune，避免计入平均耗时
-    with torch.inference_mode():
-        dummy = F.normalize(
-            torch.randn(batch_size, 3, resolution, resolution, device=device, dtype=model_dtype),
-            means,
-            stds,
-        )
-        model.model.model(dummy)
-        torch.cuda.synchronize()
-
-    gpu_monitor = _GpuUtilMonitor(gpu_util_sample_interval)
-    gpu_monitor.start()
+    gpu_monitor = _GpuUtilMonitor(1.0) if gpu_monitor_enabled and runtime.device.type == "cuda" else None
+    if gpu_monitor is not None:
+        gpu_monitor.start()
 
     pred_records: list[BoxRecord] = []
     total = len(image_paths)  # 测试图像总数（单轮）
     timed_images = 0
     warmup_images = 0
     bench_start = time.perf_counter()
-    first_batch = True
+    warmup_count = 0
+    last_progress = bench_start
+    # 在推理设备上预建全局和逐类置信度阈值表。
+    threshold_table = torch.full(
+        (num_classes + 1,),
+        float(conf_threshold),
+        device=runtime.device,
+        dtype=torch.float32,
+    )
+    if class_conf_thresholds:
+        for class_id, threshold in class_conf_thresholds.items():
+            if 0 <= int(class_id) < threshold_table.numel():
+                threshold_table[int(class_id)] = float(threshold)
 
-    with torch.inference_mode():
-        for stems, rgb_tensors, orig_sizes in loader:
-            # uint8(C,H,W) → float[0,1]，并在 GPU 上缩放至模型分辨率
-            # （与 predict() 的 F.to_tensor + F.resize(antialias=False) 完全一致）
-            gpu_images = [
-                F.resize(
-                    tensor.to(device, non_blocking=True).to(model_dtype).div_(255.0),
-                    (resolution, resolution),
-                    antialias=False,
-                )
-                for tensor in rgb_tensors
-            ]
-            batch_tensor = F.normalize(torch.stack(gpu_images), means, stds)
+    # 每轮批量执行 H2D、预处理、前向、后处理和结果导出。
+    for stems, rgb_tensors, orig_sizes in loader:
+        staged_images = runtime.stage_batch(rgb_tensors)
+        predictions, valid_count = runtime.forward(staged_images)
+        if bias_tensor is not None:
+            # LA bias 必须在 postprocess 和 top-k 之前生效。
+            adjusted_logits = predictions["pred_logits"] - bias_k * bias_tensor.to(
+                dtype=predictions["pred_logits"].dtype
+            )
+            predictions = {**predictions, "pred_logits": adjusted_logits}
+        target_sizes = torch.tensor(orig_sizes, device=runtime.device)
+        results = model.model.postprocess(predictions, target_sizes=target_sizes)
 
-            predictions = model.model.model(batch_tensor)
-            if bias_tensor is not None:
-                adjusted_logits = predictions["pred_logits"] - bias_k * bias_tensor.to(
-                    dtype=predictions["pred_logits"].dtype
-                )
-                predictions = {**predictions, "pred_logits": adjusted_logits}
-            target_sizes = torch.tensor(orig_sizes, device=device)
-            results = model.model.postprocess(predictions, target_sizes=target_sizes)
-
-            # 收集预测框（每张测试图只推理一遍，全部收集）
-            for stem, rgb_tensor, result in zip(stems, rgb_tensors, results):
-                if reason_plugin is not None:
-                    source_image = np.ascontiguousarray(rgb_tensor.permute(1, 2, 0).numpy())
-                    boxes, scores, class_ids = _rescore_reason_candidates(
-                        reason_plugin,
-                        reason_class_embed,
-                        reason_class_names,
-                        source_image,
-                        result["boxes"].float().cpu().numpy(),
-                        result["scores"].float().cpu().numpy(),
-                        result["labels"].long().cpu().numpy(),
-                        conf_threshold,
-                        class_conf_thresholds,
-                        device,
-                    )
-                    per_class_thr = np.asarray(
-                        [class_conf_thresholds.get(int(label), conf_threshold) for label in class_ids]
-                        if class_conf_thresholds
-                        else conf_threshold,
-                        dtype=np.float32,
-                    )
-                    keep = scores > per_class_thr
-                    for xyxy, class_id, score in zip(boxes[keep], class_ids[keep], scores[keep]):
+        if reason_plugin is None:
+            # 普通检测只在 GPU 筛选候选，随后每个 batch 统一拷贝到 CPU。
+            selected: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+            for result in results:
+                keep = result["scores"] > threshold_table[result["labels"].long()]
+                selected.append((result["boxes"][keep], result["scores"][keep], result["labels"][keep]))
+            if selected:
+                flat_boxes = torch.cat([item[0] for item in selected], dim=0).float().cpu().numpy()
+                flat_scores = torch.cat([item[1] for item in selected], dim=0).float().cpu().numpy()
+                flat_labels = torch.cat([item[2] for item in selected], dim=0).cpu().numpy()
+                offset = 0
+                for stem, item in zip(stems, selected):
+                    count = int(item[0].shape[0])
+                    for xyxy, class_id, score in zip(
+                        flat_boxes[offset : offset + count],
+                        flat_labels[offset : offset + count],
+                        flat_scores[offset : offset + count],
+                    ):
                         pred_records.append(
                             BoxRecord(
                                 image_id=stem,
@@ -1243,21 +1386,58 @@ def predict_batched_to_records(
                                 score=float(score),
                             )
                         )
-                    continue
-
-                # 逐类阈值：命中 class_conf_thresholds 的类用类阈值，否则回退全局阈值
-                if class_conf_thresholds:
-                    per_class_thr = torch.tensor(
-                        [class_conf_thresholds.get(int(label), conf_threshold) for label in result["labels"].tolist()],
-                        device=result["scores"].device,
+                    offset += count
+        else:
+            # reason plugin 跨当前 detector batch 合并候选 pair 后只前向一次。
+            plugin_samples: list[dict[str, np.ndarray]] = []
+            plugin_thresholds: list[np.ndarray] = []
+            for rgb_tensor, result in zip(rgb_tensors, results):
+                class_ids = result["labels"].long().cpu().numpy()
+                plugin_samples.append(
+                    {
+                        "image": np.ascontiguousarray(rgb_tensor.permute(1, 2, 0).numpy()),
+                        "boxes": result["boxes"].float().cpu().numpy(),
+                        "scores": result["scores"].float().cpu().numpy(),
+                        "classes": class_ids,
+                    }
+                )
+                plugin_thresholds.append(
+                    np.asarray(
+                        [class_conf_thresholds.get(int(label), conf_threshold) for label in class_ids]
+                        if class_conf_thresholds
+                        else np.full(class_ids.shape, conf_threshold, dtype=np.float32),
+                        dtype=np.float32,
                     )
-                else:
-                    per_class_thr = conf_threshold
-                keep = result["scores"] > per_class_thr
-                boxes = result["boxes"][keep].cpu().numpy()
-                class_ids = result["labels"][keep].cpu().numpy()
-                scores = result["scores"][keep].cpu().numpy()
-                for xyxy, class_id, score in zip(boxes, class_ids, scores):
+                )
+            if hasattr(reason_plugin, "predict_detections_batch"):
+                plugin_outputs = reason_plugin.predict_detections_batch(
+                    plugin_samples,
+                    reason_class_names,
+                    reason_class_embed,
+                    device,
+                    target_thresholds=plugin_thresholds,
+                    reason_class_ids=reason_plugin.config.reason_class_ids,
+                    filter_final=False,
+                )
+            else:
+                plugin_outputs = [
+                    _rescore_reason_candidates(
+                        reason_plugin,
+                        reason_class_embed,
+                        reason_class_names,
+                        sample["image"],
+                        sample["boxes"],
+                        sample["scores"],
+                        sample["classes"],
+                        conf_threshold,
+                        class_conf_thresholds,
+                        device,
+                    )
+                    for sample in plugin_samples
+                ]
+            for stem, (boxes, scores, class_ids), per_class_thr in zip(stems, plugin_outputs, plugin_thresholds):
+                keep = scores > per_class_thr
+                for xyxy, class_id, score in zip(boxes[keep], class_ids[keep], scores[keep]):
                     pred_records.append(
                         BoxRecord(
                             image_id=stem,
@@ -1267,28 +1447,427 @@ def predict_batched_to_records(
                         )
                     )
 
-            if first_batch:
-                # 第一批用于预热：触发 worker 进程启动与流水线填充，剔除其耗时
-                warmup_images = len(stems)
-                torch.cuda.synchronize()
+        if warmup_count < warmup_batches:
+            warmup_count += 1
+            warmup_images += valid_count
+            if warmup_count == warmup_batches:
+                if runtime.device.type == "cuda":
+                    torch.cuda.synchronize(runtime.device)
                 bench_start = time.perf_counter()
-                first_batch = False
-                continue
-            timed_images += len(stems)
-            print_progress(timed_images, total - warmup_images, bench_start, device)
+            continue
+        timed_images += valid_count
+        now = time.perf_counter()
+        if progress_interval_s > 0 and now - last_progress >= progress_interval_s:
+            print_progress(timed_images, max(total - warmup_images, 1), bench_start, device)
+            last_progress = now
 
-    gpu_monitor.stop()
-    torch.cuda.synchronize()
-    print()
+    if gpu_monitor is not None:
+        gpu_monitor.stop()
+    if runtime.device.type == "cuda":
+        torch.cuda.synchronize(runtime.device)
+    if progress_interval_s > 0:
+        print()
 
     steady_elapsed = time.perf_counter() - bench_start
     steady_throughput = timed_images / steady_elapsed if steady_elapsed > 0 else 0.0
-    return pred_records, steady_throughput, gpu_monitor.average_utilization(), timed_images
+    return pred_records, steady_throughput, gpu_monitor.average_utilization() if gpu_monitor else None, timed_images
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  完整评估主流程（原 test.py 的 __main__）
-# ══════════════════════════════════════════════════════════════════════
+def predict_mixed_to_records(
+    model: RFDETR,
+    image_paths: list[Path],
+    crop_sources: list[tuple[str, Path | np.ndarray, tuple[int, int, int, int]]],
+    device: str,
+    conf_threshold: float,
+    batch_size: int,
+    num_workers: int,
+    crop_conf_threshold: float | None = None,
+    max_pending_crops: int = 128,
+    class_conf_thresholds: Mapping[int, float] | None = None,
+    *,
+    la_bias: LaBiasCfg | torch.Tensor | None = None,
+    num_classes: int = 25,
+    prefetch_factor: int = 3,
+    precision: Literal["auto", "fp32", "fp16", "bf16"] = "auto",
+    compile_model: bool = False,
+    copy_prefetch: bool = True,
+    warmup_batches: int = 1,
+    progress_interval_s: float = 1.0,
+    gpu_monitor_enabled: bool = False,
+    reason_plugin: Any | None = None,
+    reason_class_embed: torch.Tensor | None = None,
+    reason_class_names: list[str] | None = None,
+    roi_backend: str = "auto",
+    roi_output_size: int | None = None,
+    roi_cache_dir: str | Path | None = None,
+    strict_roi_backend: bool = False,
+    roi_queue_size: int = 128,
+) -> tuple[list[BoxRecord], float, float | None, int, float]:
+    """将普通图片和大图 crop 放入同一个 detector runtime 批量推理。"""
+    if reason_plugin is not None and (reason_class_embed is None or reason_class_names is None):
+        raise ValueError("reason_plugin 需要 reason_class_embed 和 reason_class_names")
+    if batch_size <= 0:
+        raise ValueError(f"batch_size 必须为正整数，实际为 {batch_size}")
+    if warmup_batches < 0:
+        raise ValueError(f"warmup_batches 不能为负数，实际为 {warmup_batches}")
+    if not image_paths and not crop_sources:
+        return [], 0.0, None, 0, 0.0
+
+    from scripts.large_cut.image_source import create_image_source
+
+    resolution = int(model.model.resolution)
+    crop_conf_threshold = conf_threshold if crop_conf_threshold is None else float(crop_conf_threshold)
+    max_pending_crops = max(1, int(max_pending_crops))
+    roi_queue_size = max(1, int(roi_queue_size))
+    bias_tensor: torch.Tensor | None = None
+    bias_k = 1.0
+    if la_bias is not None:
+        if isinstance(la_bias, torch.Tensor):
+            bias_tensor = la_bias
+        else:
+            bias_tensor = la_bias.build_bias_tensor(num_classes + 1, device)
+            bias_k = la_bias.k
+            print(f"[i] 推理侧 LA bias 生效: {la_bias.counts_path}（k={la_bias.k}）")
+
+    # crop 存在时让 DataLoader 预取半批小图，剩余位置由 crop 填充。
+    small_loader_batch = batch_size if not crop_sources else max(1, batch_size // 2)
+    dataset = _InferenceDataset(image_paths, resize_resolution=resolution if reason_plugin is None else None)
+    loader_context = "spawn" if num_workers > 0 and str(device).startswith("cuda") else None
+    loader = DataLoader(
+        dataset,
+        batch_size=small_loader_batch,
+        shuffle=False,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        pin_memory=True,
+        drop_last=False,
+        collate_fn=_inference_collate,
+        worker_init_fn=_worker_init_fn,
+        persistent_workers=num_workers > 0,
+        multiprocessing_context=loader_context,
+    )
+
+    # 小图和 crop 共用一个 runtime，避免重复创建 stream 或重复 compile。
+    runtime = _InferenceRuntime(
+        model=model,
+        device=device,
+        resolution=resolution,
+        batch_size=batch_size,
+        precision=precision,
+        compile_model=compile_model,
+        copy_prefetch=copy_prefetch,
+    )
+    if bias_tensor is not None:
+        bias_tensor = bias_tensor.to(device=runtime.device, dtype=torch.float32)
+    gpu_monitor = _GpuUtilMonitor(1.0) if gpu_monitor_enabled and runtime.device.type == "cuda" else None
+    if gpu_monitor is not None:
+        gpu_monitor.start()
+
+    pred_records: list[BoxRecord] = []
+    small_iterator = iter(loader)
+    small_buffer: deque[tuple[str, torch.Tensor, tuple[int, int]]] = deque()
+    small_done = not bool(image_paths)
+    crop_index = 0
+    crop_buffer: deque[tuple[str, torch.Tensor, tuple[int, int], tuple[int, int]]] = deque()
+    # ROI 解码线程数独立限流，避免多个 OpenCV 全图解码同时放大内存。
+    roi_executor = ThreadPoolExecutor(max_workers=max(1, min(num_workers or 1, 4))) if crop_sources else None
+    roi_futures: deque[Future[tuple[str, torch.Tensor, tuple[int, int], tuple[int, int]]]] = deque()
+    # OpenCV 回退会把整张大图解码到内存；限制缓存数量，避免 215 张大图常驻内存。
+    roi_source_cache: OrderedDict[str, Any] = OrderedDict()
+    roi_source_cache_limit = max(1, min(4, max_pending_crops // max(batch_size, 1)))
+    roi_source_lock = threading.Lock()
+    total_samples = len(image_paths) + len(crop_sources)
+    timed_samples = 0
+    warmup_samples = 0
+    warmup_count = 0
+    bench_start = time.perf_counter()
+    last_progress = bench_start
+    loaded_crops = 0
+    processed_samples = 0
+    last_prepare_progress = bench_start
+    print(
+        f"[i] 统一 detector 开始: 小图 {len(image_paths)} 张，"
+        f"crop {len(crop_sources)} 个，batch={batch_size}",
+        flush=True,
+    )
+
+    def refill_small() -> None:
+        """从 DataLoader 预取下一批小图。"""
+        nonlocal small_done
+        if small_done:
+            return
+        try:
+            stems, tensors, sizes = next(small_iterator)
+        except StopIteration:
+            small_done = True
+            return
+        small_buffer.extend(zip(stems, tensors, sizes, strict=True))
+
+    def refill_crops() -> None:
+        """按上限生成待检测 crop，避免一次性创建全部像素数组。"""
+        nonlocal crop_index, loaded_crops, last_prepare_progress
+        # 只预取约两个 detector batch，避免已完成 future 持有过多 ROI 像素张量。
+        limit = min(max_pending_crops, roi_queue_size, max(batch_size * 2, batch_size))
+
+        def load_one(
+            item: tuple[str, Path | np.ndarray, tuple[int, int, int, int]],
+        ) -> tuple[str, torch.Tensor, tuple[int, int], tuple[int, int]]:
+            stem, source_path, crop_xyxy = item
+            if isinstance(source_path, np.ndarray):
+                # 仅保留测试和外部内存源的直接 ROI 读取，不会进入新的大图切分路径。
+                x0, y0, x1, y1 = crop_xyxy
+                original_crop_size = (y1 - y0, x1 - x0)
+                crop_rgb = np.ascontiguousarray(source_path[y0:y1, x0:x1])
+                if reason_plugin is None:
+                    target_size = roi_output_size or resolution
+                    crop_rgb = cv2.resize(
+                        crop_rgb,
+                        (target_size, target_size),
+                        interpolation=cv2.INTER_AREA,
+                    )
+            else:
+                source_key = str(source_path)
+                with roi_source_lock:
+                    source = roi_source_cache.get(source_key)
+                    if source is None:
+                        source = create_image_source(
+                            source_path,
+                            backend=roi_backend,
+                            cache_dir=roi_cache_dir,
+                            strict=strict_roi_backend,
+                        )
+                        roi_source_cache[source_key] = source
+                        roi_source_cache.move_to_end(source_key)
+                        while len(roi_source_cache) > roi_source_cache_limit:
+                            roi_source_cache.popitem(last=False)
+                    else:
+                        roi_source_cache.move_to_end(source_key)
+                crop_rgb, roi_size = source.read_roi(
+                    crop_xyxy,
+                    output_size=None if reason_plugin is not None else (roi_output_size or resolution),
+                )
+                # target_sizes 必须使用 resize 前的 ROI 尺寸；归一化框再由 postprocess
+                # 直接还原到 ROI 原始坐标，最后才能正确叠加原图 offset。
+                original_crop_size = (roi_size[1], roi_size[0])
+            return (
+                stem,
+                torch.from_numpy(np.ascontiguousarray(crop_rgb)).permute(2, 0, 1),
+                original_crop_size,
+                (crop_xyxy[0], crop_xyxy[1]),
+            )
+
+        while len(crop_buffer) + len(roi_futures) < limit and crop_index < len(crop_sources):
+            item = crop_sources[crop_index]
+            crop_index += 1
+            if roi_executor is None:
+                crop_buffer.append(load_one(item))
+                loaded_crops += 1
+            else:
+                roi_futures.append(roi_executor.submit(load_one, item))
+        if roi_futures and progress_interval_s > 0:
+            print(
+                f"\r[i] ROI 预取中: 已提交 {crop_index:>5d}/{len(crop_sources):<5d} "
+                f"| 等待首批 {min(batch_size, len(roi_futures)):d} 个 crop",
+                end="",
+                flush=True,
+            )
+        # 至少补满一个 detector batch，避免每次前向只拿到一个 crop。
+        target_buffer = min(batch_size, len(crop_sources) - crop_index + len(roi_futures))
+        while len(crop_buffer) < target_buffer and roi_futures:
+            crop_buffer.append(roi_futures.popleft().result())
+            loaded_crops += 1
+            now = time.perf_counter()
+            if progress_interval_s > 0 and now - last_prepare_progress >= progress_interval_s:
+                print(
+                    f"\r[i] ROI 加载进度 {loaded_crops:>5d}/{len(crop_sources):<5d} "
+                    f"| detector 等待 batch | 待处理 {len(roi_futures):d}",
+                    end="",
+                    flush=True,
+                )
+                last_prepare_progress = now
+
+    while small_buffer or crop_buffer or roi_futures or crop_index < len(crop_sources) or not small_done:
+        if not small_buffer and not small_done:
+            refill_small()
+        if not crop_buffer and (crop_index < len(crop_sources) or roi_futures):
+            refill_crops()
+
+        batch_stems: list[str] = []
+        batch_tensors: list[torch.Tensor] = []
+        batch_sizes: list[tuple[int, int]] = []
+        batch_offsets: list[tuple[int, int] | None] = []
+        batch_default_thresholds: list[float] = []
+        if small_buffer and crop_buffer:
+            take_small = min(len(small_buffer), max(1, batch_size // 2))
+        else:
+            take_small = min(len(small_buffer), batch_size)
+        for _ in range(take_small):
+            stem, tensor, size = small_buffer.popleft()
+            batch_stems.append(stem)
+            batch_tensors.append(tensor)
+            batch_sizes.append(size)
+            batch_offsets.append(None)
+            batch_default_thresholds.append(float(conf_threshold))
+
+        while len(batch_tensors) < batch_size and crop_buffer:
+            stem, crop_tensor, crop_size, crop_offset = crop_buffer.popleft()
+            batch_stems.append(stem)
+            batch_tensors.append(crop_tensor)
+            batch_sizes.append(crop_size)
+            batch_offsets.append(crop_offset)
+            batch_default_thresholds.append(crop_conf_threshold)
+
+        while len(batch_tensors) < batch_size and small_buffer:
+            stem, tensor, size = small_buffer.popleft()
+            batch_stems.append(stem)
+            batch_tensors.append(tensor)
+            batch_sizes.append(size)
+            batch_offsets.append(None)
+            batch_default_thresholds.append(float(conf_threshold))
+
+        if not batch_tensors:
+            continue
+
+        # 首个前向可能因 OpenCV 解码或模型预热耗时较长，先输出 batch 起始状态。
+        processed_samples += len(batch_tensors)
+        if progress_interval_s > 0:
+            now = time.perf_counter()
+            if now - last_progress >= progress_interval_s or processed_samples == len(batch_tensors):
+                print(
+                    f"\r[i] detector batch 开始: 已取 {processed_samples:>5d}/{total_samples:<5d} "
+                    f"| batch={len(batch_tensors):d} | ROI 已加载 {loaded_crops:d}",
+                    end="",
+                    flush=True,
+                )
+                last_progress = now
+
+        staged_images = runtime.stage_batch(batch_tensors)
+        predictions, valid_count = runtime.forward(staged_images)
+        if bias_tensor is not None:
+            # LA bias 必须在 postprocess 和 top-k 之前生效。
+            adjusted_logits = predictions["pred_logits"] - bias_k * bias_tensor.to(
+                dtype=predictions["pred_logits"].dtype
+            )
+            predictions = {**predictions, "pred_logits": adjusted_logits}
+        target_sizes = torch.tensor(batch_sizes, device=runtime.device)
+        results = model.model.postprocess(predictions, target_sizes=target_sizes)
+
+        if reason_plugin is None:
+            selected: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+            for result, default_threshold in zip(results, batch_default_thresholds, strict=True):
+                labels = result["labels"].long()
+                keep = result["scores"] > default_threshold
+                if class_conf_thresholds:
+                    for class_id, threshold in class_conf_thresholds.items():
+                        keep = torch.where(labels == int(class_id), result["scores"] > float(threshold), keep)
+                selected.append((result["boxes"][keep], result["scores"][keep], result["labels"][keep]))
+            if selected:
+                flat_boxes = torch.cat([item[0] for item in selected], dim=0).float().cpu().numpy()
+                flat_scores = torch.cat([item[1] for item in selected], dim=0).float().cpu().numpy()
+                flat_labels = torch.cat([item[2] for item in selected], dim=0).cpu().numpy()
+                offset = 0
+                for stem, item, crop_offset in zip(batch_stems, selected, batch_offsets, strict=True):
+                    count = int(item[0].shape[0])
+                    for xyxy, class_id, score in zip(
+                        flat_boxes[offset : offset + count],
+                        flat_labels[offset : offset + count],
+                        flat_scores[offset : offset + count],
+                        strict=True,
+                    ):
+                        box = xyxy.astype(np.float32, copy=True)
+                        if crop_offset is not None:
+                            box[[0, 2]] += crop_offset[0]
+                            box[[1, 3]] += crop_offset[1]
+                        pred_records.append(
+                            BoxRecord(
+                                image_id=stem,
+                                class_id=int(class_id),
+                                xyxy=tuple(float(value) for value in box),
+                                score=float(score),
+                            )
+                        )
+                    offset += count
+        else:
+            # plugin 在当前混合 batch 中一次处理多张图的候选 pair。
+            plugin_samples: list[dict[str, np.ndarray]] = []
+            plugin_thresholds: list[np.ndarray] = []
+            for tensor, result, default_threshold in zip(batch_tensors, results, batch_default_thresholds, strict=True):
+                class_ids = result["labels"].long().cpu().numpy()
+                plugin_samples.append(
+                    {
+                        "image": np.ascontiguousarray(tensor.permute(1, 2, 0).numpy()),
+                        "boxes": result["boxes"].float().cpu().numpy(),
+                        "scores": result["scores"].float().cpu().numpy(),
+                        "classes": class_ids,
+                    }
+                )
+                plugin_thresholds.append(
+                    np.asarray(
+                        [class_conf_thresholds.get(int(label), default_threshold) for label in class_ids]
+                        if class_conf_thresholds
+                        else np.full(class_ids.shape, default_threshold, dtype=np.float32),
+                        dtype=np.float32,
+                    )
+                )
+            plugin_outputs = reason_plugin.predict_detections_batch(
+                plugin_samples,
+                reason_class_names,
+                reason_class_embed,
+                device,
+                target_thresholds=plugin_thresholds,
+                reason_class_ids=reason_plugin.config.reason_class_ids,
+                filter_final=False,
+            )
+            for stem, (boxes, scores, class_ids), thresholds, crop_offset in zip(
+                batch_stems,
+                plugin_outputs,
+                plugin_thresholds,
+                batch_offsets,
+                strict=True,
+            ):
+                keep = scores > thresholds
+                for xyxy, class_id, score in zip(boxes[keep], class_ids[keep], scores[keep], strict=True):
+                    box = xyxy.astype(np.float32, copy=True)
+                    if crop_offset is not None:
+                        box[[0, 2]] += crop_offset[0]
+                        box[[1, 3]] += crop_offset[1]
+                    pred_records.append(
+                        BoxRecord(
+                            image_id=stem,
+                            class_id=int(class_id),
+                            xyxy=tuple(float(value) for value in box),
+                            score=float(score),
+                        )
+                    )
+
+        if warmup_count < warmup_batches:
+            warmup_count += 1
+            warmup_samples += valid_count
+            if warmup_count == warmup_batches:
+                if runtime.device.type == "cuda":
+                    torch.cuda.synchronize(runtime.device)
+                bench_start = time.perf_counter()
+            continue
+        timed_samples += valid_count
+        now = time.perf_counter()
+        if progress_interval_s > 0 and now - last_progress >= progress_interval_s:
+            print_progress(timed_samples, max(total_samples - warmup_samples, 1), bench_start, device)
+            last_progress = now
+
+    if gpu_monitor is not None:
+        gpu_monitor.stop()
+    if roi_executor is not None:
+        roi_executor.shutdown(wait=True)
+    if runtime.device.type == "cuda":
+        torch.cuda.synchronize(runtime.device)
+    if progress_interval_s > 0:
+        print()
+    elapsed = time.perf_counter() - bench_start
+    throughput = timed_samples / elapsed if elapsed > 0 else 0.0
+    return pred_records, throughput, gpu_monitor.average_utilization() if gpu_monitor else None, timed_samples, elapsed
+
+
+# 完整评估主流程。
 
 
 def _classify_large_images(
@@ -1392,10 +1971,38 @@ def run_evaluation(
     else:
         raise ValueError(f"不支持的标签格式: {dataset.label_format}")
 
-    # 加载 RF-DETR 模型并执行批量流水线推理（含测速）。
-    # from_checkpoint 自动按 checkpoint 中的 model_name 推断模型尺寸（nano/small/medium/large），
-    # 无需手动指定模型类。
+    # 边界阶段先独立完成，随后释放边界模型再创建主检测器。
     device = resolve_device(infer.device)
+    use_large_branch = large_image_cfg is not None and large_image_ids and large_image_cfg.boundary_checkpoint
+    small_paths = [p for p in test_image_paths if p.stem not in large_image_ids] if use_large_branch else []
+    large_paths = [p for p in test_image_paths if p.stem in large_image_ids] if use_large_branch else []
+    crop_sources: list[tuple[str, Path, tuple[int, int, int, int]]] = []
+    crop_boxes_by_image: dict[str, list[tuple[float, float, float, float]]] = {}
+    large_prepare_stats: dict[str, float] = {}
+    large_tiler: Any | None = None
+    if use_large_branch:
+        from scripts.large_cut.large_image_tiler import LargeImageTiler
+
+        large_tiler = LargeImageTiler(
+            large_image_cfg.boundary_checkpoint,
+            boundary_backend=large_image_cfg.boundary_backend,
+            boundary_resolution=large_image_cfg.boundary_resolution,
+            boundary_conf=large_image_cfg.boundary_conf,
+            padding=large_image_cfg.padding,
+            nms_iou=large_image_cfg.nms_iou,
+            square_stretch=large_image_cfg.square_stretch,
+            device=device,
+            batch_size=large_image_cfg.batch_size,
+            num_workers=large_image_cfg.num_workers,
+            roi_backend=large_image_cfg.roi_backend,
+            proxy_max_side=large_image_cfg.proxy_max_side,
+            roi_cache_dir=large_image_cfg.roi_cache_dir,
+            strict_roi_backend=large_image_cfg.strict_roi_backend,
+            progress_interval_s=infer.progress_interval_s,
+        )
+        crop_sources, crop_boxes_by_image, large_prepare_stats = large_tiler.prepare_crops(large_paths)
+
+    # 只加载一次 RF-DETR，模型尺寸由 checkpoint 中的 model_name 自动确定。
     print(f"[i] 正在从 {checkpoint_path} 加载 RF-DETR 模型...")
     ckpt_kwargs: dict[str, int] = {}
     if resolution is not None:
@@ -1404,16 +2011,9 @@ def run_evaluation(
     model = RFDETR.from_checkpoint(str(checkpoint_path), **ckpt_kwargs)
     test_resolution = int(model.model.resolution)
     print(f"[i] 已加载模型: {type(model).__name__} | 分辨率: {int(model.model.resolution)}")
-    # [SemHead] 若 checkpoint 含语义头权重（语义分类头实验），重建语义残差模块，
-    # 保证离线推理与训练前向一致（from_checkpoint 不经过 module_model 的装配逻辑）。
-    from rfdetr.sscl.semantic_head import attach_from_checkpoint
+    # from_checkpoint 已用同一份 state dict 完成语义头重建。
 
-    _ckpt_sd = torch.load(str(checkpoint_path), map_location="cpu", weights_only=True)
-    attach_from_checkpoint(model.model.model, _ckpt_sd.get("model", _ckpt_sd))
-    del _ckpt_sd
-
-    # 插件在完整评测中只加载一次。批量普通图与大图裁窗共用同一实例，避免重复
-    # 读取 checkpoint；插件始终使用 float32，以兼容其内部 FFT 与频域 MLP。
+    # reason plugin 只加载一次，普通图和大图 crop 共用同一实例并保持 FP32。
     reason_plugin = None
     reason_class_embed: torch.Tensor | None = None
     reason_class_names: list[str] | None = None
@@ -1450,64 +2050,55 @@ def run_evaluation(
             f"（class_ids={reason_plugin.config.reason_class_ids}, conf_low={reason_plugin.config.conf_low}）"
         )
 
-    # ── 推理分流：小图整图批量推理；大图走 nano 切分流程（nano 只加载一次）──
+    # 小图和已准备好的 crop 统一进入同一个 detector runtime。
     large_image_stats: dict[str, float] | None = None
-    crop_boxes_by_image: dict[str, list[tuple[float, float, float, float]]] = {}
-    if large_image_cfg is not None and large_image_ids and large_image_cfg.boundary_checkpoint:
-        small_paths = [p for p in test_image_paths if p.stem not in large_image_ids]
-        large_paths = [p for p in test_image_paths if p.stem in large_image_ids]
-        if small_paths:
-            small_records, throughput, gpu_util, timed_images = predict_batched_to_records(
-                model,
-                small_paths,
-                device,
-                conf_threshold=infer.conf_threshold,
-                class_conf_thresholds=infer.class_conf_thresholds,
-                batch_size=infer.batch_size,
-                num_workers=infer.num_workers,
-                la_bias=la_bias,
-                num_classes=dataset.num_classes,
-                prefetch_factor=infer.prefetch_factor,
-                gpu_util_sample_interval=infer.gpu_util_sample_interval,
-                use_fp16=infer.use_fp16,
-                reason_plugin=reason_plugin,
-                reason_class_embed=reason_class_embed,
-                reason_class_names=reason_class_names,
-            )
-        else:
-            small_records, throughput, gpu_util, timed_images = [], 0.0, None, 0
-
-        from scripts.large_cut.large_image_tiler import LargeImageTiler
-
-        tiler = LargeImageTiler(
+    if use_large_branch:
+        pred_records, throughput, gpu_util, timed_images, detector_elapsed = predict_mixed_to_records(
             model,
-            large_image_cfg.boundary_checkpoint,
-            boundary_backend=large_image_cfg.boundary_backend,
-            boundary_resolution=large_image_cfg.boundary_resolution,
-            boundary_conf=large_image_cfg.boundary_conf,
-            detector_conf=large_image_cfg.detector_conf,
-            padding=large_image_cfg.padding,
-            nms_iou=large_image_cfg.nms_iou,
-            square_stretch=large_image_cfg.square_stretch,
-            device=device,
-            batch_size=large_image_cfg.batch_size,
-            num_workers=large_image_cfg.num_workers,
-            detector_batch_size=large_image_cfg.detector_batch_size,
+            small_paths,
+            crop_sources,
+            device,
+            conf_threshold=infer.conf_threshold,
+            class_conf_thresholds=infer.class_conf_thresholds,
+            batch_size=infer.batch_size,
+            num_workers=infer.num_workers,
+            crop_conf_threshold=large_image_cfg.detector_conf,
+            max_pending_crops=large_image_cfg.max_pending_crops,
+            roi_backend=large_image_cfg.roi_backend,
+            roi_output_size=large_image_cfg.roi_output_size,
+            roi_cache_dir=large_image_cfg.roi_cache_dir,
+            strict_roi_backend=large_image_cfg.strict_roi_backend,
+            roi_queue_size=large_image_cfg.roi_queue_size,
+            la_bias=la_bias,
+            num_classes=dataset.num_classes,
+            prefetch_factor=infer.prefetch_factor,
+            precision=infer.precision,
+            compile_model=infer.compile_model,
+            copy_prefetch=infer.copy_prefetch,
+            warmup_batches=infer.warmup_batches,
+            progress_interval_s=infer.progress_interval_s,
+            gpu_monitor_enabled=infer.gpu_monitor_enabled,
             reason_plugin=reason_plugin,
-            reason_class_ids=reason_plugin.config.reason_class_ids if reason_plugin is not None else None,
-            reason_conf_low=reason_plugin.config.conf_low if reason_plugin is not None else None,
+            reason_class_embed=reason_class_embed,
+            reason_class_names=reason_class_names,
         )
-        large_records, per_image_seconds, crop_boxes_by_image = tiler.predict(large_paths)
-        pred_records = small_records + large_records
-        if per_image_seconds:
-            durations = list(per_image_seconds.values())
+        if large_paths:
+            end_to_end = (
+                large_prepare_stats.get("boundary_seconds", 0.0)
+                + large_prepare_stats.get("crop_prepare_seconds", 0.0)
+                + detector_elapsed
+            )
+            average = end_to_end / len(large_paths)
             large_image_stats = {
-                "count": float(len(durations)),
-                "avg": sum(durations) / len(durations),
-                "max": max(durations),
-                "total": sum(durations),
-                "boundary_seconds": float(tiler.last_stats.get("boundary_seconds", 0.0)),
-                "end_to_end_seconds": float(tiler.last_stats.get("end_to_end_seconds", sum(durations))),
+                "count": float(len(large_paths)),
+                "avg": average,
+                "max": average,
+                "total": end_to_end,
+                "boundary_seconds": large_prepare_stats.get("boundary_seconds", 0.0),
+                "proxy_seconds": large_prepare_stats.get("proxy_seconds", 0.0),
+                "fallback_count": large_prepare_stats.get("fallback_count", 0.0),
+                "detector_seconds": detector_elapsed,
+                "end_to_end_seconds": end_to_end,
             }
     else:
         if large_image_cfg is not None and large_image_ids and not large_image_cfg.boundary_checkpoint:
@@ -1523,8 +2114,12 @@ def run_evaluation(
             la_bias=la_bias,
             num_classes=dataset.num_classes,
             prefetch_factor=infer.prefetch_factor,
-            gpu_util_sample_interval=infer.gpu_util_sample_interval,
-            use_fp16=infer.use_fp16,
+            precision=infer.precision,
+            compile_model=infer.compile_model,
+            copy_prefetch=infer.copy_prefetch,
+            warmup_batches=infer.warmup_batches,
+            progress_interval_s=infer.progress_interval_s,
+            gpu_monitor_enabled=infer.gpu_monitor_enabled,
             reason_plugin=reason_plugin,
             reason_class_embed=reason_class_embed,
             reason_class_names=reason_class_names,
@@ -1532,11 +2127,11 @@ def run_evaluation(
     del model
     release_cuda_cache(device)
 
-    # ── YOLO 格式预测输出（供漏检/虚警归因统计）────────────────────────
+    # 可选保存 YOLO 格式预测，供漏检和虚警归因脚本使用。
     if save_yolo_preds:
         save_yolo_predictions(pred_records, dataset.exp_output_dir / "yolo_preds", image_size_map)
 
-    # ── 推理测速结果 ─────────────────────────────────────────────────
+    # 输出标准图和大图的推理吞吐统计。
     print("=" * 80)
     print("推理测速结果")
     print(f"GPU 批量大小: {infer.batch_size}  |  CPU 预取 worker 数: {infer.num_workers}")
@@ -1550,9 +2145,13 @@ def run_evaluation(
             f"平均 {large_image_stats['avg']:.2f}s | 最大 {large_image_stats['max']:.2f}s | "
             f"合计 {large_image_stats['total']:.2f}s"
         )
+        if "proxy_seconds" in large_image_stats:
+            print(f"proxy 读取合计: {float(large_image_stats['proxy_seconds']):.2f}s")
+        if "fallback_count" in large_image_stats:
+            print(f"ROI 后端 fallback 图像数: {int(large_image_stats['fallback_count'])}")
     print("=" * 80)
 
-    # ── 按比赛规则评估：大类（舰船/飞机/车辆）─────────────────────────
+    # 按比赛规则计算大类、细类和总指标。
     config = EvalConfig(
         class_to_group=dataset.class_to_group,
         group_iou_thresholds=dataset.group_iou_thresholds,
@@ -1592,7 +2191,7 @@ def run_evaluation(
     for group_name, group_result in eval_results["groups"].items():
         print_eval_result(group_name, group_result)
 
-    # ── 细粒度逐类指标 ───────────────────────────────────────────────
+    # 输出细粒度逐类指标。
     per_class_config = EvalConfig(
         class_to_group=dataset.per_class_to_group,
         group_iou_thresholds=dataset.per_class_iou_thresholds,
@@ -1613,7 +2212,7 @@ def run_evaluation(
         if result.tp + result.fn > 0:  # 只打印测试集中存在的类别
             print_eval_result(class_name, result)
 
-    # ── 每个大类下小类指标的平均值（macro 平均）与总指标 ──────────────
+    # 输出各大类的 macro 平均和总指标。
     group_macro = compute_group_macro_averages(
         per_class_results["groups"],
         build_metric_class_to_group(dataset),
@@ -1632,7 +2231,7 @@ def run_evaluation(
     print("-" * 80)
     print(format_macro_line("total", total_macro))
 
-    # ── 混淆矩阵可视化 ───────────────────────────────────────────────
+    # 生成混淆矩阵可视化。
     print("\n[i] 正在生成混淆矩阵分析图...")
     cm = build_confusion_matrix(
         gt_records=gt_records,
@@ -1647,7 +2246,7 @@ def run_evaluation(
     )
     print(f"[完成] 混淆矩阵已保存至: {dataset.exp_output_dir / 'confusion_matrix.png'}")
 
-    # ── FP / FN 可视化保存 ───────────────────────────────────────────
+    # 保存 FP 和 FN 可视化结果。
     if save_fp_fn:
         print("\n[i] 正在生成 FP/FN 可视化...")
         clear_vis_dirs(
@@ -1679,7 +2278,7 @@ def run_evaluation(
         )
         print("[完成] FP/FN 可视化保存完成")
 
-    # ── 保存测试结果报告到实验文件夹 ─────────────────────────────────
+    # 将完整评估报告写入实验目录。
     report_lines = build_test_report(
         dataset_name=dataset.name,
         checkpoint_path=checkpoint_path,

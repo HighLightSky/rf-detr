@@ -103,7 +103,8 @@ test:
   batch_size: 32
   num_workers: 12
   prefetch_factor: 3
-  gpu_util_sample_interval: 0.5
-  use_fp16: false
+  progress_interval_s: 1.0
+  gpu_monitor_enabled: false
+  precision: auto
   save_fp_fn: true
   save_yolo_preds: false

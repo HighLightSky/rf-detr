@@ -6,7 +6,7 @@ predict:
   checkpoint: output/0822-rfdetr-final-baseline/checkpoint_best_total.pth
   # 相对项目根路径
   conf: 0.25
-  output_dir: output/0822-FINAL-baseline-predict
+  output_dir: output/0824-航母两栖船增广
   image: /home/liu/wzt/datasets/SHWX-FINAL-truck/images/train/fsc_TG-N25.20-E121.42-lv20-Google_crop0001.jpg
   class_names: shwx # 类别名来源：内置名 shwx/shwx_truck/dior，或 {label: 名称} 字典
   reason_plugin:

@@ -131,6 +131,6 @@ test:
   batch_size: 32
   num_workers: 12
   prefetch_factor: 3
-  use_fp16: false
+  precision: auto
   save_fp_fn: true
   save_yolo_preds: false

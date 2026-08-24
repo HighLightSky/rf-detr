@@ -8,25 +8,32 @@
 model:
   variant: medium # nano/small/medium/large/large_deprecated
   num_classes: 25
-  resolution: 1024 # 与既往 medium 实验一致（medium 默认 576，旧脚本显式 640）
+  resolution: 1024
   gradient_checkpointing: true
-  freeze_encoder: false # 0805 对比实验证明全量微调更优（ship Recall 0.42 -> 0.80）
+  freeze_encoder: false
 
 train:
-  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL
+  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand
   dataset_file: yolo
-  output_dir: output/0822-rfdetr-final-baseline
-  epochs: 120
+  output_dir: output/0824-rfdetr-final-baseline
+  epochs: 100
   batch_size: 16
   grad_accum_steps: 4 # 有效 batch = 64（与既往 medium 实验一致）
-  num_workers: 6
+
+  num_workers: 8
+  prefetch_factor: 4  # 有效预取 = num_workers * prefetch_factor
+  persistent_workers: true
+  pin_memory: true  # 使用固定目录
+
   lr: 1e-4
   lr_encoder: 1.5e-4
+  lr_drop: 70
+
   weight_decay: 1e-4
   clip_max_norm: 0.1
   multi_scale: true # 与 nano 基线一致（TrainConfig 默认 true，此处显式声明）
-  lr_drop: 70
   warmup_epochs: 0.0
+  
   tensorboard: true
   wandb: false
   device: cuda
@@ -38,13 +45,20 @@ train:
   compute_val_loss: false
   aug_config: AERIAL # 预设名：AERIAL/CONSERVATIVE/AGGRESSIVE/INDUSTRIAL/none
   mosaic_p: 0.1
+
   # 平方根频率过采样（注意与 P0 class_balance_* 区分，两套机制不同）
   class_balanced_sampling: true
   class_balanced_threshold: null
   class_balanced_class_ids: [0, 1] # 0=HM 航母, 1=LQS 两栖舰；空=全部类别
+  
   dataset_cache_mode: raw
   dataset_cache_dir: null # null=使用 output_dir/dataset_cache
   dataset_cache_rebuild: false
+
+  augmentation_backend: kornia
+  dataset_cache_dir: /dev/shm/rfdetr-shwx-final-raw-1024
+  dataset_cache_rebuild: false
+
 test:
   dataset: shwx
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
@@ -57,7 +71,8 @@ test:
   batch_size: 32
   num_workers: 12
   prefetch_factor: 3
-  gpu_util_sample_interval: 0.5
-  use_fp16: false
+  progress_interval_s: 1.0
+  gpu_monitor_enabled: false
+  precision: auto
   save_fp_fn: true
   save_yolo_preds: false

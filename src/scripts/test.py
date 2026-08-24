@@ -3,44 +3,12 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-"""统一测试评估模板：按 yaml 配置在测试集上评估 RF-DETR 模型。
+"""统一测试入口。
 
-评估管线（批量流水线推理 + 比赛评分 + 混淆矩阵 + FP/FN 可视化 + 报告）在
-``eval_lib.run_evaluation`` 中实现，本文件只负责把 yaml 配置解析为参数。
-
-用法：
-    python src/scripts/test.py -c configs/experiments/test_shwx.yaml
-    # 位置参数覆盖 yaml 中的 checkpoint：
-    python src/scripts/test.py -c configs/experiments/test_shwx.yaml output/xxx/checkpoint_best_total.pth
-    # --set 覆盖任意配置项：
-    python src/scripts/test.py -c configs/experiments/test_shwx.yaml --set test.batch_size=64
-
-配置结构（详见 configs/experiments/README.md）：
-
-.. code-block:: yaml
-
-    test:
-      dataset: shwx                     # eval_lib.DATASET_CONFIGS 内置名
-      checkpoint: output/xxx/checkpoint_best_total.pth   # 相对项目根；省略用数据集默认
-      conf_threshold: 0.25
-      class_conf_thresholds: {}         # 可整段贴入 calibrate_thresholds 产物
-      device: cuda:0
-      batch_size: 32
-      num_workers: 12
-      use_fp16: false
-      output_dir: output/xxx-eval       # 测试输出目录；省略=数据集内置 exp_output_dir
-      reason_plugin:                    # FFT 一致性插件；省略=关闭
-        enabled: false
-        checkpoint: null
-        class_ids: [24]
-        conf_low: null
-      la_bias:                          # 推理侧 LA bias；省略=关闭
-        counts_path: output/xxx/class_counts.json
-        k: 1.0
-        tau: 0.1
-        clip: 1.0
-      save_fp_fn: true
-      save_yolo_preds: false
+本文件只读取 YAML、处理命令行覆盖并构造评估配置；批量推理、指标计算、混淆矩阵和
+FP/FN 可视化全部由 eval_lib.run_evaluation 完成。常用启动方式是
+python src/scripts/test.py -c configs/experiments/test_shwx.yaml，或追加
+--set test.batch_size=64 覆盖单项配置。
 """
 
 from __future__ import annotations
@@ -50,7 +18,7 @@ import dataclasses
 import sys
 from pathlib import Path
 
-# ── 项目路径 ───────────────────────────────────────────────────────
+# 项目根目录和模块路径。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
@@ -94,9 +62,7 @@ def main() -> None:
     cfg = expcfg.apply_overrides(cfg, args.set)
     test_cfg = expcfg.build_test_kwargs(cfg)
 
-    # 数据集配置：dataset 为内置名（shwx/dior，省略默认 shwx），类别语义来自内置配置；
-    # yaml 提供 test.dataset_dir 时覆盖数据集根目录（与训练侧 dataset_dir 同一目录模式），
-    # test.output_dir 覆盖输出目录
+    # 解析数据集名称、数据目录和评估输出目录。
     dataset = eval_lib.build_dataset_cfg(
         test_cfg.get("dataset") or "shwx",
         output_dir=test_cfg.get("output_dir"),
@@ -107,7 +73,7 @@ def main() -> None:
     if test_cfg.get("output_dir"):
         print(f"[i] 测试输出目录覆盖为: {dataset.exp_output_dir}")
 
-    # checkpoint：命令行 > yaml > 数据集默认（exp_output_dir / checkpoint_file）
+    # 按命令行、YAML、数据集默认值的优先级确定 checkpoint。
     checkpoint_path = Path(test_cfg.get("checkpoint") or dataset.exp_output_dir / dataset.checkpoint_file)
     if args.checkpoint:
         checkpoint_path = Path(args.checkpoint).resolve()
@@ -115,11 +81,11 @@ def main() -> None:
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"checkpoint 不存在: {checkpoint_path}")
 
-    # 推理参数：只取 InferenceCfg 字段，yaml 中其余键（dataset/checkpoint 等）忽略
+    # 只把 InferenceCfg 定义的字段传给统一推理 runtime。
     infer_fields = {f.name for f in dataclasses.fields(eval_lib.InferenceCfg)}
     infer = eval_lib.InferenceCfg(**{k: v for k, v in test_cfg.items() if k in infer_fields})
 
-    # 推理侧 LA bias（省略 la_bias 段 = 关闭）
+    # 可选地构造推理侧 LA bias。
     la_bias_cfg: eval_lib.LaBiasCfg | None = None
     la_bias_section = test_cfg.get("la_bias")
     if la_bias_section:
@@ -128,7 +94,7 @@ def main() -> None:
 
     reason_plugin_cfg = eval_lib.ReasonPluginCfg.from_config(test_cfg.get("reason_plugin"))
 
-    # 大图切分测试配置：边界检测器（nano）只加载一次，大图走裁切推理
+    # 可选地构造大图边界检测和 crop 队列配置。
     large_image_cfg: eval_lib.LargeImageCfg | None = None
     if test_cfg.get("large_image_min_side") or test_cfg.get("boundary_checkpoint"):
         large_image_cfg = eval_lib.LargeImageCfg(
@@ -143,15 +109,16 @@ def main() -> None:
             square_stretch=bool(test_cfg.get("tiling_square_stretch", False)),
             batch_size=int(test_cfg.get("tiling_batch_size", 8)),
             num_workers=int(test_cfg.get("tiling_num_workers", 4)),
-            detector_batch_size=(
-                int(test_cfg["tiling_detector_batch_size"])
-                if test_cfg.get("tiling_detector_batch_size") is not None
-                else None
-            ),
+            max_pending_crops=int(test_cfg.get("max_pending_crops", 128)),
+            roi_backend=str(test_cfg.get("roi_backend", "auto")),
+            proxy_max_side=(int(test_cfg["proxy_max_side"]) if test_cfg.get("proxy_max_side") else None),
+            roi_output_size=(int(test_cfg["roi_output_size"]) if test_cfg.get("roi_output_size") else None),
+            roi_queue_size=int(test_cfg.get("roi_queue_size", 128)),
+            roi_cache_dir=test_cfg.get("roi_cache_dir"),
+            strict_roi_backend=bool(test_cfg.get("strict_roi_backend", False)),
         )
 
-    # test.resolution 可选：显式指定推理输入分辨率（须与训练分辨率一致，
-    # 例如 nano 704 训练时填 704），省略则用 checkpoint 记录的分辨率
+    # 可选覆盖推理分辨率；省略时使用 checkpoint 记录的分辨率。
     eval_lib.run_evaluation(
         dataset,
         infer,

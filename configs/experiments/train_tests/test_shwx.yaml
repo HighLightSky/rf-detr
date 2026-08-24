@@ -2,18 +2,22 @@
 # 用法: python src/scripts/test.py -c configs/experiments/test_shwx.yaml
 test:
   dataset: shwx # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
-  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand
   resolution: 1024
-  checkpoint: output/0831-final-多模态对齐第二步/last_ema.pth
-  output_dir: output/0831-final-多模态对齐第二步
-  conf_threshold: 0.28 # 全局置信度阈值
+  checkpoint: output/0824-rfdetr-final-baseline/checkpoint_best_ema.pth
+  output_dir: output/0824-rfdetr-final-baseline
+  conf_threshold: 0.25 # 全局置信度阈值
   class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}；可整段贴入 calibrate_thresholds 产物
   device: cuda:0 # 无 CUDA 时自动回退 CPU
   batch_size: 32 # GPU 单次前向图像数
   num_workers: 12 # CPU 预取 worker 数
   prefetch_factor: 3
-  gpu_util_sample_interval: 0.5
-  use_fp16: false
+  precision: auto
+  compile_model: false
+  copy_prefetch: true
+  warmup_batches: 1
+  progress_interval_s: 1.0
+  gpu_monitor_enabled: false
   reason_plugin:
     enabled: false # 默认关闭；仅改为 true 时启用 FFT 一致性插件
     checkpoint: output/0818reasoning-candidate/reason_plugin_fsc.pth # 已训练插件 checkpoint 路径
@@ -22,10 +26,10 @@ test:
   save_fp_fn: true # 保存 FP/FN 可视化
   large_image_min_side: 2000 # 大图判定阈值（长边≥该值视为大图），大图的 FP/FN 可视化单独存到 output_dir/large_errors/
   # --- 大图切分（边界检测 → 裁切 → 目标检测 → 映射回原图）---
-  boundary_backend: yolo # yolo 使用 YOLO11m；rfdetr 使用 RF-DETR nano
-  boundary_checkpoint: /home/liu/wzt/rf-detr/data/large_cut/yolo11m-large-cut.pt # YOLO11m 权重
+  boundary_backend: rfdetr # yolo 使用 YOLO11m；rfdetr 使用 RF-DETR nano
+  boundary_checkpoint: data/large_cut/rf-detr-nano-large-cut.pth
   # RF-DETR nano 对照配置：boundary_backend: rfdetr，boundary_checkpoint: data/large_cut/rf-detr-nano-large-cut.pth
-  boundary_resolution: 640 # YOLO11m 训练分辨率；切回 RF-DETR nano 时改为 704
+  boundary_resolution: 704 # YOLO11m 训练分辨率；切回 RF-DETR nano 时改为 704
   boundary_conf: 0.25 # 边界框置信度阈值
   detector_conf: 0.25 # 裁窗目标检测置信度阈值
   tiling_padding: 0 # 裁窗外扩像素
@@ -33,5 +37,11 @@ test:
   tiling_square_stretch: false # 边界检测用方形拉伸替代 letterbox
   tiling_batch_size: 8 # 边界检测器 GPU 批量大小
   tiling_num_workers: 4 # 边界检测器预取 worker 数
-  tiling_detector_batch_size: 8 # 每次送入小图识别模型的裁窗数，控制显存峰值
+  max_pending_crops: 128
+  roi_backend: auto
+  proxy_max_side: 704
+  roi_output_size: null
+  roi_queue_size: 128
+  roi_cache_dir: null
+  strict_roi_backend: false
   save_yolo_preds: false # 输出 YOLO 格式预测框（供归因/探针脚本复用）

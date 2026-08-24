@@ -40,7 +40,7 @@ def test_large_image_cfg_defaults() -> None:
     assert cfg.nms_iou == 0.0
     assert cfg.batch_size == 8
     assert cfg.num_workers == 4
-    assert cfg.detector_batch_size == 8
+    assert cfg.max_pending_crops == 128
 
 
 def test_classify_large_images_with_size_map() -> None:

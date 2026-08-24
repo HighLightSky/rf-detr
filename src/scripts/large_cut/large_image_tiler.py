@@ -3,229 +3,202 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-"""大图目标检测推理器：可配置边界检测切分 + 目标检测器逐裁窗推理。
+"""大图边界检测和 crop 准备器。
 
-复用 ``large_cut_pipeline`` 的切分方案（边界检测 → 裁切+padding → 目标检测 →
-坐标映射回原图），但面向测试集批量评估优化：
-
-- nano 边界检测器在构造时只加载一次，所有大图共用，不逐图重复加载；
-- 边界检测对全部大图做一次批量前向（letterbox 预处理），再逐图裁切检测；
-- 逐图记录目标检测耗时（裁切 → 推理 → 映射回原图），供评估报告输出
-  平均/最大检测时长。
-
-输出预测与 ``eval_lib.predict_batched_to_records`` 的 ``BoxRecord`` 一致
-（坐标为原图像素空间），可直接参与比赛指标与 FP/FN 可视化。
+边界检测器只加载一次并批量处理所有大图，完成边界映射后释放；目标检测由统一
+detector runtime 处理小图和 crop，避免两个模型同时占用 GPU 显存。
 """
 
 from __future__ import annotations
 
+import gc
 import time
 from pathlib import Path
 from typing import Any
 
-import cv2
+import numpy as np
 
 from scripts.large_cut.large_cut_pipeline import (
     _nms_boxes,
-    crop_with_padding,
-    infer_detector_on_crops,
     map_boxes_to_original,
-    predict_batched_letterbox,
-    predict_yolo_boundaries,
+    predict_proxy_boundaries,
 )
-from val.competition_metrics import BoxRecord
+from scripts.large_cut.image_source import create_image_source
+
+
+def _crop_bounds(
+    image_shape: tuple[int, ...],
+    box_xyxy: tuple[int, int, int, int],
+    padding: int,
+) -> tuple[int, int, int, int]:
+    """计算含 padding 且限制在图像范围内的 crop 坐标。"""
+    image_h, image_w = image_shape[:2]
+    x0, y0, x1, y1 = box_xyxy
+    return (
+        max(int(x0) - padding, 0),
+        max(int(y0) - padding, 0),
+        min(int(x1) + padding, image_w),
+        min(int(y1) + padding, image_h),
+    )
 
 
 class LargeImageTiler:
-    """大图切分目标检测器（nano 边界检测器只加载一次）。
-
-    Args:
-        detector_model: 已加载的目标检测器（RFDETR 实例，如 SHWX 25 类）。
-        boundary_checkpoint: 边界检测器 checkpoint 路径。
-        boundary_backend: 边界模型后端，支持 ``rfdetr`` 与 ``yolo``。
-        boundary_resolution: 边界检测器输入分辨率（须与训练一致，默认 704）。
-        boundary_conf: 边界框置信度阈值。
-        detector_conf: 目标检测置信度阈值。
-        padding: 裁窗外扩像素。
-        nms_iou: 边界框 NMS IoU 阈值（0 关闭）。
-        square_stretch: 边界检测用方形拉伸替代 letterbox。
-        device: 推理设备。
-        batch_size: 边界检测器 GPU 批量大小。
-        num_workers: 边界检测器预取 worker 数。
-        detector_batch_size: 小图目标检测器单次处理的最大裁窗数。
-        reason_plugin: 可选的已加载 FFT 一致性插件；用于裁窗目标检测。
-        reason_class_ids: 插件重打分的类别；``None`` 表示全部类别。
-        reason_conf_low: 插件低置信候选下限；``None`` 使用插件内置值。
-    """
+    """批量运行边界模型并准备延迟生成 crop 所需的来源信息。"""
 
     def __init__(
         self,
-        detector_model: Any,
         boundary_checkpoint: str | Path,
         *,
         boundary_backend: str = "rfdetr",
         boundary_resolution: int = 704,
         boundary_conf: float = 0.25,
-        detector_conf: float = 0.25,
         padding: int = 32,
         nms_iou: float = 0.0,
         square_stretch: bool = False,
         device: str = "cuda:0",
         batch_size: int = 8,
         num_workers: int = 4,
-        detector_batch_size: int | None = 8,
-        reason_plugin: Any | None = None,
-        reason_class_ids: tuple[int, ...] | None = None,
-        reason_conf_low: float | None = None,
+        roi_backend: str = "auto",
+        proxy_max_side: int | None = None,
+        roi_cache_dir: str | Path | None = None,
+        strict_roi_backend: bool = False,
+        progress_interval_s: float = 1.0,
     ) -> None:
         from rfdetr import RFDETR
 
-        self.detector_model = detector_model
         self.boundary_checkpoint = str(boundary_checkpoint)
         self.boundary_backend = boundary_backend.lower()
         if self.boundary_backend not in {"rfdetr", "yolo"}:
             raise ValueError(f"boundary_backend 必须为 rfdetr 或 yolo，实际为 {boundary_backend!r}")
         self.boundary_resolution = boundary_resolution
         self.boundary_conf = boundary_conf
-        self.detector_conf = detector_conf
         self.padding = padding
         self.nms_iou = nms_iou
         self.square_stretch = square_stretch
         self.device = device
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.detector_batch_size = detector_batch_size
-        self.reason_plugin = reason_plugin
-        self.reason_class_ids = reason_class_ids
-        self.reason_conf_low = reason_conf_low
+        self.roi_backend = roi_backend
+        self.proxy_max_side = proxy_max_side or boundary_resolution
+        self.roi_cache_dir = roi_cache_dir
+        self.strict_roi_backend = strict_roi_backend
+        self.progress_interval_s = progress_interval_s
 
-        # 边界检测器只加载一次（所有大图共用）
+        # 边界模型只加载一次，所有大图共享同一个实例。
         print(f"[i] 加载大图边界检测器: {self.boundary_checkpoint}")
         if self.boundary_backend == "yolo":
             from ultralytics import YOLO
 
             self.boundary_model = YOLO(self.boundary_checkpoint)
         else:
-            self.boundary_model = RFDETR.from_checkpoint(self.boundary_checkpoint, resolution=self.boundary_resolution)
+            self.boundary_model = RFDETR.from_checkpoint(
+                self.boundary_checkpoint,
+                resolution=self.boundary_resolution,
+            )
         self.last_stats: dict[str, float | str] = {}
 
-    def predict(
+    def release_boundary_model(self) -> None:
+        """释放边界模型引用和 CUDA 缓存。"""
+        boundary_model = self.boundary_model
+        self.boundary_model = None
+        del boundary_model
+        gc.collect()
+        if self.device.startswith("cuda"):
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    def prepare_crops(
         self,
         image_paths: list[Path],
-    ) -> tuple[list[BoxRecord], dict[str, float], dict[str, list[tuple[float, float, float, float]]]]:
-        """对一批大图执行切分目标检测。
-
-        Args:
-            image_paths: 大图路径列表。
-
-        Returns:
-            ``(pred_records, per_image_seconds, crop_boxes_by_image)``：
-            - pred_records: 全部大图的目标检测记录（原图像素坐标）；
-            - per_image_seconds: ``{image_id: 秒}``，逐大图的目标检测耗时
-              （裁切 → 推理 → 映射，不含 nano 边界检测与模型加载）；
-            - crop_boxes_by_image: ``{image_id: [(x0, y0, x1, y1), ...]}``，
-              每张大图的裁窗在原图中的坐标（含 padding），供可视化叠加。
-        """
+    ) -> tuple[
+        list[tuple[str, Path, tuple[int, int, int, int]]],
+        dict[str, list[tuple[float, float, float, float]]],
+        dict[str, float],
+    ]:
+        """批量检测边界并返回带原图偏移的 crop 来源。"""
         if not image_paths:
-            return [], {}, {}
+            return [], {}, {"boundary_seconds": 0.0, "crop_prepare_seconds": 0.0}
 
-        # 1. 所有大图一次性批量边界检测（letterbox 预处理）
         boundary_t0 = time.perf_counter()
-        if self.boundary_backend == "yolo":
-            boundary_results = predict_yolo_boundaries(
-                self.boundary_model,
-                image_paths,
-                device=self.device,
-                resolution=self.boundary_resolution,
-                conf_threshold=self.boundary_conf,
-                batch_size=self.batch_size,
+        proxy_t0 = time.perf_counter()
+        proxy_records: list[tuple[str, np.ndarray, tuple[int, int]]] = []
+        fallback_count = 0
+        for image_path in image_paths:
+            source = create_image_source(
+                image_path,
+                backend=self.roi_backend,
+                cache_dir=self.roi_cache_dir,
+                strict=self.strict_roi_backend,
             )
-        else:
-            boundary_results = predict_batched_letterbox(
+            fallback_count += int(source.used_fallback)
+            proxy, original_size = source.read_proxy(self.proxy_max_side)
+            proxy_records.append((image_path.stem, proxy, original_size))
+        proxy_elapsed = time.perf_counter() - proxy_t0
+        print(f"[i] proxy 边界检测开始: {len(image_paths)} 张 | side={self.proxy_max_side} | batch={self.batch_size}", flush=True)
+        try:
+            boundary_results = predict_proxy_boundaries(
                 self.boundary_model,
-                image_paths,
+                proxy_records,
                 device=self.device,
                 resolution=self.boundary_resolution,
                 conf_threshold=self.boundary_conf,
                 batch_size=self.batch_size,
-                num_workers=self.num_workers,
+                backend=self.boundary_backend,
                 square_stretch=self.square_stretch,
+                progress_interval_s=self.progress_interval_s,
             )
+        finally:
+            self.release_boundary_model()
         boundary_elapsed = time.perf_counter() - boundary_t0
-        boundary_by_id = {r["image_id"]: r for r in boundary_results}
+        boundary_by_id = {result["image_id"]: result for result in boundary_results}
 
-        pred_records: list[BoxRecord] = []
-        per_image_seconds: dict[str, float] = {}
+        crop_prepare_t0 = time.perf_counter()
+        crop_sources: list[tuple[str, Path, tuple[int, int, int, int]]] = []
         crop_boxes_by_image: dict[str, list[tuple[float, float, float, float]]] = {}
+        last_progress = crop_prepare_t0
         for image_path in image_paths:
             stem = image_path.stem
-            image_bgr = cv2.imread(str(image_path))
-            if image_bgr is None:
-                print(f"[w] 无法读取大图，跳过: {image_path}", flush=True)
-                continue
-            image_h, image_w = image_bgr.shape[:2]
             batch_result = boundary_by_id.get(stem)
             if batch_result is None:
-                print(f"[w] 缺少边界检测结果，跳过: {stem}", flush=True)
                 continue
-
-            # 2. 边界框映射回原图坐标（+ 可选 NMS）
-            boxes_orig = map_boxes_to_original(
-                batch_result["boxes"],
-                batch_result["scale"],
-                batch_result["pad_x"],
-                batch_result["pad_y"],
-                image_w,
-                image_h,
-            )
+            proxy_w, proxy_h = batch_result["proxy_size"]
+            image_w, image_h = batch_result["original_size"]
+            if self.boundary_backend == "yolo":
+                boxes_proxy = batch_result["boxes"]
+            else:
+                boxes_proxy = map_boxes_to_original(
+                    batch_result["boxes"], batch_result["scale"], batch_result["pad_x"], batch_result["pad_y"], proxy_w, proxy_h
+                )
+            boxes_orig = boxes_proxy.astype(np.float64, copy=True)
+            boxes_orig[:, [0, 2]] *= float(image_w) / max(proxy_w, 1)
+            boxes_orig[:, [1, 3]] *= float(image_h) / max(proxy_h, 1)
             if self.nms_iou > 0 and boxes_orig.shape[0] > 0:
                 boxes_orig = _nms_boxes(boxes_orig, self.nms_iou)
-
-            # 3. 裁切 + padding + 目标检测 + 映射回原图（逐图计时）
-            crops_rgb: list = []
-            crop_offsets: list[tuple[int, int, int, int]] = []
+            offsets: list[tuple[int, int, int, int]] = []
             for box in boxes_orig:
-                crop_bgr, crop_xyxy = crop_with_padding(
-                    image_bgr,
-                    tuple(int(v) for v in box),
-                    self.padding,
-                )
-                crops_rgb.append(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
-                crop_offsets.append(crop_xyxy)
-            crop_boxes_by_image[stem] = [
-                (float(x0), float(y0), float(x1), float(y1)) for x0, y0, x1, y1 in crop_offsets
-            ]
-
-            t0 = time.perf_counter()
-            detections = infer_detector_on_crops(
-                self.detector_model,
-                crops_rgb,
-                self.detector_conf,
-                batch_size=self.detector_batch_size,
-                reason_plugin=self.reason_plugin,
-                reason_class_ids=self.reason_class_ids,
-                reason_conf_low=self.reason_conf_low,
-            )
-            for det, (crop_x0, crop_y0, _, _) in zip(detections, crop_offsets, strict=False):
-                for xyxy, score, class_id in zip(det.xyxy, det.confidence, det.class_id, strict=False):
-                    x0 = float(xyxy[0]) + crop_x0
-                    y0 = float(xyxy[1]) + crop_y0
-                    x1 = float(xyxy[2]) + crop_x0
-                    y1 = float(xyxy[3]) + crop_y0
-                    pred_records.append(
-                        BoxRecord(
-                            image_id=stem,
-                            class_id=int(class_id),
-                            xyxy=(x0, y0, x1, y1),
-                            score=float(score),
-                        )
-                    )
-            # 边界模型是批量运行的，按图均摊其耗时以得到端到端单图口径。
-            per_image_seconds[stem] = time.perf_counter() - t0 + boundary_elapsed / len(image_paths)
+                crop_xyxy = _crop_bounds((image_h, image_w), tuple(int(value) for value in box), self.padding)
+                crop_sources.append((stem, image_path, crop_xyxy))
+                offsets.append(crop_xyxy)
+            crop_boxes_by_image[stem] = [(float(x0), float(y0), float(x1), float(y1)) for x0, y0, x1, y1 in offsets]
+            now = time.perf_counter()
+            if self.progress_interval_s > 0 and (now - last_progress >= self.progress_interval_s or image_path == image_paths[-1]):
+                print(f"\r[i] ROI 元数据准备 {len(crop_boxes_by_image)}/{len(image_paths)}", end="", flush=True)
+                if image_path == image_paths[-1]:
+                    print(flush=True)
+                last_progress = now
+        crop_prepare_elapsed = time.perf_counter() - crop_prepare_t0
         self.last_stats = {
-            "boundary_backend": self.boundary_backend,
+            "proxy_seconds": proxy_elapsed,
             "boundary_seconds": boundary_elapsed,
-            "end_to_end_seconds": sum(per_image_seconds.values()),
-            "image_count": float(len(per_image_seconds)),
+            "crop_prepare_seconds": crop_prepare_elapsed,
+            "crop_count": float(len(crop_sources)),
+            "fallback_count": float(fallback_count),
         }
-        return pred_records, per_image_seconds, crop_boxes_by_image
+        return crop_sources, crop_boxes_by_image, {
+            "proxy_seconds": proxy_elapsed,
+            "boundary_seconds": boundary_elapsed,
+            "fallback_count": float(fallback_count),
+            "crop_prepare_seconds": crop_prepare_elapsed,
+        }

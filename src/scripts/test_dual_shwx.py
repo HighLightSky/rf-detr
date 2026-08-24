@@ -62,8 +62,12 @@ def _predict_one_model(
         num_workers=infer.num_workers,
         num_classes=num_classes,
         prefetch_factor=infer.prefetch_factor,
-        gpu_util_sample_interval=infer.gpu_util_sample_interval,
-        use_fp16=infer.use_fp16,
+        precision=infer.precision,
+        compile_model=infer.compile_model,
+        copy_prefetch=infer.copy_prefetch,
+        warmup_batches=infer.warmup_batches,
+        progress_interval_s=infer.progress_interval_s,
+        gpu_monitor_enabled=infer.gpu_monitor_enabled,
     )
     del model
     eval_lib.release_cuda_cache(device)

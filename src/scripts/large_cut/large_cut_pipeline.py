@@ -171,6 +171,41 @@ class _InferenceDataset(Dataset):
         return image_path.stem, rgb_tensor, (height, width)
 
 
+class _BoundaryDataset(Dataset):
+    """在 worker 中完成解码、letterbox 和 RGB tensor 构造。"""
+
+    def __init__(self, image_paths: list[Path], resolution: int, square_stretch: bool, cache_original: bool) -> None:
+        self.image_paths = image_paths
+        self.resolution = resolution
+        self.square_stretch = square_stretch
+        self.cache_original = cache_original
+
+    def __len__(self) -> int:
+        return len(self.image_paths)
+
+    def __getitem__(self, index: int) -> tuple[str, torch.Tensor, torch.Tensor | None, tuple[int, int]]:
+        image_path = self.image_paths[index]
+        image_bgr = cv2.imread(str(image_path))
+        if image_bgr is None:
+            raise FileNotFoundError(f"无法读取图像: {image_path}")
+        height, width = image_bgr.shape[:2]
+        original_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        if self.square_stretch:
+            processed_bgr = cv2.resize(
+                image_bgr,
+                (self.resolution, self.resolution),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        else:
+            processed_bgr, _, _, _ = letterbox_resize(image_bgr, self.resolution)
+        processed_rgb = cv2.cvtColor(processed_bgr, cv2.COLOR_BGR2RGB)
+        processed_tensor = torch.from_numpy(processed_rgb).permute(2, 0, 1).contiguous()
+        original_tensor = (
+            torch.from_numpy(original_rgb).permute(2, 0, 1).contiguous() if self.cache_original else None
+        )
+        return image_path.stem, processed_tensor, original_tensor, (height, width)
+
+
 def _inference_collate(
     batch: list[tuple[str, torch.Tensor, tuple[int, int]]],
 ) -> tuple[list[str], list[torch.Tensor], list[tuple[int, int]]]:
@@ -179,6 +214,18 @@ def _inference_collate(
     tensors = [item[1] for item in batch]
     orig_sizes = [item[2] for item in batch]
     return stems, tensors, orig_sizes
+
+
+def _boundary_collate(
+    batch: list[tuple[str, torch.Tensor, torch.Tensor | None, tuple[int, int]]],
+) -> tuple[list[str], list[torch.Tensor], list[torch.Tensor | None], list[tuple[int, int]]]:
+    """保持边界预处理 tensor、原图 tensor 和原始尺寸的批量列表。"""
+    return (
+        [item[0] for item in batch],
+        [item[1] for item in batch],
+        [item[2] for item in batch],
+        [item[3] for item in batch],
+    )
 
 
 def _worker_init_fn(worker_id: int) -> None:
@@ -198,6 +245,8 @@ def predict_batched_letterbox(
     num_workers: int,
     *,
     square_stretch: bool = False,
+    decoded_images: dict[str, np.ndarray] | None = None,
+    progress_interval_s: float = 1.0,
 ) -> list[dict]:
     """批量推理边界检测器（多进程预取 + GPU 批量前向，letterbox 预处理）。
 
@@ -215,13 +264,16 @@ def predict_batched_letterbox(
         batch_size: GPU 单次前向的图像数。
         num_workers: 预取 worker 进程数。
         square_stretch: ``True`` 时用方形拉伸替代 letterbox。
+        decoded_images: 可选的 RGB 图像缓存，供后续裁窗阶段复用。
+        progress_interval_s: 边界检测进度输出间隔。
 
     Returns:
         每张图的 dict 列表：
         ``{"image_id": stem, "boxes": (N,4) letterbox 坐标 xyxy,
         "scores": (N,), "class_ids": (N,), "scale": float, "pad_x": int, "pad_y": int}``。
     """
-    dataset = _InferenceDataset(image_paths)
+    dataset = _BoundaryDataset(image_paths, resolution, square_stretch, decoded_images is not None)
+    loader_context = "spawn" if num_workers > 0 and str(device).startswith("cuda") else None
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -230,9 +282,10 @@ def predict_batched_letterbox(
         prefetch_factor=2 if num_workers > 0 else None,
         pin_memory=True,
         drop_last=False,
-        collate_fn=_inference_collate,
+        collate_fn=_boundary_collate,
         worker_init_fn=_worker_init_fn,
         persistent_workers=num_workers > 0,
+        multiprocessing_context=loader_context,
     )
 
     # 显式把权重放到目标设备并切换 eval 模式（eval 下解码器仅用单组 query）
@@ -243,32 +296,32 @@ def predict_batched_letterbox(
     stds: list[float] = model.stds
 
     results: list[dict] = []
+    progress_t0 = time.perf_counter()
+    last_progress = progress_t0
+    processed = 0
     with torch.inference_mode():
-        for stems, rgb_tensors, orig_sizes in loader:
-            gpu_images: list[torch.Tensor] = []
+        for stems, processed_tensors, original_tensors, orig_sizes in loader:
+            if decoded_images is not None:
+                for stem, tensor in zip(stems, original_tensors, strict=True):
+                    if tensor is not None:
+                        decoded_images[stem] = np.ascontiguousarray(tensor.permute(1, 2, 0).numpy())
+            batch_tensor = torch.stack(processed_tensors).to(device, non_blocking=True).to(model_dtype).div_(255.0)
             scales: list[float] = []
             pad_xy: list[tuple[int, int]] = []
-            for tensor, (height, width) in zip(rgb_tensors, orig_sizes):
-                img = tensor.to(device, non_blocking=True).to(model_dtype).div_(255.0)
+            for height, width in orig_sizes:
                 if square_stretch:
-                    # 直接拉伸到方形（scale 语义退化为逐轴比例，padding 为 0）
-                    resized = F.resize(img, (resolution, resolution), antialias=False)
                     scales.append(float(width) / resolution)
                     pad_xy.append((0, 0))
                 else:
                     scale = resolution / max(height, width)
-                    new_h = max(round(height * scale), 1)
-                    new_w = max(round(width * scale), 1)
-                    resized = F.resize(img, (new_h, new_w), antialias=False)
-                    pad_w = resolution - new_w
-                    pad_h = resolution - new_h
-                    pad_x = pad_w // 2
-                    pad_y = pad_h // 2
-                    resized = F.pad(resized, (pad_x, pad_y, pad_w - pad_x, pad_h - pad_y), fill=0.0)
                     scales.append(scale)
-                    pad_xy.append((pad_x, pad_y))
-                gpu_images.append(resized)
-            batch_tensor = F.normalize(torch.stack(gpu_images), means, stds)
+                    pad_xy.append(
+                        (
+                            (resolution - round(width * scale)) // 2,
+                            (resolution - round(height * scale)) // 2,
+                        )
+                    )
+            batch_tensor = F.normalize(batch_tensor, means, stds)
 
             predictions = model.model.model(batch_tensor)
             target_sizes = torch.tensor([[resolution, resolution]] * len(stems), device=device)
@@ -279,14 +332,23 @@ def predict_batched_letterbox(
                 results.append(
                     {
                         "image_id": stem,
-                        "boxes": result["boxes"][keep].cpu().numpy(),
-                        "scores": result["scores"][keep].cpu().numpy(),
-                        "class_ids": result["labels"][keep].cpu().numpy(),
+                        "boxes": result["boxes"][keep].float().cpu().numpy(),
+                        "scores": result["scores"][keep].float().cpu().numpy(),
+                        "class_ids": result["labels"][keep].long().cpu().numpy(),
                         "scale": scale,
                         "pad_x": pad_x,
                         "pad_y": pad_y,
                     }
                 )
+            processed += len(stems)
+            now = time.perf_counter()
+            if progress_interval_s > 0 and (
+                now - last_progress >= progress_interval_s or processed == len(image_paths)
+            ):
+                print(f"\r[i] 大图边界检测 {processed}/{len(image_paths)}", end="", flush=True)
+                if processed == len(image_paths):
+                    print(flush=True)
+                last_progress = now
     return results
 
 
@@ -297,6 +359,8 @@ def predict_yolo_boundaries(
     resolution: int,
     conf_threshold: float,
     batch_size: int,
+    decoded_images: dict[str, np.ndarray] | None = None,
+    progress_interval_s: float = 1.0,
 ) -> list[dict[str, Any]]:
     """用 Ultralytics YOLO 批量预测裁窗边界并统一为原图坐标结果。
 
@@ -311,6 +375,8 @@ def predict_yolo_boundaries(
         resolution: YOLO 推理分辨率。
         conf_threshold: 候选框置信度下限。
         batch_size: GPU 单次前向图像数。
+        decoded_images: 可选的 RGB 图像缓存，复用 YOLO 已解码的原图。
+        progress_interval_s: 边界检测进度输出间隔。
 
     Returns:
         与 :func:`predict_batched_letterbox` 字段兼容的结果列表，其中框坐标
@@ -323,6 +389,9 @@ def predict_yolo_boundaries(
     # 超大图路径一次性传给 Ultralytics 会让其数据集预取全部原图，
     # 在部分版本中造成异常显存峰值；分块调用保持显存上界稳定。
     chunk_size = max(1, min(batch_size, 8))
+    progress_t0 = time.perf_counter()
+    last_progress = progress_t0
+    processed = 0
     for start in range(0, len(image_paths), chunk_size):
         chunk = image_paths[start : start + chunk_size]
         predictions = model.predict(
@@ -337,6 +406,8 @@ def predict_yolo_boundaries(
             verbose=False,
         )
         for prediction in predictions:
+            if decoded_images is not None and getattr(prediction, "orig_img", None) is not None:
+                decoded_images[Path(prediction.path).stem] = cv2.cvtColor(prediction.orig_img, cv2.COLOR_BGR2RGB)
             boxes = prediction.boxes
             results.append(
                 {
@@ -349,6 +420,117 @@ def predict_yolo_boundaries(
                     "pad_y": 0,
                 }
             )
+            processed += 1
+            now = time.perf_counter()
+            if progress_interval_s > 0 and (
+                now - last_progress >= progress_interval_s or processed == len(image_paths)
+            ):
+                print(f"\r[i] 大图边界检测 {processed}/{len(image_paths)}", end="", flush=True)
+                if processed == len(image_paths):
+                    print(flush=True)
+                last_progress = now
+    return results
+
+
+def predict_proxy_boundaries(
+    model: Any,
+    proxy_records: list[tuple[str, np.ndarray, tuple[int, int]]],
+    device: str,
+    resolution: int,
+    conf_threshold: float,
+    batch_size: int,
+    backend: str = "rfdetr",
+    square_stretch: bool = False,
+    progress_interval_s: float = 1.0,
+) -> list[dict[str, Any]]:
+    """在低分辨率 proxy 上批量执行边界检测，避免边界阶段解码原图。"""
+    if not proxy_records:
+        return []
+    if backend == "yolo":
+        results: list[dict[str, Any]] = []
+        for start in range(0, len(proxy_records), max(1, batch_size)):
+            chunk = proxy_records[start : start + max(1, batch_size)]
+            images_bgr = [np.ascontiguousarray(item[1][:, :, ::-1]) for item in chunk]
+            predictions = model.predict(
+                source=images_bgr,
+                imgsz=resolution,
+                conf=conf_threshold,
+                iou=0.5,
+                max_det=500,
+                device=device,
+                batch=len(chunk),
+                stream=True,
+                verbose=False,
+            )
+            for (stem, proxy, original_size), prediction in zip(chunk, predictions, strict=True):
+                boxes = prediction.boxes
+                results.append(
+                    {
+                        "image_id": stem,
+                        "boxes": boxes.xyxy.float().cpu().numpy(),
+                        "scores": boxes.conf.float().cpu().numpy(),
+                        "class_ids": boxes.cls.long().cpu().numpy(),
+                        "proxy_size": (proxy.shape[1], proxy.shape[0]),
+                        "original_size": original_size,
+                    }
+                )
+        return results
+
+    model.model.model = model.model.model.to(device)
+    model.model.model.eval()
+    model_dtype = next(model.model.model.parameters()).dtype
+    means: list[float] = model.means
+    stds: list[float] = model.stds
+    results = []
+    processed = 0
+    last_progress = time.perf_counter()
+    with torch.inference_mode():
+        for start in range(0, len(proxy_records), max(1, batch_size)):
+            chunk = proxy_records[start : start + max(1, batch_size)]
+            processed_tensors: list[torch.Tensor] = []
+            scales: list[float] = []
+            pads: list[tuple[int, int]] = []
+            for _, proxy, _ in chunk:
+                proxy_bgr = cv2.cvtColor(proxy, cv2.COLOR_RGB2BGR)
+                if square_stretch:
+                    processed_bgr = cv2.resize(proxy_bgr, (resolution, resolution), interpolation=cv2.INTER_LINEAR)
+                    scale = 1.0
+                    pad_x = pad_y = 0
+                else:
+                    processed_bgr, scale, pad_x, pad_y = letterbox_resize(proxy_bgr, resolution)
+                processed_rgb = cv2.cvtColor(processed_bgr, cv2.COLOR_BGR2RGB)
+                processed_tensors.append(torch.from_numpy(processed_rgb).permute(2, 0, 1).contiguous())
+                scales.append(scale)
+                pads.append((pad_x, pad_y))
+            batch_tensor = torch.stack(processed_tensors).to(device, non_blocking=True).to(model_dtype).div_(255.0)
+            batch_tensor = F.normalize(batch_tensor, means, stds)
+            predictions = model.model.model(batch_tensor)
+            target_sizes = torch.tensor([[resolution, resolution]] * len(chunk), device=device)
+            post = model.model.postprocess(predictions, target_sizes=target_sizes)
+            for (stem, proxy, original_size), result, scale, (pad_x, pad_y) in zip(
+                chunk, post, scales, pads, strict=True
+            ):
+                keep = result["scores"] > conf_threshold
+                results.append(
+                    {
+                        "image_id": stem,
+                        "boxes": result["boxes"][keep].float().cpu().numpy(),
+                        "scores": result["scores"][keep].float().cpu().numpy(),
+                        "class_ids": result["labels"][keep].long().cpu().numpy(),
+                        "scale": scale,
+                        "pad_x": pad_x,
+                        "pad_y": pad_y,
+                        "proxy_size": (proxy.shape[1], proxy.shape[0]),
+                        "original_size": original_size,
+                    }
+                )
+            processed += len(chunk)
+            now = time.perf_counter()
+            if progress_interval_s > 0 and (now - last_progress >= progress_interval_s or processed == len(proxy_records)):
+                print(f"\r[i] proxy 边界检测 {processed}/{len(proxy_records)}", end="", flush=True)
+                if processed == len(proxy_records):
+                    print(flush=True)
+                last_progress = now
     return results
 
 

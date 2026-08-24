@@ -9,7 +9,12 @@ test:
   device: cuda:0
   batch_size: 32
   num_workers: 12
-  use_fp16: false
+  precision: auto
+  compile_model: false
+  copy_prefetch: true
+  warmup_batches: 1
+  progress_interval_s: 1.0
+  gpu_monitor_enabled: false
   # DIOR 无分类损失均衡化实验，la_bias 关闭
   save_fp_fn: false
   save_yolo_preds: false

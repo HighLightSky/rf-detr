@@ -23,8 +23,12 @@ test:
   batch_size: 32 # GPU 单次前向图像数（越大 GPU 利用率越高）
   num_workers: 12 # CPU 预取 worker 数
   prefetch_factor: 3
-  gpu_util_sample_interval: 0.5
-  use_fp16: false # FP16 推理加速（对精度敏感时保持 false）
+  progress_interval_s: 1.0
+  gpu_monitor_enabled: false
+  precision: auto
+  compile_model: false
+  copy_prefetch: true
+  warmup_batches: 1
 
   reason_plugin: # FFT 一致性插件；默认关闭
     enabled: false # true 时普通图和大图裁窗均启用
