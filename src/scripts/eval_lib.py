@@ -53,6 +53,7 @@ from val.competition_metrics import (  # noqa: E402
     evaluate_competition_metrics,
     load_yolo_labels,
 )
+from scripts.ms_nms import MsNmsConfig, SuppressionStats, apply_shwx_ms_nms  # noqa: E402
 from visualization.detection import (  # noqa: E402
     build_confusion_matrix,
     clear_vis_dirs,
@@ -2021,6 +2022,7 @@ def run_evaluation(
     reason_plugin_cfg: ReasonPluginCfg | None = None,
     resolution: int | None = None,
     large_image_cfg: LargeImageCfg | None = None,
+    ms_nms_config: MsNmsConfig | None = None,
 ) -> None:
     """按比赛口径在测试集上完整评估一个 checkpoint。
 
@@ -2043,6 +2045,7 @@ def run_evaluation(
             图像走 nano 边界检测切分流程（nano 只加载一次），其余小图仍按
             整图推理；大图 FP/FN 可视化单独保存到 ``output_dir/large_errors/``。
             ``None`` 表示不启用（保持原逻辑，全部整图推理）。
+        ms_nms_config: SHWX MS 专用保守 NMS 配置；``None`` 或关闭时保持原输出。
     """
     os.chdir(PROJECT_ROOT)
 
@@ -2234,6 +2237,23 @@ def run_evaluation(
         )
     del model
     release_cuda_cache(device)
+
+    # 所有普通图片和 crop 已经完成坐标还原并合并后，再执行最终候选框去重。
+    ms_nms_stats = SuppressionStats(input_count=len(pred_records), output_count=len(pred_records))
+    if ms_nms_config is not None and ms_nms_config.enabled:
+        pred_records, ms_nms_stats = apply_shwx_ms_nms(pred_records, ms_nms_config)
+        dataset.exp_output_dir.mkdir(parents=True, exist_ok=True)
+        (dataset.exp_output_dir / "ms_nms_stats.json").write_text(
+            json.dumps(ms_nms_stats.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(
+            "[i] MS 保守 NMS: "
+            f"输入 {ms_nms_stats.input_count}，输出 {ms_nms_stats.output_count}，"
+            f"同类删除 {ms_nms_stats.same_class_suppressed}，"
+            f"跨类删除 {ms_nms_stats.cross_class_suppressed}，"
+            f"歧义保留 {ms_nms_stats.ambiguous_cross_class_kept}"
+        )
 
     # 可选保存 YOLO 格式预测，供漏检和虚警归因脚本使用。
     if save_yolo_preds:

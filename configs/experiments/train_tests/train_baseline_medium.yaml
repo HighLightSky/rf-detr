@@ -15,12 +15,15 @@ model:
 train:
   dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand
   dataset_file: yolo
-  output_dir: output/0824-rfdetr-final-baseline
+  output_dir: output/0825-rfdetr-final-baseline
   epochs: 100
   batch_size: 16
   grad_accum_steps: 4 # 有效 batch = 64（与既往 medium 实验一致）
 
-  num_workers: 8
+  # 选择F1分数最高的
+  best_metric: f1
+
+  num_workers: 8d
   prefetch_factor: 4  # 有效预取 = num_workers * prefetch_factor
   persistent_workers: true
   pin_memory: true  # 使用固定目录

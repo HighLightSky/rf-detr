@@ -8,6 +8,18 @@ predict:
   output_dir: output/0825-重标注参考
   image: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand/images/train/
   class_names: shwx # 类别名来源：内置名 shwx/shwx_truck/dior，或 {label: 名称} 字典
+  ms_nms:
+    enabled: true
+    ms_class_id: 3
+    ship_class_ids: [0, 1, 2, 3]
+    same_class_iou: 0.80
+    same_class_containment: 0.90
+    same_class_center_ratio: 0.35
+    cross_class_iou: 0.90
+    cross_class_containment: 0.95
+    cross_class_center_ratio: 0.25
+    cross_class_score_margin: 0.05
+    keep_ambiguous_cross_class: true
   label_comparison:
     enabled: true
     labels_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand/labels/train/

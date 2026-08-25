@@ -13,6 +13,18 @@ test_dual:
   resolution: 1024
   conf_threshold: 0.25
   class_conf_thresholds: {}
+  ms_nms:
+    enabled: true
+    ms_class_id: 3
+    ship_class_ids: [0, 1, 2, 3]
+    same_class_iou: 0.80
+    same_class_containment: 0.90
+    same_class_center_ratio: 0.35
+    cross_class_iou: 0.90
+    cross_class_containment: 0.95
+    cross_class_center_ratio: 0.25
+    cross_class_score_margin: 0.05
+    keep_ambiguous_cross_class: true
   device: cuda:0
   batch_size: 32
   num_workers: 12

@@ -41,6 +41,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -407,6 +408,8 @@ def main() -> None:
     if label_comparison_cfg is not None and not label_comparison_cfg.labels_dir.is_dir():
         raise FileNotFoundError(f"YOLO 标签目录不存在: {label_comparison_cfg.labels_dir}")
     reason_plugin_kwargs = _build_reason_plugin_kwargs(predict_cfg)
+    ms_nms_config = eval_lib.MsNmsConfig.from_config(predict_cfg.get("ms_nms"))
+    ms_nms_total = eval_lib.SuppressionStats()
     if reason_plugin_kwargs:
         print(f"[i] 启用 FFT 一致性插件: {reason_plugin_kwargs['reason_plugin']}")
 
@@ -428,6 +431,28 @@ def main() -> None:
             conf_threshold,
             reason_plugin_kwargs,
         )
+        raw_records = [
+            eval_lib.BoxRecord(
+                image_id=image_path.stem,
+                class_id=int(class_id),
+                xyxy=tuple(float(value) for value in xyxy),
+                score=float(score),
+            )
+            for xyxy, score, class_id in zip(xyxy_array, score_array, class_id_array)
+        ]
+        filtered_records, image_nms_stats = eval_lib.apply_shwx_ms_nms(raw_records, ms_nms_config)
+        ms_nms_total = eval_lib.SuppressionStats(
+            input_count=ms_nms_total.input_count + image_nms_stats.input_count,
+            output_count=ms_nms_total.output_count + image_nms_stats.output_count,
+            same_class_suppressed=ms_nms_total.same_class_suppressed + image_nms_stats.same_class_suppressed,
+            cross_class_suppressed=ms_nms_total.cross_class_suppressed + image_nms_stats.cross_class_suppressed,
+            ambiguous_cross_class_kept=ms_nms_total.ambiguous_cross_class_kept
+            + image_nms_stats.ambiguous_cross_class_kept,
+        )
+        if ms_nms_config.enabled:
+            xyxy_array = np.asarray([record.xyxy for record in filtered_records], dtype=np.float32).reshape(-1, 4)
+            score_array = np.asarray([record.score for record in filtered_records], dtype=np.float32)
+            class_id_array = np.asarray([record.class_id for record in filtered_records], dtype=int)
         label_path, vis_path = _save_results(
             image_path,
             xyxy_array,
@@ -438,15 +463,7 @@ def main() -> None:
             class_names,
         )
         total_detections += len(xyxy_array)
-        pred_records.extend(
-            eval_lib.BoxRecord(
-                image_id=image_path.stem,
-                class_id=int(class_id),
-                xyxy=tuple(float(value) for value in xyxy),
-                score=float(score),
-            )
-            for xyxy, score, class_id in zip(xyxy_array, score_array, class_id_array)
-        )
+        pred_records.extend(filtered_records)
 
         if single_mode:
             # ── 单图模式：逐目标详细打印 ──────────────────────────────
@@ -476,6 +493,20 @@ def main() -> None:
         )
         print(
             f"[完成] 标签对比图: {comparison_dir}（{saved_images} 张，FP={fp_count}，FN={fn_count}）"
+        )
+
+    if ms_nms_config.enabled:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "ms_nms_stats.json").write_text(
+            json.dumps(ms_nms_total.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(
+            "[i] MS 保守 NMS: "
+            f"输入 {ms_nms_total.input_count}，输出 {ms_nms_total.output_count}，"
+            f"同类删除 {ms_nms_total.same_class_suppressed}，"
+            f"跨类删除 {ms_nms_total.cross_class_suppressed}，"
+            f"歧义保留 {ms_nms_total.ambiguous_cross_class_kept}"
         )
 
     if not single_mode:

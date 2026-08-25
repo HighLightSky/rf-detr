@@ -223,6 +223,22 @@ def main() -> None:
     pred_records = pan_global_records + rgb_global_records
 
     dataset = eval_lib.build_dataset_cfg("shwx", data_dir=dataset_dir, output_dir=output_dir)
+    ms_nms_config = eval_lib.MsNmsConfig.from_config(section.get("ms_nms"))
+    ms_nms_stats = eval_lib.SuppressionStats(input_count=len(pred_records), output_count=len(pred_records))
+    if ms_nms_config.enabled:
+        pred_records, ms_nms_stats = eval_lib.apply_shwx_ms_nms(pred_records, ms_nms_config)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "ms_nms_stats.json").write_text(
+            json.dumps(ms_nms_stats.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(
+            "[i] MS 保守 NMS: "
+            f"输入 {ms_nms_stats.input_count}，输出 {ms_nms_stats.output_count}，"
+            f"同类删除 {ms_nms_stats.same_class_suppressed}，"
+            f"跨类删除 {ms_nms_stats.cross_class_suppressed}，"
+            f"歧义保留 {ms_nms_stats.ambiguous_cross_class_kept}"
+        )
     test_image_paths = eval_lib.read_test_image_paths(dataset.test_image_dir)
     image_size_map = eval_lib.build_image_size_map(test_image_paths)
     gt_records = eval_lib.load_yolo_labels(dataset.label_dir, image_size_map)
