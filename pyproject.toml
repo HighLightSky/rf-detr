@@ -71,6 +71,9 @@ augment = [
     "albumentations>=1.4.24,<3.0.0",  # optional custom CPU augmentations
     "kornia>=0.7,<1",                  # optional GPU-side augmentation
 ]
+refinement = [
+    "timm>=1.0.28",                    # DINOv3 二级复核特征提取
+]
 large-image = [
     "pyvips>=2.2",
 ]

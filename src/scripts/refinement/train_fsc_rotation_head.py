@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -38,19 +39,41 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--negative-weight", type=float, default=2.0)
+    parser.add_argument(
+        "--train-only-holdout",
+        action="store_true",
+        help="仅使用 cache 的 train 候选并按图像名划分内部留出集",
+    )
     return parser.parse_args()
 
 
-def _load(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+def _load(path: Path, train_only_holdout: bool) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """读取不含测试集的候选缓存。"""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("format") != "shwx-fsc-verifier-cache-v1" or payload.get("metadata", {}).get("test_split_used"):
         raise ValueError("缓存格式错误或包含测试集")
     rows = payload["candidates"]
-    return payload, [r for r in rows if r["split"] == "train"], [r for r in rows if r["split"] == "val"]
+    if not train_only_holdout:
+        return payload, [r for r in rows if r["split"] == "train"], [r for r in rows if r["split"] == "val"]
+    train_rows: list[dict[str, Any]] = []
+    holdout_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if row["split"] != "train":
+            continue
+        digest = hashlib.sha256(Path(row["image"]).name.encode("utf-8")).digest()
+        (holdout_rows if int.from_bytes(digest[:8], "big") % 5 == 0 else train_rows).append(row)
+    if not train_rows or not holdout_rows:
+        raise ValueError("内部 train/holdout 候选不能为空")
+    return payload, train_rows, holdout_rows
 
 
-def _extract(backbone: nn.Module, rows: list[dict[str, Any]], policy: FSCVerifierPolicy, device: torch.device, batch_size: int) -> tuple[Tensor, Tensor]:
+def _extract(
+    backbone: nn.Module,
+    rows: list[dict[str, Any]],
+    policy: FSCVerifierPolicy,
+    device: torch.device,
+    batch_size: int,
+) -> tuple[Tensor, Tensor]:
     """提取四方向旋转的平均 DINO 特征。"""
     transform = crop_transform(False)
     features: list[Tensor] = []
@@ -66,7 +89,9 @@ def _extract(backbone: nn.Module, rows: list[dict[str, Any]], policy: FSCVerifie
             batch_features: list[Tensor] = []
             for view in rotated:
                 output = backbone.forward_features(view.to(device))
-                batch_features.append(torch.cat((output["x_norm_clstoken"], output["x_norm_patchtokens"].mean(dim=1)), dim=1))
+                batch_features.append(
+                    torch.cat((output["x_norm_clstoken"], output["x_norm_patchtokens"].mean(dim=1)), dim=1)
+                )
             features.append(torch.stack(batch_features).mean(dim=0).float().cpu())
         labels.extend(int(row["label"]) for row in chunk)
     return torch.cat(features), torch.tensor(labels, dtype=torch.long)
@@ -86,7 +111,7 @@ def _metrics(logits: Tensor, labels: Tensor) -> dict[str, float]:
 def main() -> None:
     """训练并保存旋转不变分类头。"""
     args = _parse_args()
-    cache, train_rows, val_rows = _load(Path(args.cache).resolve())
+    cache, train_rows, val_rows = _load(Path(args.cache).resolve(), args.train_only_holdout)
     if args.negative_weight <= 0:
         raise ValueError("negative-weight 必须为正数")
     policy = FSCVerifierPolicy.from_mapping(cache["metadata"]["policy"])
@@ -127,6 +152,7 @@ def main() -> None:
         "train_count": len(train_rows),
         "val_count": len(val_rows),
         "negative_weight": args.negative_weight,
+        "holdout_source": "仅 cache train，按 image name SHA256" if args.train_only_holdout else "cache train/val",
         "selection": "验证集固定 argmax，不搜索阈值",
         "best": best,
     }
