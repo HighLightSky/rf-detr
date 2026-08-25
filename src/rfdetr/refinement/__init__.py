@@ -12,6 +12,7 @@ from rfdetr.refinement.fsc_two_stage import (
     FSCVerifierPolicy,
     crop_fsc_context,
     crop_transform,
+    iou_xyxy,
     label_fsc_candidate,
     pool_dino_features,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "FSCVerifierPolicy",
     "crop_fsc_context",
     "crop_transform",
+    "iou_xyxy",
     "label_fsc_candidate",
     "pool_dino_features",
 ]

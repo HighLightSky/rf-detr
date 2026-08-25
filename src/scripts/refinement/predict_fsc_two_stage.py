@@ -23,7 +23,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from rfdetr import RFDETR  # noqa: E402
-from rfdetr.refinement import FSCScoreFusion, FSCDinoHead, FSCVerifier, FSCVerifierPolicy, crop_fsc_context, crop_transform, pool_dino_features  # noqa: E402
+from rfdetr.refinement import FSCScoreFusion, FSCDinoHead, FSCVerifier, FSCVerifierPolicy, crop_fsc_context, crop_transform, iou_xyxy, pool_dino_features  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -58,6 +58,16 @@ def _draw(image: np.ndarray, boxes: np.ndarray, scores: np.ndarray, path: Path, 
         cv2.rectangle(canvas, (x0, y0), (x1, y1), color, 2)
         cv2.putText(canvas, f"FSC {float(score):.3f}", (x0, max(y0 - 5, 14)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
     cv2.imwrite(str(path), canvas)
+
+
+def _nms_indices(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float = 0.5) -> np.ndarray:
+    """对同一类别候选执行置信度优先 NMS。"""
+    order = np.argsort(-scores)
+    kept: list[int] = []
+    for index in order.tolist():
+        if all(iou_xyxy(tuple(boxes[index]), tuple(boxes[chosen])) <= iou_threshold for chosen in kept):
+            kept.append(index)
+    return np.asarray(kept, dtype=np.int64)
 
 
 def main() -> None:
@@ -96,8 +106,10 @@ def main() -> None:
         class_ids = np.asarray(detections.class_id, dtype=np.int64)
         fsc_mask = class_ids == verifier.policy.fsc_class_id
         raw_boxes, raw_scores = boxes[fsc_mask], scores[fsc_mask]
+        raw_keep = _nms_indices(raw_boxes, raw_scores)
+        fsc_indices = np.flatnonzero(fsc_mask)[raw_keep]
+        raw_boxes, raw_scores = boxes[fsc_indices], scores[fsc_indices]
         if dino_head is not None and dino_encoder is not None and dino_transform is not None:
-            fsc_indices = np.flatnonzero(class_ids == verifier.policy.fsc_class_id)
             crops = [
                 dino_transform(crop_fsc_context(image, boxes[index], dino_policy.context_scale, dino_policy.image_size))
                 for index in fsc_indices
@@ -112,9 +124,10 @@ def main() -> None:
                     dino_features = pool_dino_features(dino_encoder(crop_batch), pooling)
                 decisions = dino_head(dino_features).argmax(dim=1).cpu().numpy()
             keep = np.ones(len(class_ids), dtype=bool)
+            keep[np.flatnonzero(fsc_mask)] = False
             keep[fsc_indices] = decisions == 1
             out_boxes, out_scores, out_classes = boxes[keep], scores[keep], class_ids[keep]
-            audit = {"routed_fsc": int(len(fsc_indices)), "kept": int(keep.sum()), "rejected_non_fsc": int((decisions == 0).sum()), "unchanged": int(keep.sum() - (decisions == 1).sum())}
+            audit = {"routed_fsc": int(len(fsc_indices)), "kept": int(keep.sum()), "rejected_non_fsc": int((decisions == 0).sum()), "unchanged": int(keep.sum() - (decisions == 1).sum()), "nms_suppressed": int(fsc_mask.sum() - len(fsc_indices))}
         elif fusion is None:
             out_boxes, out_scores, out_classes, audit = verifier.refine_image(image, boxes, scores, class_ids)
         else:
