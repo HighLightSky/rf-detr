@@ -44,16 +44,19 @@ class EvalResult:
     recall: float = field(init=False)
     fdr: float = field(init=False)
     precision: float = field(init=False)
+    f1: float = field(init=False)
 
     def __post_init__(self):
-        """根据 TP/FP/FN 自动计算召回率、虚警率和精确率。"""
+        """根据 TP/FP/FN 自动计算召回率、虚警率、精确率和 F1。"""
         recall = self.tp / (self.tp + self.fn) if self.tp + self.fn > 0 else 0.0
         fdr = self.fp / (self.fp + self.tp) if self.fp + self.tp > 0 else 0.0
         precision = self.tp / (self.tp + self.fp) if self.tp + self.fp > 0 else 0.0
+        f1 = 2 * self.tp / (2 * self.tp + self.fp + self.fn) if 2 * self.tp + self.fp + self.fn > 0 else 0.0
 
         object.__setattr__(self, "recall", recall)
         object.__setattr__(self, "fdr", fdr)
         object.__setattr__(self, "precision", precision)
+        object.__setattr__(self, "f1", f1)
 
 
 def xywhn_to_xyxy(

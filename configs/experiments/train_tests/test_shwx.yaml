@@ -4,12 +4,12 @@ test:
   dataset: shwx # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
   dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test
   resolution: 1024
-  checkpoint: output/0825发射车虚警抑制/原型前向加难负样本抑制/last_ema.pth
+  checkpoint: output/0825发射车虚警抑制/原型前向加难负样本抑制/checkpoint_best_total.pth
   output_dir: output/0825发射车虚警抑制/原型前向加难负样本抑制
   conf_threshold: 0.25 # 全局置信度阈值
   class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}；可整段贴入 calibrate_thresholds 产物
   device: cuda:0 # 无 CUDA 时自动回退 CPU
-  batch_size: 32 # GPU 单次前向图像数
+  batch_size: 16 # GPU 单次前向图像数
   num_workers: 12 # CPU 预取 worker 数
   prefetch_factor: 3
   precision: auto

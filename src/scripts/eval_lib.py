@@ -697,7 +697,7 @@ def format_eval_line(name: str, result: EvalResult) -> str:
     """
     return (
         f"{name:<11s}TP={result.tp:<7d}FP={result.fp:<7d}FN={result.fn:<7d}"
-        f"Recall={result.recall:.4f} FDR={result.fdr:.4f} Precision={result.precision:.4f}"
+        f"Recall={result.recall:.4f} FDR={result.fdr:.4f} Precision={result.precision:.4f} F1={result.f1:.4f}"
     )
 
 
@@ -711,8 +711,8 @@ def format_macro_line(name: str, macro: Mapping[str, float]) -> str:
 
     Args:
         name: 大类名（如 ``ship``/``aircraft``/``vehicle``）或 ``total``。
-        macro: 含 ``avg_tp``/``avg_fp``/``avg_fn``/``recall``/``fdr``/``precision``
-            六项的 macro 平均指标。
+        macro: 含 ``avg_tp``/``avg_fp``/``avg_fn``/``recall``/``fdr``/``precision``/``f1``
+            七项的 macro 平均指标。
 
     Returns:
         格式化后的 macro 平均结果行。
@@ -720,7 +720,8 @@ def format_macro_line(name: str, macro: Mapping[str, float]) -> str:
     return (
         f"{name:<11s}avgTP={macro['avg_tp']:.2f} avgFP={macro['avg_fp']:6.2f} "
         f"avgFN={macro['avg_fn']:6.2f} avgRecall={macro['recall']:.4f} "
-        f"avgFDR={macro['fdr']:.4f} avgPrecision={macro['precision']:.4f}"
+        f"avgFDR={macro['fdr']:.4f} avgPrecision={macro['precision']:.4f} "
+        f"avgF1={macro.get('f1', 0.0):.4f}"
     )
 
 
@@ -743,7 +744,7 @@ def compute_group_macro_averages(
 
     Returns:
         ``{大类名: {"avg_tp": ..., "avg_fp": ..., "avg_fn": ..., "recall": ...,
-        "fdr": ..., "precision": ...}}``，大类顺序按其内最小类别 id 升序排列
+        "fdr": ..., "precision": ..., "f1": ...}}``，大类顺序按其内最小类别 id 升序排列
         （即舰船→飞机→车辆）。
     """
     # 把 {类别id: 大类} 反转为 {大类: [类别id]}，类别 id 升序
@@ -769,6 +770,7 @@ def compute_group_macro_averages(
             "recall": sum(result.recall for result in class_results) / num_classes,
             "fdr": sum(result.fdr for result in class_results) / num_classes,
             "precision": sum(result.precision for result in class_results) / num_classes,
+            "f1": sum(result.f1 for result in class_results) / num_classes,
         }
     return group_macro
 
@@ -780,13 +782,16 @@ def compute_total_metrics(group_macro: Mapping[str, Mapping[str, float]]) -> dic
         group_macro: ``compute_group_macro_averages`` 的返回结果。
 
     Returns:
-        与单大类 macro 相同键结构的六项总指标。
+        与单大类 macro 相同键结构的七项总指标。
     """
-    metric_keys = ("avg_tp", "avg_fp", "avg_fn", "recall", "fdr", "precision")
+    metric_keys = ("avg_tp", "avg_fp", "avg_fn", "recall", "fdr", "precision", "f1")
     num_groups = len(group_macro)
     if num_groups == 0:
         return {key: 0.0 for key in metric_keys}
-    return {key: sum(group[key] for group in group_macro.values()) / num_groups for key in metric_keys}
+    return {
+        key: sum(group.get(key, 0.0) for group in group_macro.values()) / num_groups
+        for key in metric_keys
+    }
 
 
 def filter_auxiliary_metric_records(

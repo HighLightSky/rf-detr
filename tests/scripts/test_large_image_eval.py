@@ -94,6 +94,49 @@ def test_build_test_report_includes_large_image_timing(tmp_path: Path) -> None:
     assert any("大图目标检测" in line and "平均 1.25s" in line and "最大 2.00s" in line for line in lines)
 
 
+def test_f1_is_reported_for_class_and_macro_levels(tmp_path: Path) -> None:
+    """报告应保存逐类 F1，并按小类及大类层级计算宏平均。"""
+    dataset = eval_lib.build_dataset_cfg("shwx", root=tmp_path, output_dir="output/x")
+    per_class_results = {
+        "HM": eval_lib.EvalResult(tp=3, fp=1, fn=0),
+        "LQS": eval_lib.EvalResult(tp=1, fp=0, fn=1),
+        "QHS": eval_lib.EvalResult(tp=0, fp=1, fn=1),
+        "MS": eval_lib.EvalResult(tp=0, fp=0, fn=0),
+        "FSC": eval_lib.EvalResult(tp=2, fp=0, fn=2),
+    }
+    group_macro = eval_lib.compute_group_macro_averages(
+        per_class_results,
+        eval_lib.build_metric_class_to_group(dataset),
+        dataset.class_names,
+    )
+    total_macro = eval_lib.compute_total_metrics(group_macro)
+
+    assert per_class_results["HM"].f1 == 0.8571428571428571
+    ship_f1 = sum(per_class_results[name].f1 for name in ("HM", "LQS", "QHS", "MS")) / 4
+    assert group_macro["ship"]["f1"] == ship_f1
+    assert total_macro["f1"] == sum(group["f1"] for group in group_macro.values()) / 3
+
+    lines = eval_lib.build_test_report(
+        dataset_name="shwx",
+        checkpoint_path=Path("/tmp/ckpt.pth"),
+        test_image_paths=[],
+        gt_records=[],
+        pred_records=[],
+        throughput=0.0,
+        timed_images=0,
+        gpu_util=None,
+        eval_results={"all": eval_lib.EvalResult(0, 0, 0), "groups": {}},
+        group_macro=group_macro,
+        total_macro=total_macro,
+        per_class_results={"groups": per_class_results},
+        dataset=dataset,
+        infer=eval_lib.InferenceCfg(),
+    )
+    assert any("HM" in line and "F1=0.8571" in line for line in lines)
+    assert any("ship" in line and "avgF1=" in line for line in lines)
+    assert any("total" in line and "avgF1=" in line for line in lines)
+
+
 def test_truck_is_excluded_from_group_macro_but_retained_per_class(tmp_path: Path) -> None:
     """truck 仅显示逐类指标，不参与车辆大类和总指标。"""
     dataset = eval_lib.build_dataset_cfg("shwx_truck", root=tmp_path)
