@@ -156,6 +156,29 @@ class TestBuildTrainerCallbacks:
         assert early_stop_cb._monitor_ema is None
         assert early_stop_cb._use_ema is False
 
+    def test_detection_f1_class_groups_are_forwarded_to_eval_callback(self, tmp_path):
+        """F1 类别分组应传递给 COCO 评估回调。"""
+        groups = {"ship": [0, 1, 2, 3], "aircraft": [4, 5], "vehicle": [24]}
+        trainer = build_trainer(_tc(tmp_path, best_metric="f1", f1_class_groups=groups), _mc())
+        eval_cb = next(cb for cb in trainer.callbacks if cb.__class__.__name__ == "COCOEvalCallback")
+
+        assert eval_cb._f1_class_groups == groups
+
+    def test_detection_f1_group_iou_thresholds_are_forwarded_to_eval_callback(self, tmp_path):
+        """F1 分组 IoU 阈值应传递给 COCO 评估回调。"""
+        trainer = build_trainer(
+            _tc(
+                tmp_path,
+                best_metric="f1",
+                f1_class_groups={"vehicle": [24]},
+                f1_group_iou_thresholds={"vehicle": 0.35},
+            ),
+            _mc(),
+        )
+        eval_cb = next(cb for cb in trainer.callbacks if cb.__class__.__name__ == "COCOEvalCallback")
+
+        assert eval_cb._f1_class_iou_thresholds == {24: 0.35}
+
     def test_detection_f1_rejects_ema_only_validation(self, tmp_path):
         """F1 选择拒绝仅 EMA 验证，避免保存未被验证的 regular 权重。"""
         with pytest.raises(ValueError, match="best_metric='f1'"):

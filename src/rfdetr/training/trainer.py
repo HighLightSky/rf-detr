@@ -561,6 +561,8 @@ def build_trainer(
             log_per_class_metrics=tc.log_per_class_metrics,
             keypoint_oks_sigmas=tc.keypoint_oks_sigmas,
             eval_ema_only=tc.eval_ema_only,
+            f1_class_groups=tc.f1_class_groups,
+            f1_group_iou_thresholds=tc.f1_group_iou_thresholds,
         )
     )
 

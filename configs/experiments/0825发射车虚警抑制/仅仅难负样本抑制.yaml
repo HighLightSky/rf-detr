@@ -1,0 +1,71 @@
+# 仅启用发射车难负样本抑制，不启用类别原型前向引导。
+model:
+  variant: medium
+  num_classes: 25
+  resolution: 1024
+  gradient_checkpointing: true
+  pretrain_weights: output/0824-rfdetr-final-baseline/checkpoint_best_total.pth
+
+  # 多模态原型前向引导
+  proto_guidance_enabled: false
+
+train:
+  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand
+  dataset_file: yolo
+  output_dir: output/0825发射车虚警抑制/仅仅难负样本抑制
+  epochs: 10
+  batch_size: 32
+  grad_accum_steps: 2
+  num_workers: 6
+  lr: 1e-5
+  lr_encoder: 1e-5
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  lr_scheduler: step
+  lr_scheduler_kwargs: {lr_drop: 8}
+  warmup_epochs: 0.0
+  seed: 42
+  tensorboard: true
+  wandb: false
+  devices: 1
+  num_nodes: 1
+  resume: ""
+  eval_interval: 1
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.0
+  multi_scale: false
+
+  # 类均衡采样与数据增强控制
+  class_balanced_sampling: true
+  class_balanced_class_ids: [0, 1, 24]
+  patch_paste_enabled: false
+
+  # SSCL 装配入口
+  sscl_enabled: true
+  sscl_semantic_matrix_path: data/semantic_matrix_shwx.pt
+  sscl_lambda: 0.0
+  sscl_prototype_enabled: false
+
+  # 难负样本抑制
+  sscl_hard_neg_enabled: true
+  sscl_hard_neg_topk: 5
+  sscl_hard_neg_score_thresh: -0.7
+  sscl_hard_neg_log_interval: 100
+  sscl_hard_neg_target_classes: [24]
+  sscl_hard_neg_iou_low: 0.0
+  sscl_hard_neg_iou_high: 0.15
+  sscl_hard_neg_loss_lambda: 0.3
+  sscl_hard_neg_logit_margin: -1.5
+  sscl_hard_neg_target_logit_margins: {24: -2.5}
+  sscl_hard_neg_target_loss_lambdas: {24: 0.15}
+  sscl_hard_neg_logit_temperature: 1.0
+  sscl_hard_neg_proto_lambda: 0.0
+  sscl_hard_neg_proto_margin: 0.1
+  sscl_hard_neg_proto_temperature: 0.1
+  sscl_hard_neg_start_epoch: 2
+  sscl_hard_neg_require_class_absent: false
+
+  # 统一全量微调
+  sscl_freeze_strategy: none

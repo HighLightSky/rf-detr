@@ -60,6 +60,9 @@ train:
   # ── EMA / 验证 / 恢复 ──────────────────────────────────────────
   use_ema: true
   best_metric: map # 普通检测 best 指标：f1 或 map；默认 map
+  # best_metric=f1 时可按组内类别平均、再按组间平均；null 表示不分组
+  # f1_class_groups: {ship: [0, 1, 2, 3], aircraft: [4, 5], vehicle: [24]}
+  # f1_group_iou_thresholds: {ship: 0.50, aircraft: 0.50, vehicle: 0.35}
   eval_interval: 1
   compute_val_loss: false # 关闭验证 loss 计算省显存
   resume: "" # last.ckpt 路径（相对项目根）实现续训

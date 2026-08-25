@@ -124,6 +124,8 @@ For example, `RFDETRSegXLarge` uses `624x624`, which is valid because `624` is d
 | --------------------- | ----- | ------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `checkpoint_interval` | `int` | `10`    | Frequency (in epochs) at which model checkpoints are saved. More frequent saves provide better coverage but consume more storage.      |
 | `best_metric`         | `"f1"` / `"map"` | `"map"` | Best-checkpoint metric for ordinary detection models. `map` monitors COCO `val/mAP_50_95` and preserves regular/EMA mAP selection; `f1` monitors `val/F1`. Segmentation and keypoint models keep their task-specific metrics. |
+| `f1_class_groups`     | `dict[str, list[int]] \| null` | `null` | Optional F1 groups in the form `{group: [class_id, ...]}`. With groups, F1 is averaged within each group and then across groups; `null` keeps the all-class macro-F1 behavior. |
+| `f1_group_iou_thresholds` | `dict[str, float] \| null` | `null` | Optional IoU threshold for each F1 group. Classes in groups without an explicit threshold use 0.50; e.g. set `vehicle: 0.35` for the competition rule. |
 | `skip_best_epochs`    | `int` | `0`     | Ignore the first N epochs when tracking best checkpoints and early-stopping patience. Useful when fine-tuning from a prior checkpoint. |
 
 ### Checkpoint Files
@@ -287,6 +289,8 @@ Below is a summary table of all training parameters:
 | `gradient_checkpointing`     | bool                | False          | Trade compute for memory during backprop.                                                                                             |
 | `checkpoint_interval`        | int                 | 10             | Save checkpoint every N epochs.                                                                                                       |
 | `best_metric`                | `"f1"` / `"map"`    | `"map"`         | Best-checkpoint metric for ordinary detection; `map` monitors `val/mAP_50_95` with regular/EMA mAP selection, while `f1` monitors `val/F1`. Other model families keep task-specific metrics. |
+| `f1_class_groups`            | `dict[str, list[int]] \| null` | `null` | Optional F1 groups in the form `{group: [class_id, ...]}`. With groups, F1 is averaged within each group and then across groups; `null` keeps the all-class macro-F1 behavior. |
+| `f1_group_iou_thresholds`    | `dict[str, float] \| null` | `null` | Optional IoU threshold for each F1 group; unconfigured groups/classes use 0.50. |
 | `resume`                     | str                 | None           | Path to checkpoint for resuming training.                                                                                             |
 | `tensorboard`                | bool                | True           | Enable TensorBoard logging.                                                                                                           |
 | `wandb`                      | bool                | False          | Enable Weights & Biases logging.                                                                                                      |

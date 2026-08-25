@@ -1,14 +1,17 @@
 # SHWX 单图/批量推理配置
 # 用法:
-#   python src/scripts/predict.py -c configs/experiments/predict_shwx.yaml --image /path/to/image.jpg
-#   python src/scripts/predict.py -c configs/experiments/predict_shwx.yaml --image /path/to/folder --conf 0.3
+#   python src/scripts/predict.py -c configs/experiments/train_tests/predict_shwx.yaml
 predict:
-  checkpoint: output/0822-rfdetr-final-baseline/checkpoint_best_total.pth
+  checkpoint: output/0824-rfdetr-final-baseline/inference_checkpoint_89.pth
   # 相对项目根路径
   conf: 0.25
-  output_dir: output/0824-航母两栖船增广
-  image: /home/liu/wzt/datasets/SHWX-FINAL-truck/images/train/fsc_TG-N25.20-E121.42-lv20-Google_crop0001.jpg
+  output_dir: output/0825-重标注参考
+  image: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand/images/train/
   class_names: shwx # 类别名来源：内置名 shwx/shwx_truck/dior，或 {label: 名称} 字典
+  label_comparison:
+    enabled: true
+    labels_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand/labels/train/
+    iou_threshold: 0.50 # 同类别预测与标签匹配阈值
   reason_plugin:
     enabled: false # 默认关闭；仅改为 true 时启用插件
     checkpoint: null # 插件 checkpoint 路径，例如 output/reason_plugin.pth

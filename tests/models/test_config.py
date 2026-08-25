@@ -227,6 +227,58 @@ class TestTrainConfigRejectsUnknownKwargs:
         with pytest.raises(ValidationError):
             TrainConfig(dataset_dir=str(tmp_path), output_dir=str(tmp_path), best_metric="precision")
 
+    def test_f1_class_groups_default_to_no_grouping(self, tmp_path) -> None:
+        """F1 分组默认关闭。"""
+        config = TrainConfig(dataset_dir=str(tmp_path), output_dir=str(tmp_path))
+
+        assert config.f1_class_groups is None
+
+    def test_f1_class_groups_accept_valid_groups(self, tmp_path) -> None:
+        """TrainConfig 接受非重叠的 F1 类别分组。"""
+        groups = {"ship": [0, 1], "aircraft": [2, 3], "vehicle": [24]}
+        config = TrainConfig(dataset_dir=str(tmp_path), output_dir=str(tmp_path), f1_class_groups=groups)
+
+        assert config.f1_class_groups == groups
+
+    def test_f1_class_groups_reject_duplicate_class_ids(self, tmp_path) -> None:
+        """同一类别不能重复归入多个 F1 分组。"""
+        with pytest.raises(ValidationError, match="不能同时属于多个 F1 分组"):
+            TrainConfig(
+                dataset_dir=str(tmp_path),
+                output_dir=str(tmp_path),
+                f1_class_groups={"ship": [0, 1], "aircraft": [1, 2]},
+            )
+
+    def test_f1_group_iou_thresholds_accept_values_in_unit_interval(self, tmp_path) -> None:
+        """F1 分组 IoU 阈值接受 (0, 1] 范围内的数值。"""
+        config = TrainConfig(
+            dataset_dir=str(tmp_path),
+            output_dir=str(tmp_path),
+            f1_class_groups={"vehicle": [24]},
+            f1_group_iou_thresholds={"vehicle": 0.35},
+        )
+
+        assert config.f1_group_iou_thresholds == {"vehicle": 0.35}
+
+    @pytest.mark.parametrize("threshold", [0.0, 1.1])
+    def test_f1_group_iou_thresholds_reject_invalid_values(self, tmp_path, threshold: float) -> None:
+        """F1 分组 IoU 阈值拒绝区间外的数值。"""
+        with pytest.raises(ValidationError, match="f1_group_iou_thresholds"):
+            TrainConfig(
+                dataset_dir=str(tmp_path),
+                output_dir=str(tmp_path),
+                f1_group_iou_thresholds={"vehicle": threshold},
+            )
+
+    def test_f1_group_iou_thresholds_require_matching_groups(self, tmp_path) -> None:
+        """F1 IoU 阈值不能脱离类别分组单独配置。"""
+        with pytest.raises(ValidationError, match="必须同时配置 f1_class_groups"):
+            TrainConfig(
+                dataset_dir=str(tmp_path),
+                output_dir=str(tmp_path),
+                f1_group_iou_thresholds={"vehicle": 0.35},
+            )
+
     def test_typo_error_lists_available_parameters(self, tmp_path) -> None:
         """The rejection message includes the available parameter list so the typo is easy to fix."""
         with pytest.raises(ValidationError, match=r"Available parameter\(s\):.*epochs"):

@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 COLOR_GT = (255, 0, 0)  # 蓝色 — 真实框
 COLOR_TP = (0, 255, 0)  # 绿色 — 正确预测
 COLOR_FP = (0, 0, 255)  # 红色 — 虚警
-COLOR_FN_GT = (0, 165, 255)  # 橙色 — 漏检的真实框
+COLOR_FN_GT = COLOR_FP  # 红色 — 漏检的真实框
 COLOR_CROP = (255, 255, 0)  # 青色 — 大图裁窗边界
 
 # ── PIL 中文字体候选路径 ─────────────────────────────────────────────
@@ -96,7 +96,10 @@ def match_per_image_per_class(
     gt_records: list[BoxRecord],
     pred_records: list[BoxRecord],
     num_classes: int,
-    vehicle_class_ids: set[int],
+    vehicle_class_ids: set[int] | frozenset[int],
+    *,
+    default_iou_threshold: float = 0.50,
+    vehicle_iou_threshold: float = 0.35,
 ) -> tuple[
     dict[int, set[str]],
     dict[int, set[str]],
@@ -117,6 +120,8 @@ def match_per_image_per_class(
         pred_records: 预测框记录列表。
         num_classes: 总类别数。
         vehicle_class_ids: 车辆类别的类别 ID 集合（使用 IoU=0.35）。
+        default_iou_threshold: 非车辆类别的匹配 IoU 阈值。
+        vehicle_iou_threshold: 车辆类别的匹配 IoU 阈值。
 
     Returns:
         ``(fp_images, fn_images, fp_boxes, fn_boxes, tp_preds)`` 五元组：
@@ -150,7 +155,7 @@ def match_per_image_per_class(
             if not gts and not preds:
                 continue
 
-            iou_threshold = 0.35 if cls_id in vehicle_class_ids else 0.50
+            iou_threshold = vehicle_iou_threshold if cls_id in vehicle_class_ids else default_iou_threshold
 
             # 按置信度降序排列预测框
             sorted_preds = sorted(preds, key=lambda r: r.score if r.score is not None else 0.0, reverse=True)
@@ -207,6 +212,28 @@ def _draw_box_label(
     (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
     cv2.rectangle(img, (x1, y1 - th - 4), (x1 + tw + 2, y1), color, -1)
     cv2.putText(img, label, (x1 + 1, y1 - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+
+def _format_error_label(record: BoxRecord, error_type: str, class_names: dict[int, str]) -> str:
+    """生成带置信度的 FP/FN 可视化标签。
+
+    FN 对应未匹配真实框，不存在模型预测置信度，因此明确显示 ``N/A``。
+
+    Args:
+        record: 预测框或真实框记录。
+        error_type: 错误类型，只能为 ``"FP"`` 或 ``"FN"``。
+        class_names: 类别 ID 到名称的映射字典。
+
+    Returns:
+        用于绘制的错误标签。
+
+    Raises:
+        ValueError: 错误类型不受支持。
+    """
+    if error_type not in {"FP", "FN"}:
+        raise ValueError(f"不支持的错误类型: {error_type}")
+    confidence = f"{record.score:.3f}" if record.score is not None else "N/A"
+    return f"{class_names[record.class_id]}({error_type}) conf={confidence}"
 
 
 def load_image(image_id: str, test_image_paths: list[Path]) -> "cv2.Mat | None":
@@ -275,6 +302,68 @@ def _compose_side_by_side(
     return np.hstack((left_panel, right_panel))
 
 
+def save_label_comparison_visualizations(
+    fp_boxes: dict[str, list[BoxRecord]],
+    fn_boxes: dict[str, list[BoxRecord]],
+    tp_preds: dict[str, list[BoxRecord]],
+    all_gt: list[BoxRecord],
+    image_paths: list[Path],
+    class_names: dict[int, str],
+    output_dir: str | Path,
+) -> int:
+    """保存所有输入图像的标签与预测对比图。
+
+    左侧绘制真实框，漏检 FN 使用红色；右侧绘制预测框，TP 使用绿色、FP 使用
+    红色。FP 显示模型置信度，FN 因无对应预测而显示 ``conf=N/A``。
+
+    Args:
+        fp_boxes: ``{image_id: FP 预测框列表}``。
+        fn_boxes: ``{image_id: FN 真实框列表}``。
+        tp_preds: ``{image_id: TP 预测框列表}``。
+        all_gt: 所有真实标注框记录。
+        image_paths: 参与对比的图像路径列表。
+        class_names: 类别 ID 到名称的映射字典。
+        output_dir: 对比图输出目录。
+
+    Returns:
+        成功保存的图像数量。
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    gt_by_image: dict[str, list[BoxRecord]] = defaultdict(list)
+    for gt in all_gt:
+        gt_by_image[gt.image_id].append(gt)
+
+    saved_images = 0
+    for image_path in image_paths:
+        image_id = image_path.stem
+        image = cv2.imread(str(image_path))
+        if image is None:
+            continue
+
+        fn_records = set(fn_boxes.get(image_id, []))
+        labeled = image.copy()
+        for gt in gt_by_image.get(image_id, []):
+            x1, y1, x2, y2 = map(int, gt.xyxy)
+            if gt in fn_records:
+                _draw_box_label(labeled, x1, y1, x2, y2, _format_error_label(gt, "FN", class_names), COLOR_FN_GT)
+            else:
+                _draw_box_label(labeled, x1, y1, x2, y2, class_names[gt.class_id], COLOR_GT)
+
+        predicted = image.copy()
+        for tp in tp_preds.get(image_id, []):
+            x1, y1, x2, y2 = map(int, tp.xyxy)
+            _draw_box_label(predicted, x1, y1, x2, y2, class_names[tp.class_id], COLOR_TP)
+        for fp in fp_boxes.get(image_id, []):
+            x1, y1, x2, y2 = map(int, fp.xyxy)
+            _draw_box_label(predicted, x1, y1, x2, y2, _format_error_label(fp, "FP", class_names), COLOR_FP)
+
+        comparison = _compose_side_by_side(labeled, predicted, "GT（真实框）", "Pred（模型预测）")
+        if cv2.imwrite(str(output_dir / f"{image_id}.jpg"), comparison):
+            saved_images += 1
+    return saved_images
+
+
 def save_fp_fn_visualizations(
     fp_images: dict[int, set[str]],
     fn_images: dict[int, set[str]],
@@ -296,11 +385,11 @@ def save_fp_fn_visualizations(
     预测框的图，两张图各自顶部带中文标题条，方便上下/左右对照查看。保存结构::
 
         {fp_dir}/{类名}/{image_id}.jpg  — 左：GT 标注图；右：预测图（TP 绿色 / FP 红色）
-        {fn_dir}/{类名}/{image_id}.jpg  — 左：GT 标注图（FN 橙色）；右：预测图（TP 绿色 / FP 红色）
+        {fn_dir}/{类名}/{image_id}.jpg  — 左：GT 标注图（FN 红色）；右：预测图（TP 绿色 / FP 红色）
 
     传入 ``large_image_ids`` 与 ``large_errors_dir`` 时，属于大图且存在错误
     （FP 或 FN）的图像**只保存一张**到 ``{large_errors_dir}/{image_id}.jpg``：
-    左侧 GT（FN 橙色高亮）、右侧预测（TP 绿 / FP 红），并把裁窗边界（青色）
+    左侧 GT（FN 红色高亮）、右侧预测（TP 绿 / FP 红），并把裁窗边界（青色）
     叠加在预测区域上；不区分 FP/FN、不按类别分目录。小图仍按原有目录结构
     保存，互不混放。
 
@@ -370,7 +459,15 @@ def save_fp_fn_visualizations(
                 _draw_box_label(predicted, x1, y1, x2, y2, class_names[tp.class_id], COLOR_TP)
             for fp in fp_boxes.get(image_id, []):
                 x1, y1, x2, y2 = map(int, fp.xyxy)
-                _draw_box_label(predicted, x1, y1, x2, y2, f"{class_names[fp.class_id]}(FP)", COLOR_FP)
+                _draw_box_label(
+                    predicted,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    _format_error_label(fp, "FP", class_names),
+                    COLOR_FP,
+                )
 
             # 左右拼接对比图：左 GT 标注、右预测框（TP 绿 / FP 红），保存为单张
             combined = _compose_side_by_side(labeled, predicted, "GT（真实框）", "Pred（模型预测）")
@@ -388,13 +485,17 @@ def save_fp_fn_visualizations(
                 continue
 
             gts = gt_by_image.get(image_id, [])
-            fn_for_img = {b.class_id for b in fn_boxes.get(image_id, [])}
+            fn_for_img = set(fn_boxes.get(image_id, []))
 
-            # 标注图：GT 框，FN 用橙色高亮
+            # 标注图：GT 框，FN 用红色高亮
             labeled = img.copy()
             for gt in gts:
-                color = COLOR_FN_GT if gt.class_id in fn_for_img else COLOR_GT
-                label = f"{class_names[gt.class_id]}(FN)" if gt.class_id in fn_for_img else class_names[gt.class_id]
+                color = COLOR_FN_GT if gt in fn_for_img else COLOR_GT
+                label = (
+                    _format_error_label(gt, "FN", class_names)
+                    if gt in fn_for_img
+                    else class_names[gt.class_id]
+                )
                 x1, y1, x2, y2 = map(int, gt.xyxy)
                 _draw_box_label(labeled, x1, y1, x2, y2, label, color)
 
@@ -405,9 +506,17 @@ def save_fp_fn_visualizations(
                 _draw_box_label(predicted, x1, y1, x2, y2, class_names[tp.class_id], COLOR_TP)
             for fp in fp_boxes.get(image_id, []):
                 x1, y1, x2, y2 = map(int, fp.xyxy)
-                _draw_box_label(predicted, x1, y1, x2, y2, f"{class_names[fp.class_id]}(FP)", COLOR_FP)
+                _draw_box_label(
+                    predicted,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    _format_error_label(fp, "FP", class_names),
+                    COLOR_FP,
+                )
 
-            # 左右拼接对比图：左 GT 标注（FN 橙色）、右预测框（TP 绿 / FP 红），保存为单张
+            # 左右拼接对比图：左 GT 标注（FN 红色）、右预测框（TP 绿 / FP 红），保存为单张
             combined = _compose_side_by_side(labeled, predicted, "GT（真实框）", "Pred（模型预测）")
             cv2.imwrite(str(fn_dir / cls_name / f"{image_id}.jpg"), combined)
             total_fn_images += 1
@@ -420,13 +529,17 @@ def save_fp_fn_visualizations(
                 continue
 
             gts = gt_by_image.get(image_id, [])
-            fn_for_img = {b.class_id for b in fn_boxes.get(image_id, [])}
+            fn_for_img = set(fn_boxes.get(image_id, []))
 
-            # 标注图：GT 框，FN 用橙色高亮
+            # 标注图：GT 框，FN 用红色高亮
             labeled = img.copy()
             for gt in gts:
-                color = COLOR_FN_GT if gt.class_id in fn_for_img else COLOR_GT
-                label = f"{class_names[gt.class_id]}(FN)" if gt.class_id in fn_for_img else class_names[gt.class_id]
+                color = COLOR_FN_GT if gt in fn_for_img else COLOR_GT
+                label = (
+                    _format_error_label(gt, "FN", class_names)
+                    if gt in fn_for_img
+                    else class_names[gt.class_id]
+                )
                 x1, y1, x2, y2 = map(int, gt.xyxy)
                 _draw_box_label(labeled, x1, y1, x2, y2, label, color)
 
@@ -437,7 +550,15 @@ def save_fp_fn_visualizations(
                 _draw_box_label(predicted, x1, y1, x2, y2, class_names[tp.class_id], COLOR_TP)
             for fp in fp_boxes.get(image_id, []):
                 x1, y1, x2, y2 = map(int, fp.xyxy)
-                _draw_box_label(predicted, x1, y1, x2, y2, f"{class_names[fp.class_id]}(FP)", COLOR_FP)
+                _draw_box_label(
+                    predicted,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    _format_error_label(fp, "FP", class_names),
+                    COLOR_FP,
+                )
             for x0, y0, x1, y1 in large_crop_boxes.get(image_id, []):
                 _draw_box_label(predicted, int(x0), int(y0), int(x1), int(y1), "crop", COLOR_CROP)
 

@@ -11,11 +11,11 @@
   与 ``val.competition_metrics.load_yolo_predictions`` 读取的格式完全兼容。
 - **推理结果可视化**：``<output_dir>/visualization/<图像名>.jpg``，绘制预测框、
   类别名称与置信度。
+- **标签对比可视化**：配置 ``label_comparison`` 后输出
+  ``<output_dir>/label_comparison/<图像名>.jpg``；FP/FN 使用红色标记。
 
 用法：
-    python src/scripts/predict.py -c configs/experiments/predict_shwx.yaml --image /path/to/image.jpg
-    python src/scripts/predict.py --image img.jpg                 # 缺省 -c：内置默认 checkpoint
-    python src/scripts/predict.py -c ... --image folder --conf 0.3 --output-dir my_out
+    python src/scripts/predict.py -c configs/experiments/predict_shwx.yaml
 
 配置结构（predict: 段，详见 configs/experiments/README.md）：
 
@@ -25,8 +25,12 @@
       checkpoint: output/xxx/checkpoint_best_total.pth   # 相对项目根
       conf: 0.25
       output_dir: output/xxx/predict
-      image: null              # 通常由 --image 命令行提供
+      image: /path/to/images
       class_names: shwx        # 内置名 shwx/shwx_truck/dior，或 {label: 名称} 字典
+      label_comparison:
+        enabled: false
+        labels_dir: /path/to/yolo/labels
+        iou_threshold: 0.50
       reason_plugin:
         enabled: false         # 默认关闭；开启后才加载插件 checkpoint
         checkpoint: null       # 插件 checkpoint 路径
@@ -39,6 +43,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -55,12 +60,7 @@ from rfdetr.sscl.prompts import (  # noqa: E402
     SHWX_CLASS_NAMES,
     SHWX_TRUCK_CLASS_NAMES,
 )
-from scripts import expcfg  # noqa: E402
-
-# 缺省配置（不传 -c 时使用，保持向后兼容）
-DEFAULT_CHECKPOINT = "output/0807-SHWX-SSCL-Proj-原型+实例正样本/checkpoint_best_total.pth"
-DEFAULT_OUTPUT_DIR = "output/0807-SHWX-SSCL-Proj-原型+实例正样本/predict"
-DEFAULT_CONF_THRESHOLD = 0.25
+from scripts import eval_lib, expcfg  # noqa: E402
 
 # 细粒度类别名称映射：SHWX 类别 id 0-24 已连续，label 即 class_id
 _DEFAULT_CLASS_NAMES: dict[int, str] = {
@@ -138,24 +138,52 @@ def _build_reason_plugin_kwargs(predict_cfg: dict[str, object]) -> dict[str, obj
 
 
 def _parse_args() -> argparse.Namespace:
-    """解析命令行参数（--image 必填，其余可经 yaml/命令行覆盖）。"""
+    """解析命令行参数；推理参数全部从配置文件读取。"""
     parser = argparse.ArgumentParser(description="RF-DETR 统一推理模板（yaml 配置）")
     parser.add_argument(
         "-c",
         "--config",
         type=str,
-        default=None,
-        help="实验 yaml 配置文件路径；缺省使用内置默认 checkpoint",
+        required=True,
+        help="实验 yaml 配置文件路径，推理参数均在其中的 predict 段配置",
     )
-    parser.add_argument(
-        "--image",
-        type=str,
-        required=False,
-        help="输入图片路径，或包含图片的目录路径（自动扫描 .jpg/.jpeg/.png 批量推理）",
-    )
-    parser.add_argument("--conf", type=float, default=None, help="置信度阈值（覆盖 yaml）")
-    parser.add_argument("--output-dir", type=str, default=None, help="结果输出目录（覆盖 yaml）")
     return parser.parse_args()
+
+
+def _resolve_predict_settings(predict_cfg: dict[str, Any]) -> tuple[str, float, Path, str]:
+    """读取并校验推理所需的配置项。
+
+    Args:
+        predict_cfg: yaml ``predict`` 段解析后的配置。
+
+    Returns:
+        ``(checkpoint, conf_threshold, output_dir, image)``。
+
+    Raises:
+        ValueError: 必填项缺失或配置值类型、范围不正确。
+    """
+    required_values = {
+        "checkpoint": predict_cfg.get("checkpoint"),
+        "output_dir": predict_cfg.get("output_dir"),
+        "image": predict_cfg.get("image"),
+    }
+    for name, value in required_values.items():
+        if not isinstance(value, (str, Path)) or not str(value).strip():
+            raise ValueError(f"predict.{name} 必须在配置文件中设置")
+
+    conf_value = predict_cfg.get("conf")
+    if isinstance(conf_value, bool) or not isinstance(conf_value, (int, float)):
+        raise ValueError("predict.conf 必须是数字")
+    conf_threshold = float(conf_value)
+    if not 0.0 <= conf_threshold <= 1.0:
+        raise ValueError("predict.conf 必须位于 [0, 1]")
+
+    return (
+        str(required_values["checkpoint"]),
+        conf_threshold,
+        Path(required_values["output_dir"]),
+        str(required_values["image"]),
+    )
 
 
 def _xyxy_to_yolo(xyxy: np.ndarray, image_width: int, image_height: int) -> tuple[float, float, float, float]:
@@ -370,19 +398,14 @@ def main() -> None:
     """加载模型，对单张图片或整个目录中的图片推理并保存 YOLO 结果与可视化。"""
     args = _parse_args()
 
-    # ── 配置来源：yaml（可选）> 命令行覆盖 > 内置默认 ────────────────
-    predict_cfg: dict = {}
-    if args.config:
-        cfg = expcfg.load_config(args.config)
-        predict_cfg = expcfg.build_predict_kwargs(cfg)
-    checkpoint = predict_cfg.get("checkpoint") or DEFAULT_CHECKPOINT
-    conf_threshold = args.conf if args.conf is not None else predict_cfg.get("conf", DEFAULT_CONF_THRESHOLD)
-    output_dir = Path(args.output_dir or predict_cfg.get("output_dir") or DEFAULT_OUTPUT_DIR)
-    image_arg = args.image or predict_cfg.get("image")
-    if not image_arg:
-        raise SystemExit("缺少 --image 参数（或 yaml 的 predict.image）: 请输入图片路径或目录")
+    cfg = expcfg.load_config(args.config)
+    predict_cfg = expcfg.build_predict_kwargs(cfg)
+    checkpoint, conf_threshold, output_dir, image_arg = _resolve_predict_settings(predict_cfg)
 
     class_names = _resolve_class_names(predict_cfg.get("class_names", "shwx"))
+    label_comparison_cfg = eval_lib.LabelComparisonCfg.from_config(predict_cfg.get("label_comparison"))
+    if label_comparison_cfg is not None and not label_comparison_cfg.labels_dir.is_dir():
+        raise FileNotFoundError(f"YOLO 标签目录不存在: {label_comparison_cfg.labels_dir}")
     reason_plugin_kwargs = _build_reason_plugin_kwargs(predict_cfg)
     if reason_plugin_kwargs:
         print(f"[i] 启用 FFT 一致性插件: {reason_plugin_kwargs['reason_plugin']}")
@@ -397,6 +420,7 @@ def main() -> None:
     model = RFDETR.from_checkpoint(str(resolved_checkpoint))
 
     total_detections = 0
+    pred_records: list[eval_lib.BoxRecord] = []
     for index, image_path in enumerate(image_paths, start=1):
         xyxy_array, score_array, class_id_array, image_bgr, (width, height) = _infer_image(
             model,
@@ -414,6 +438,15 @@ def main() -> None:
             class_names,
         )
         total_detections += len(xyxy_array)
+        pred_records.extend(
+            eval_lib.BoxRecord(
+                image_id=image_path.stem,
+                class_id=int(class_id),
+                xyxy=tuple(float(value) for value in xyxy),
+                score=float(score),
+            )
+            for xyxy, score, class_id in zip(xyxy_array, score_array, class_id_array)
+        )
 
         if single_mode:
             # ── 单图模式：逐目标详细打印 ──────────────────────────────
@@ -431,6 +464,19 @@ def main() -> None:
         else:
             # ── 批量模式：逐张一行进度 ────────────────────────────────
             print(f"[{index:>4d}/{len(image_paths)}] {image_path.name}: {len(xyxy_array)} 个目标")
+
+    if label_comparison_cfg is not None:
+        comparison_dir = output_dir / "label_comparison"
+        saved_images, fp_count, fn_count = eval_lib.save_yolo_label_comparisons(
+            image_paths,
+            pred_records,
+            class_names,
+            comparison_dir,
+            label_comparison_cfg,
+        )
+        print(
+            f"[完成] 标签对比图: {comparison_dir}（{saved_images} 张，FP={fp_count}，FN={fn_count}）"
+        )
 
     if not single_mode:
         print("=" * 60)

@@ -2,10 +2,10 @@
 # 用法: python src/scripts/test.py -c configs/experiments/test_shwx.yaml
 test:
   dataset: shwx # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
-  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo-full_test
   resolution: 1024
-  checkpoint: output/0824-rfdetr-final-baseline/checkpoint_best_ema.pth
-  output_dir: output/0824-rfdetr-final-baseline
+  checkpoint: output/0825发射车虚警抑制/原型前向加难负样本抑制/last_ema.pth
+  output_dir: output/0825发射车虚警抑制/原型前向加难负样本抑制
   conf_threshold: 0.25 # 全局置信度阈值
   class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}；可整段贴入 calibrate_thresholds 产物
   device: cuda:0 # 无 CUDA 时自动回退 CPU

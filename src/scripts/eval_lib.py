@@ -58,6 +58,7 @@ from visualization.detection import (  # noqa: E402
     clear_vis_dirs,
     match_per_image_per_class,
     plot_confusion_matrix,
+    save_label_comparison_visualizations,
     save_fp_fn_visualizations,
 )
 
@@ -332,6 +333,51 @@ class ReasonPluginCfg:
         return cls(checkpoint=checkpoint, class_ids=class_ids, conf_low=conf_low)
 
 
+@dataclass(frozen=True)
+class LabelComparisonCfg:
+    """YOLO 标签对比可视化配置。
+
+    Attributes:
+        labels_dir: YOLO 格式标签目录。
+        iou_threshold: 同类别预测和真实框判定为 TP 的 IoU 阈值。
+    """
+
+    labels_dir: Path
+    iou_threshold: float = 0.50
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any] | None) -> LabelComparisonCfg | None:
+        """解析 ``predict.label_comparison`` 配置。
+
+        Args:
+            config: yaml 中的标签对比配置段。
+
+        Returns:
+            开启后的标签对比配置，未配置或关闭时返回 ``None``。
+
+        Raises:
+            ValueError: 配置类型、标签目录或 IoU 阈值不合法。
+        """
+        if config is None:
+            return None
+        if not isinstance(config, Mapping):
+            raise ValueError("predict.label_comparison 必须是字典配置")
+        if not bool(config.get("enabled", False)):
+            return None
+
+        labels_dir = config.get("labels_dir")
+        if not isinstance(labels_dir, (str, Path)) or not str(labels_dir).strip():
+            raise ValueError("predict.label_comparison.enabled=true 时必须设置 labels_dir")
+
+        iou_threshold = config.get("iou_threshold", 0.50)
+        if isinstance(iou_threshold, bool) or not isinstance(iou_threshold, (int, float)):
+            raise ValueError("predict.label_comparison.iou_threshold 必须是数字")
+        iou_threshold = float(iou_threshold)
+        if not 0.0 <= iou_threshold <= 1.0:
+            raise ValueError("predict.label_comparison.iou_threshold 必须位于 [0, 1]")
+        return cls(labels_dir=Path(labels_dir), iou_threshold=iou_threshold)
+
+
 @dataclass
 class LargeImageCfg:
     """大图切分测试配置（边界检测 → 裁切 → 目标检测 → 映射回原图）。
@@ -538,6 +584,63 @@ def save_yolo_predictions(
             lines.append(f"{r.class_id} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f} {r.score:.6f}")
         (output_dir / f"{image_id}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"[i] YOLO 预测已保存: {output_dir}（{len(by_image)} 个文件）")
+
+
+def save_yolo_label_comparisons(
+    image_paths: list[Path],
+    pred_records: list[BoxRecord],
+    class_names: dict[int, str],
+    output_dir: str | Path,
+    comparison_cfg: LabelComparisonCfg,
+) -> tuple[int, int, int]:
+    """加载 YOLO 标签并保存预测对比可视化。
+
+    所有输入图像均会输出一张左右对照图。左侧为真实标签，右侧为模型预测；
+    FP 和 FN 均以红色突出，其中 FP 显示预测置信度，FN 显示 ``conf=N/A``。
+
+    Args:
+        image_paths: 已完成预测的图像路径列表。
+        pred_records: 本次预测生成的检测框记录。
+        class_names: 类别 ID 到名称的映射字典。
+        output_dir: 对比图输出目录。
+        comparison_cfg: 标签路径和匹配阈值配置。
+
+    Returns:
+        ``(saved_images, fp_count, fn_count)``：保存图片数量、FP 框数量和 FN
+        框数量。
+
+    Raises:
+        FileNotFoundError: 标签目录不存在。
+    """
+    if not comparison_cfg.labels_dir.is_dir():
+        raise FileNotFoundError(f"YOLO 标签目录不存在: {comparison_cfg.labels_dir}")
+
+    image_size_map = build_image_size_map(image_paths)
+    gt_records = load_yolo_labels(comparison_cfg.labels_dir, image_size_map)
+    configured_class_ids = set(class_names)
+    unknown_class_ids = {record.class_id for record in gt_records + pred_records} - configured_class_ids
+    if unknown_class_ids:
+        raise ValueError(f"标签或预测包含未配置类别 ID: {sorted(unknown_class_ids)}")
+    num_classes = max(class_names, default=-1) + 1
+    fp_images, fn_images, fp_boxes, fn_boxes, tp_preds = match_per_image_per_class(
+        gt_records,
+        pred_records,
+        num_classes,
+        frozenset(),
+        default_iou_threshold=comparison_cfg.iou_threshold,
+    )
+    saved_images = save_label_comparison_visualizations(
+        fp_boxes,
+        fn_boxes,
+        tp_preds,
+        gt_records,
+        image_paths,
+        class_names,
+        output_dir,
+    )
+    fp_count = sum(len(boxes) for boxes in fp_boxes.values())
+    fn_count = sum(len(boxes) for boxes in fn_boxes.values())
+    return saved_images, fp_count, fn_count
 
 
 def resolve_device(device: str) -> str:

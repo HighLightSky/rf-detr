@@ -772,6 +772,14 @@ class RFDETR:
                     "switch to model_construct(_fields_set=...) for Pydantic v3 compatibility."
                 )
 
+        # 直接复用本次安全加载得到的 state_dict 重建离线语义头，避免评估入口再次读取 checkpoint。
+        try:
+            from rfdetr.sscl.semantic_head import attach_from_checkpoint
+
+            attach_from_checkpoint(model.model.model, _ckpt_weights)
+        except ModuleNotFoundError as exc:
+            if exc.name != "rfdetr.sscl.semantic_head":
+                raise
         return model
 
     @staticmethod

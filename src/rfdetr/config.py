@@ -1191,6 +1191,17 @@ class TrainConfig(BaseConfig):
     lr_drop: int = 100
     checkpoint_interval: int = Field(default=10, ge=1)
     best_metric: Literal["f1", "map"] = "map"
+    f1_class_groups: dict[str, list[int]] | None = Field(
+        default=None,
+        description=(
+            "F1 选权时的类别分组，格式为 {组名: [类别 ID]}；None 表示不分组，"
+            "直接对有标注类别求 macro-F1。"
+        ),
+    )
+    f1_group_iou_thresholds: dict[str, float] | None = Field(
+        default=None,
+        description="F1 分组匹配 IoU 阈值，格式为 {组名: 阈值}；未配置的组和类别使用 0.5。",
+    )
     skip_best_epochs: int = Field(default=0, ge=0)
     smooth_alpha: float = 0.0
     warmup_epochs: float = 0.0
@@ -1331,6 +1342,58 @@ class TrainConfig(BaseConfig):
         if isinstance(v, str):
             return _LEGACY_AUGMENTATION_BACKEND_ALIASES.get(v, v)
         return v
+
+    @field_validator("f1_class_groups")
+    @classmethod
+    def _validate_f1_class_groups(cls, value: dict[str, list[int]] | None) -> dict[str, list[int]] | None:
+        """校验 F1 分组名称、类别 ID 和组间重复关系。"""
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("f1_class_groups 不能为空；不分组时请使用 null")
+
+        seen_class_ids: set[int] = set()
+        for group_name, class_ids in value.items():
+            if not isinstance(group_name, str) or not group_name.strip():
+                raise ValueError("f1_class_groups 的组名必须是非空字符串")
+            if not class_ids:
+                raise ValueError(f"f1_class_groups[{group_name!r}] 不能是空列表")
+            normalized_ids: list[int] = []
+            for class_id in class_ids:
+                if isinstance(class_id, bool) or not isinstance(class_id, int) or class_id < 0:
+                    raise ValueError("f1_class_groups 的类别 ID 必须是非负整数")
+                if class_id in seen_class_ids:
+                    raise ValueError(f"类别 ID {class_id} 不能同时属于多个 F1 分组")
+                seen_class_ids.add(class_id)
+                normalized_ids.append(class_id)
+            value[group_name] = normalized_ids
+        return value
+
+    @field_validator("f1_group_iou_thresholds")
+    @classmethod
+    def _validate_f1_group_iou_thresholds(cls, value: dict[str, float] | None) -> dict[str, float] | None:
+        """校验 F1 分组匹配 IoU 阈值。"""
+        if value is None:
+            return None
+        for group_name, threshold in value.items():
+            if not isinstance(group_name, str) or not group_name.strip():
+                raise ValueError("f1_group_iou_thresholds 的组名必须是非空字符串")
+            if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0.0 < threshold <= 1.0:
+                raise ValueError("f1_group_iou_thresholds 的阈值必须位于 (0, 1]")
+            value[group_name] = float(threshold)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_f1_group_iou_threshold_names(self) -> "TrainConfig":
+        """确保 F1 IoU 阈值只引用已配置的类别分组。"""
+        if self.f1_group_iou_thresholds is None:
+            return self
+        if self.f1_class_groups is None:
+            raise ValueError("配置 f1_group_iou_thresholds 时必须同时配置 f1_class_groups")
+        unknown_groups = set(self.f1_group_iou_thresholds) - set(self.f1_class_groups)
+        if unknown_groups:
+            raise ValueError(f"f1_group_iou_thresholds 引用了不存在的分组: {sorted(unknown_groups)}")
+        return self
 
     @field_serializer("augmentation_backend")
     def _serialize_augmentation_backend(self, value: AugmentationBackend | str) -> str:

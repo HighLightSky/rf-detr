@@ -3,28 +3,11 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-"""FFT consistency-reasoning plugin (trained, CTRP-CRDe inspired).
+"""FFT 一致性 reason plugin。
 
-A trainable post-detection module that re-scores *blurry* candidate detections
-``B`` using *clear* reference detections ``A`` in the same image:
-
-- ``CandidateBuilder`` buckets the frozen detector's low-threshold candidates
-  into clear ``A`` (``score >= tau_high``) and blurry ``B``
-  (``conf_low <= score < conf_high``), pairs each ``B`` with its ``top_k``
-  nearest ``A`` boxes, and (in training) labels each pair by matching ``B``
-  against ground truth.
-- ``ConsistencyReasonPlugin`` encodes each ``A``/``B`` image patch with a
-  :class:`~rfdetr.reasoning.freq.FreqPatchEncoder`, derives a propagation gate
-  and a frequency-derived pairwise encoding from the spectra, and runs a
-  :class:`~rfdetr.reasoning.decoder.ConsistencyDecoder` that attends to the
-  detector's class-embedding matrix.  The decoder's per-pair logit is turned
-  into a bounded score adjustment (boost for likely-real missed objects,
-  suppression for likely-false alarms) applied on top of ``B``'s raw
-  confidence.
-
-The plugin is trained with the detector frozen: candidates come from a
-low-threshold pass of the baseline model, and the only learnable parameters
-belong to the FFT encoder, the gate/PE MLPs and the decoder.
+插件使用同一图片中的高置信候选 A 作为参考，对低置信候选 B 构造 Top-K pair，
+批量提取 A、B 和联合区域 patch，结合频域特征、空间关系和检测器类别嵌入进行重打分。
+检测器参数保持冻结，插件输出的调整分数再交给统一 runtime 按逐类阈值筛选。
 """
 
 from __future__ import annotations
@@ -133,7 +116,7 @@ class CandidateBuilder:
             return np.zeros((0, 2), dtype=np.int64)
         a_c = boxes[a_inds][:, :2]
         b_c = boxes[b_inds][:, :2]
-        # dist: (num_b, num_a) — L2 centre distance between every B and every A.
+        # 计算每个 B 与每个 A 之间的 L2 中心距离。
         dist = np.sqrt(((b_c[:, None, :] - a_c[None, :, :]) ** 2).sum(-1))
         k = min(self.config.top_k, a_inds.size)
         nearest_a = np.argsort(dist, axis=1)[:, :k]  # (num_b, k)
@@ -218,8 +201,7 @@ class ConsistencyReasonPlugin(nn.Module):
             freq_dim=config.freq_dim,
             patch_size=config.patch_size,
         )
-        # Gate: sigmoid over concat(Ffreq_A, Ffreq_B).  Bias initialised so the
-        # gate starts near 1 (free propagation) and does not perturb the baseline.
+        # 对 A、B 频域特征拼接结果计算传播门控，初始状态不改变基线分数。
         gate_head = nn.Linear(config.freq_dim, 1)
         self.gate_mlp = nn.Sequential(
             nn.Linear(config.freq_dim * 2, config.freq_dim),
@@ -228,12 +210,10 @@ class ConsistencyReasonPlugin(nn.Module):
         )
         nn.init.zeros_(gate_head.bias)  # sigmoid(0) = 0.5
 
-        # PE: |Ffreq_A - Ffreq_B| -> 4 dims replacing the angle dims.
+        # 将 A、B 频域特征的绝对差异编码为四维位置特征。
         self.pe_mlp = MLP(config.freq_dim, config.freq_dim, 4, 2)
 
-        # Joint-region visual encoder (RoI-feature stand-in): crops the A∪B
-        # union rectangle and encodes it with a small CNN — the visual base of
-        # the relation-pair feature that the original CTRP got from RoIAlign.
+        # 裁剪 A 与 B 的联合区域，用轻量 CNN 提取 pair 的视觉基础特征。
         self.joint_encoder = nn.Sequential(
             nn.Conv2d(3, 32, 3, padding=1),
             nn.ReLU(),
@@ -245,8 +225,7 @@ class ConsistencyReasonPlugin(nn.Module):
             nn.ReLU(),
         )
 
-        # Relation feature: inject all three sources —
-        #   roi_joint (visual base) + spatial_encoding (geometry) + freq (new clue)
+        # 拼接联合区域视觉特征、空间关系特征和频域差异特征。
         self.rel_feat_head = nn.Sequential(
             nn.Linear(config.freq_dim + config.freq_dim * 2 + 32, config.freq_dim),
             nn.ReLU(),
@@ -271,13 +250,11 @@ class ConsistencyReasonPlugin(nn.Module):
         boxes_b: Tensor,
         class_ids_a: Tensor,
         class_embed_weight: Tensor,
-        img_shape: tuple[int, int],
+        img_shape: tuple[int, int] | Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        """Compute per-pair corrections and gates.
+        """计算每个候选 pair 的分数调整、传播门控和高频比例。
 
-        The relation-pair query **injects** three sources (faithful to the
-        CTRP design): the joint-region visual feature (RoI base), the pairwise
-        spatial encoding (geometry), and the new frequency clue.
+        pair 查询由联合区域视觉特征、空间关系编码和频域差异特征共同构成。
 
         Args:
             a_patches: ``(P, 3, H, W)`` image patches of the clear targets A.
@@ -292,10 +269,7 @@ class ConsistencyReasonPlugin(nn.Module):
             img_shape: Image ``(height, width)`` for spatial normalisation.
 
         Returns:
-            ``(logits, gates, high_freq_ratios)``:
-            - ``logits`` ``(P,)`` raw per-pair scores before sigmoid.
-            - ``gates`` ``(P,)`` in ``[0, 1]`` — the propagation gates.
-            - ``high_freq_ratios`` ``(P,)`` in ``[0, 1]``.
+            依次返回 pair logits、范围为 0 到 1 的门控值和高频比例。
         """
         ffreq_a, _ = self.freq_encoder(a_patches)
         ffreq_b, high_freq = self.freq_encoder(b_patches)
@@ -307,21 +281,17 @@ class ConsistencyReasonPlugin(nn.Module):
         freq_diff_4d = self.pe_mlp((ffreq_a - ffreq_b).abs())  # (P, 4)
 
         spatial = build_spatial_prior(boxes_a, boxes_b, freq_diff_4d, img_shape)
-        # Semantic prior: subject class embedding per pair.
+        # 使用 A 的类别嵌入作为每个 pair 的语义先验。
         if class_ids_a.numel():
             category = class_embed_weight[class_ids_a]  # (P, hidden_dim)
         else:
             category = class_embed_weight.new_zeros((0, class_embed_weight.size(1)))
 
-        # ── inject: roi_joint (visual base) + spatial_encoding (geometry) + freq ──
+        # 拼接联合区域、空间关系和频域差异，形成 pair 查询。
         roi_joint = self.joint_encoder(joint_patches)  # (P, freq_dim)
         spatial_encoding = spatial["pairwise_feat"]  # (P, 32) geometry PE
         queries = self.rel_feat_head(torch.cat([roi_joint, spatial_encoding, freq_diff_feat], dim=-1))  # (P, freq_dim)
-        # Cross-attention KV = the CURRENT image's detected clear targets A
-        # (their class embeddings), so each blurry B is judged against the
-        # high-confidence objects actually present in this scene — a faithful
-        # "judge B by the A's detected here" design.  (The all-classes matrix
-        # would let B attend to classes that never appear in the image.)
+        # 交叉注意力只使用当前图片中清晰候选 A 的类别嵌入作为 KV。
         unique_a = torch.unique(class_ids_a)
         if unique_a.numel():
             scene_features = class_embed_weight[unique_a]  # (num_unique_A, kv_dim)
@@ -375,16 +345,10 @@ class ConsistencyReasonPlugin(nn.Module):
         """
         builder = CandidateBuilder(self.config)
         a_inds, b_inds = builder.split(candidate_boxes, candidate_scores)
-        # Only treat candidates BELOW the final threshold as "blurry B" to
-        # recover.  Candidates at/above target_conf are already output by the
-        # baseline; re-scoring them could push a correct detection below the
-        # threshold (mis-deleting a true positive).  Clip the B band's upper
-        # bound to target_conf so the plugin only ever *adds* detections, never
-        # removes ones the baseline already produced.
+        # 只重打分低于最终阈值的 B 候选，避免降低基线已经保留的正确检测。
         if b_inds.size:
             b_inds = b_inds[candidate_scores[b_inds] < target_conf]
-            # Optional class restriction: only re-score blurry B's of the listed
-            # classes; everything else keeps its baseline score untouched.
+            # 只对配置的类别重打分，其他类别保持 detector 原始分数。
             class_ids = self.config.reason_class_ids if reason_class_ids is None else reason_class_ids
             if class_ids is not None:
                 b_inds = b_inds[np.isin(candidate_classes[b_inds], class_ids)]
@@ -396,8 +360,7 @@ class ConsistencyReasonPlugin(nn.Module):
             if pairs.size:
                 a_idx = pairs[:, 0]
                 b_idx = pairs[:, 1]  # original candidate indices of B
-                # Position of each B within b_inds (which is a strict subset of
-                # candidate indices), used to accumulate per-B adjustments.
+                # 记录 B 在候选子集中的位置，用于聚合每个 B 的 pair 调整量。
                 b_pos = np.searchsorted(b_inds, b_idx)
                 a_patches = _crop_patches(source_image, boxes[a_idx])
                 b_patches = _crop_patches(source_image, boxes[b_idx])
@@ -418,11 +381,7 @@ class ConsistencyReasonPlugin(nn.Module):
                     class_embed_weight,
                     img_shape=(source_image.shape[0], source_image.shape[1]),
                 )
-                # Per-B adjustment: mean over its Top-K pairs.  The decoder's
-                # sigmoid probability is discriminative but not calibrated near
-                # 1 (GT-matched B ~0.2, false alarms ~0.08), so the natural
-                # decision line is ``p_threshold`` (well below 0.5): a B with
-                # p above it is boosted, below it is suppressed.
+                # 对同一 B 的 Top-K pair 调整量取均值，再回填候选分数。
                 prob = torch.sigmoid(logits).detach().cpu().numpy()
                 adjust = self.config.boost_scale * (prob - self.config.p_threshold)
                 per_b = np.zeros(b_inds.size, dtype=np.float32)
@@ -434,6 +393,114 @@ class ConsistencyReasonPlugin(nn.Module):
 
         keep = scores >= target_conf if filter_final else np.ones(scores.shape, dtype=bool)
         return boxes[keep], scores[keep], candidate_classes[keep]
+
+    @torch.inference_mode()
+    def predict_detections_batch(
+        self,
+        samples: list[dict[str, np.ndarray]],
+        class_names: list[str],
+        class_embed_weight: Tensor,
+        device: str,
+        *,
+        target_thresholds: list[float | np.ndarray] | None = None,
+        reason_class_ids: tuple[int, ...] | None = None,
+        filter_final: bool = True,
+    ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """合并多张图片的候选 pair，执行一次插件前向并按原图拆分结果。"""
+        if not samples:
+            return []
+        if target_thresholds is None:
+            target_thresholds = [self.config.conf_high] * len(samples)
+        if len(target_thresholds) != len(samples):
+            raise ValueError("target_thresholds 必须与 samples 数量一致")
+
+        builder = CandidateBuilder(self.config)
+        outputs: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        pair_inputs: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, np.ndarray]] = []
+        all_a: list[np.ndarray] = []
+        all_b: list[np.ndarray] = []
+        all_joint: list[np.ndarray] = []
+        all_boxes_a: list[np.ndarray] = []
+        all_boxes_b: list[np.ndarray] = []
+        all_classes_a: list[np.ndarray] = []
+        all_img_shapes: list[np.ndarray] = []
+        for sample, threshold_spec in zip(samples, target_thresholds):
+            boxes = sample["boxes"]
+            scores = sample["scores"]
+            classes = sample["classes"]
+            thresholds = (
+                np.full(scores.shape, float(threshold_spec), dtype=np.float32)
+                if np.isscalar(threshold_spec)
+                else np.asarray(threshold_spec, dtype=np.float32)
+            )
+            if thresholds.shape != scores.shape:
+                raise ValueError("每个候选的阈值数组必须与 scores 形状一致")
+            a_inds, b_inds = builder.split(boxes, scores)
+            b_inds = b_inds[scores[b_inds] < thresholds[b_inds]]
+            configured_ids = self.config.reason_class_ids if reason_class_ids is None else reason_class_ids
+            if configured_ids is not None:
+                b_inds = b_inds[np.isin(classes[b_inds], configured_ids)]
+            pairs = builder.pair_topk(boxes, a_inds, b_inds) if b_inds.size and a_inds.size else np.zeros((0, 2), dtype=np.int64)
+            if pairs.size == 0:
+                outputs.append((boxes, scores.copy(), classes))
+                pair_inputs.append((boxes, scores, classes, thresholds, np.zeros((0,), dtype=np.int64), 0, np.zeros((0,), dtype=np.int64)))
+                continue
+            a_idx, b_idx = pairs[:, 0], pairs[:, 1]
+            b_pos = np.searchsorted(b_inds, b_idx)
+            image = sample["image"]
+            all_a.append(_crop_patches(image, boxes[a_idx]))
+            all_b.append(_crop_patches(image, boxes[b_idx]))
+            all_joint.append(_crop_joint_patches(image, boxes[a_idx], boxes[b_idx]))
+            all_boxes_a.append(boxes[a_idx].astype(np.float32))
+            all_boxes_b.append(boxes[b_idx].astype(np.float32))
+            all_classes_a.append(classes[a_idx])
+            all_img_shapes.append(
+                np.tile(
+                    np.asarray(
+                        [[sample["image"].shape[0], sample["image"].shape[1]]],
+                        dtype=np.float32,
+                    ),
+                    (pairs.shape[0], 1),
+                )
+            )
+            pair_inputs.append((boxes, scores, classes, thresholds, b_pos, pairs.shape[0], b_inds))
+            outputs.append((boxes, scores.copy(), classes))
+
+        if all_a:
+            a_patches = torch.from_numpy(np.concatenate(all_a, axis=0)).to(device)
+            b_patches = torch.from_numpy(np.concatenate(all_b, axis=0)).to(device)
+            joint_patches = torch.from_numpy(np.concatenate(all_joint, axis=0)).to(device)
+            boxes_a = torch.from_numpy(np.concatenate(all_boxes_a, axis=0)).to(device)
+            boxes_b = torch.from_numpy(np.concatenate(all_boxes_b, axis=0)).to(device)
+            classes_a = torch.from_numpy(np.concatenate(all_classes_a, axis=0)).to(device)
+            image_shapes = torch.from_numpy(np.concatenate(all_img_shapes, axis=0)).to(device)
+            logits, _, _ = self.forward(
+                a_patches,
+                b_patches,
+                joint_patches,
+                boxes_a,
+                boxes_b,
+                classes_a,
+                class_embed_weight,
+                img_shape=image_shapes,
+            )
+            adjustment = self.config.boost_scale * (torch.sigmoid(logits).cpu().numpy() - self.config.p_threshold)
+            cursor = 0
+            for index, (boxes, scores, classes, thresholds, b_pos, pair_count, b_inds) in enumerate(pair_inputs):
+                if pair_count:
+                    pair_adjust = adjustment[cursor : cursor + pair_count]
+                    cursor += pair_count
+                    per_b = np.zeros(b_inds.size, dtype=np.float32)
+                    counts = np.zeros(b_inds.size, dtype=np.float32)
+                    np.add.at(per_b, b_pos, pair_adjust)
+                    np.add.at(counts, b_pos, 1.0)
+                    outputs[index][1][b_inds] = scores[b_inds] + per_b / np.maximum(counts, 1.0)
+
+        finalized: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        for boxes, scores, classes, thresholds, _, _, _ in pair_inputs:
+            keep = scores >= thresholds if filter_final else np.ones(scores.shape, dtype=bool)
+            finalized.append((boxes[keep], scores[keep], classes[keep]))
+        return finalized
 
 
 def _crop_patches(source_image: np.ndarray, boxes: np.ndarray, patch_size: int = 64) -> np.ndarray:
@@ -452,7 +519,7 @@ def _crop_patches(source_image: np.ndarray, boxes: np.ndarray, patch_size: int =
     h, w = source_image.shape[:2]
     patches: list[np.ndarray] = []
     for x1, y1, x2, y2 in boxes:
-        # Clamp to image bounds and enforce a minimum size to avoid empty crops.
+        # 将框限制在图像范围内，并保证 crop 具有最小尺寸。
         cx = max(0.0, min(float(w), (x1 + x2) / 2.0))
         cy = max(0.0, min(float(h), (y1 + y2) / 2.0))
         bw = max(2.0, float(x2 - x1))
@@ -464,7 +531,7 @@ def _crop_patches(source_image: np.ndarray, boxes: np.ndarray, patch_size: int =
         if x2c <= x1c or y2c <= y1c:
             x2c, y2c = x1c + 1, y1c + 1
         crop = source_image[y1c:y2c, x1c:x2c]
-        # Resize to (patch_size, patch_size) via PIL (bilinear, matches F.resize).
+        # 使用双线性插值将 patch 调整到固定尺寸。
         pil = Image.fromarray(crop).resize((patch_size, patch_size), Image.Resampling.BILINEAR)
         patches.append(np.asarray(pil, dtype=np.float32).transpose(2, 0, 1) / 255.0)
     return np.stack(patches, axis=0)
@@ -501,7 +568,7 @@ def _crop_joint_patches(
         y1 = min(ay1, by1)
         x2 = max(ax2, bx2)
         y2 = max(ay2, by2)
-        # Enforce a minimum size and clamp to image bounds.
+        # 生成联合区域时再次限制边界并保证最小尺寸。
         bw = max(2.0, float(x2 - x1))
         bh = max(2.0, float(y2 - y1))
         cx = max(0.0, min(float(w), (x1 + x2) / 2.0))
@@ -544,7 +611,7 @@ def mask_pixels(patch: np.ndarray, mask_fraction: float = 0.75) -> np.ndarray:
         >>> float((mask_pixels(p, 0.0) == 0).mean())  # mask_fraction=0 keeps all
         0.0
     """
-    # Per-pixel-channel Bernoulli mask: each element zeroed w.p. mask_fraction.
+    # 按像素和通道独立采样 Bernoulli 掩码并置零。
     mask = np.random.random(patch.shape) < mask_fraction
     masked = patch.copy()
     masked[mask] = 0

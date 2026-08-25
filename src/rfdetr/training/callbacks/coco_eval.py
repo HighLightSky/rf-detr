@@ -11,7 +11,7 @@ import contextlib
 import importlib
 import io
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 import numpy as np
@@ -105,6 +105,8 @@ class COCOEvalCallback(Callback):
     - Per-class ``val/AP/<name>`` when class names are available.
     - ``val/F1``, ``val/precision``, ``val/recall`` from a confidence-threshold
       sweep over compact per-class matching data (DDP-safe).
+      When ``f1_class_groups`` is configured, ``val/F1`` is the mean of the
+      per-group class-macro F1 values and each group is logged separately.
 
     For segmentation models (``segmentation=True``) additional metrics ``val/segm_mAP_50_95`` and ``val/segm_mAP_50``
     are logged.
@@ -118,6 +120,8 @@ class COCOEvalCallback(Callback):
             always computed when ``trainer.test()`` is called.
         log_per_class_metrics: When ``False``, skip per-class AP computation
             (``MeanAveragePrecision(class_metrics=False)``) as well as the per-class logging/table.
+        f1_class_groups: F1 扫描使用的组名到类别 ID 映射。
+        f1_group_iou_thresholds: F1 扫描使用的组名到 IoU 阈值映射。
         eval_ema_only: When ``True``, ``validation_step`` already forwarded through the EMA
             model directly (see ``TrainConfig.eval_ema_only``), so the independent duplicate
             EMA forward pass this callback would otherwise run every validation batch is
@@ -133,6 +137,8 @@ class COCOEvalCallback(Callback):
         keypoint_oks_sigmas: list[float] | None = None,
         in_notebook: bool | None = None,
         eval_ema_only: bool = False,
+        f1_class_groups: Mapping[str, Sequence[int]] | None = None,
+        f1_group_iou_thresholds: Mapping[str, float] | None = None,
     ) -> None:
         super().__init__()
         self._max_dets = max_dets
@@ -140,6 +146,16 @@ class COCOEvalCallback(Callback):
         self._eval_interval = max(1, int(eval_interval))
         self._log_per_class_metrics = bool(log_per_class_metrics)
         self._eval_ema_only = bool(eval_ema_only)
+        self._f1_class_groups = (
+            {group_name: list(class_ids) for group_name, class_ids in f1_class_groups.items()}
+            if f1_class_groups is not None
+            else None
+        )
+        self._f1_class_iou_thresholds = {
+            class_id: float((f1_group_iou_thresholds or {}).get(group_name, 0.5))
+            for group_name, class_ids in (self._f1_class_groups or {}).items()
+            for class_id in class_ids
+        }
         self._class_names: list[str] = []
         self._cat_id_to_name: dict[int, str] = {}
         self._f1_local: dict[int, dict[str, Any]] = init_matching_accumulator()
@@ -367,7 +383,13 @@ class COCOEvalCallback(Callback):
         self.map_metric_train.update(preds, targets)
 
         iou_type = "segm" if self._use_segm_metrics else "bbox"
-        batch_matching = build_matching_data(preds, targets, iou_threshold=0.5, iou_type=iou_type)
+        batch_matching = build_matching_data(
+            preds,
+            targets,
+            iou_threshold=0.5,
+            iou_type=iou_type,
+            class_iou_thresholds=self._f1_class_iou_thresholds,
+        )
         merge_matching_data(self._f1_train_local, batch_matching)
         self._update_keypoint_oks_metric(trainer, outputs, split="train")
 
@@ -447,7 +469,13 @@ class COCOEvalCallback(Callback):
             self.map_metric.update(preds, targets)
 
         iou_type = "segm" if self._use_segm_metrics else "bbox"
-        batch_matching = build_matching_data(preds, targets, iou_threshold=0.5, iou_type=iou_type)
+        batch_matching = build_matching_data(
+            preds,
+            targets,
+            iou_threshold=0.5,
+            iou_type=iou_type,
+            class_iou_thresholds=self._f1_class_iou_thresholds,
+        )
         merge_matching_data(self._f1_local, batch_matching)
         self._update_keypoint_oks_metric(trainer, outputs, split="val_ema" if used_ema_forward else "val")
 
@@ -537,7 +565,13 @@ class COCOEvalCallback(Callback):
         self.map_metric.update(preds, targets)
 
         iou_type = "segm" if self._use_segm_metrics else "bbox"
-        batch_matching = build_matching_data(preds, targets, iou_threshold=0.5, iou_type=iou_type)
+        batch_matching = build_matching_data(
+            preds,
+            targets,
+            iou_threshold=0.5,
+            iou_type=iou_type,
+            class_iou_thresholds=self._f1_class_iou_thresholds,
+        )
         merge_matching_data(self._f1_local, batch_matching)
         self._update_keypoint_oks_metric(trainer, outputs, split="test")
 
@@ -669,7 +703,13 @@ class COCOEvalCallback(Callback):
             sorted_ids = sorted(merged.keys())
             per_class_list = [merged[cid] for cid in sorted_ids]
             classes_with_gt = [i for i, cid in enumerate(sorted_ids) if merged[cid]["total_gt"] > 0]
-            f1_results = sweep_confidence_thresholds(per_class_list, np.linspace(0, 1, 101), classes_with_gt)
+            f1_results = sweep_confidence_thresholds(
+                per_class_list,
+                np.linspace(0, 1, 101),
+                classes_with_gt,
+                class_ids=sorted_ids,
+                class_groups=self._f1_class_groups,
+            )
             best = max(f1_results, key=lambda x: x["macro_f1"])
             overall["F1"] = float(best["macro_f1"])
             overall["Precision"] = float(best["macro_precision"])
@@ -689,6 +729,14 @@ class COCOEvalCallback(Callback):
             trainer.callback_metrics[f"{split}/F1"] = torch.tensor(float(best["macro_f1"]))
             trainer.callback_metrics[f"{split}/precision"] = torch.tensor(float(best["macro_precision"]))
             trainer.callback_metrics[f"{split}/recall"] = torch.tensor(float(best["macro_recall"]))
+            for group_name, group_f1 in best["group_f1"].items():
+                pl_module.log(
+                    f"{split}/F1/{group_name}",
+                    float(group_f1),
+                    logger=True,
+                    on_step=False,
+                    on_epoch=True,
+                )
             for k, cid in enumerate(sorted_ids):
                 f1_by_cid[cid] = {
                     "f1": float(best["per_class_f1"][k]),

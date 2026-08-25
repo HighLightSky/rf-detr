@@ -364,6 +364,20 @@ class TestBuildMatchingData:
         assert result[0]["total_gt"] == 1
         assert result[1]["total_gt"] == 1
 
+    def test_class_iou_thresholds_apply_independently(self) -> None:
+        """类别 IoU 阈值应允许车辆类使用 0.35 而其他类别保持 0.5。"""
+        pred = self._make_pred(
+            [[4, 0, 14, 10], [24, 0, 34, 10]],
+            [0.9, 0.8],
+            [0, 24],
+        )
+        target = self._make_target([[0, 0, 10, 10], [20, 0, 30, 10]], [0, 24])
+
+        result = build_matching_data([pred], [target], class_iou_thresholds={24: 0.35})
+
+        assert result[0]["matches"][0] == 0
+        assert result[24]["matches"][0] == 1
+
     def test_multi_image_batch_accumulates(self) -> None:
         """Two-image batch must concatenate scores and sum total_gt."""
         pred1 = self._make_pred([[0, 0, 10, 10]], [0.9], [0])

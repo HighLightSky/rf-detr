@@ -20,8 +20,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from scripts import eval_lib
 from val.competition_metrics import BoxRecord
-from visualization.detection import clear_vis_dirs, save_fp_fn_visualizations
+from visualization.detection import (
+    _format_error_label,
+    clear_vis_dirs,
+    save_fp_fn_visualizations,
+    save_label_comparison_visualizations,
+)
 
 
 def _write_test_image(path: Path, width: int, height: int) -> None:
@@ -192,3 +198,63 @@ def test_default_behavior_unchanged_without_large_params(tmp_path: Path) -> None
 
     assert (fp_dir / "MS" / "large.jpg").exists()
     assert (fn_dir / "MS" / "large.jpg").exists()
+
+
+def test_error_labels_include_prediction_confidence() -> None:
+    """FP 使用预测置信度，FN 明确标注不存在对应预测置信度。"""
+    fp = BoxRecord("sample", 0, (10.0, 10.0, 30.0, 30.0), score=0.876)
+    fn = BoxRecord("sample", 0, (10.0, 10.0, 30.0, 30.0))
+
+    assert _format_error_label(fp, "FP", {0: "MS"}) == "MS(FP) conf=0.876"
+    assert _format_error_label(fn, "FN", {0: "MS"}) == "MS(FN) conf=N/A"
+
+
+def test_label_comparison_saves_every_image_and_marks_errors_red(tmp_path: Path) -> None:
+    """标签对比模式为每张图输出对照图，并将 FP/FN 绘制为红色。"""
+    image_path = tmp_path / "sample.jpg"
+    _write_test_image(image_path, 100, 100)
+    output_dir = tmp_path / "comparison"
+    class_names = {0: "MS"}
+    gt_records = [BoxRecord("sample", 0, (10.0, 10.0, 30.0, 30.0))]
+    fp_boxes = {"sample": _records("sample", 0)}
+    fn_boxes = {"sample": gt_records}
+
+    saved_images = save_label_comparison_visualizations(
+        fp_boxes=fp_boxes,
+        fn_boxes=fn_boxes,
+        tp_preds={},
+        all_gt=gt_records,
+        image_paths=[image_path],
+        class_names=class_names,
+        output_dir=output_dir,
+    )
+
+    comparison = cv2.imread(str(output_dir / "sample.jpg"))
+    assert saved_images == 1
+    assert comparison is not None
+    assert comparison[40, 10, 2] > 200
+    assert comparison[40, 10, 2] > comparison[40, 10, 0] * 3
+    assert comparison[40, 110, 2] > 200
+    assert comparison[40, 110, 2] > comparison[40, 110, 0] * 3
+
+
+def test_eval_lib_loads_yolo_labels_for_comparison(tmp_path: Path) -> None:
+    """评测工具可直接加载 YOLO 标签并生成预测对比图。"""
+    image_path = tmp_path / "sample.jpg"
+    _write_test_image(image_path, 100, 100)
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+    (labels_dir / "sample.txt").write_text("0 0.2 0.2 0.2 0.2\n", encoding="utf-8")
+
+    saved_images, fp_count, fn_count = eval_lib.save_yolo_label_comparisons(
+        image_paths=[image_path],
+        pred_records=[BoxRecord("sample", 0, (10.0, 10.0, 30.0, 30.0), score=0.9)],
+        class_names={0: "MS"},
+        output_dir=tmp_path / "comparison",
+        comparison_cfg=eval_lib.LabelComparisonCfg(labels_dir),
+    )
+
+    assert saved_images == 1
+    assert fp_count == 0
+    assert fn_count == 0
+    assert (tmp_path / "comparison" / "sample.jpg").exists()

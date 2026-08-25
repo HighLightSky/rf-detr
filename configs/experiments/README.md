@@ -14,7 +14,7 @@ python src/scripts/train.py -c configs/experiments/train_sscl_class_balance_E1.y
 python src/scripts/test.py -c configs/experiments/test_shwx.yaml
 
 # 推理
-python src/scripts/predict.py -c configs/experiments/predict_shwx.yaml --image /path/to/img.jpg
+python src/scripts/predict.py -c configs/experiments/train_tests/predict_shwx.yaml
 ```
 
 ## 目录结构
@@ -89,8 +89,12 @@ predict:                            # predict.py 消费
   checkpoint: output/xxx/checkpoint_best_total.pth
   conf: 0.25
   output_dir: output/xxx/predict
-  image: null                       # 通常由 --image 提供
+  image: /path/to/image_or_folder   # 输入图片或目录，必须设置
   class_names: shwx                 # 内置名 shwx/dior，或 {label: 名称} 字典
+  label_comparison:                 # 可选：YOLO 标签对比可视化
+    enabled: false                  # true 时输出 label_comparison/ 对比图
+    labels_dir: /path/to/yolo/labels # YOLO 标签目录，开启时必须设置
+    iou_threshold: 0.50             # 同类别预测和标签匹配的 IoU 阈值
   reason_plugin:                    # FFT 一致性插件，默认关闭
     enabled: false                  # true 才会加载并执行插件
     checkpoint: null                # 插件 checkpoint 路径

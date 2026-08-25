@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, cast
 
 import numpy as np
@@ -148,6 +149,7 @@ def build_matching_data(
     targets_list: list[dict[str, Tensor]],
     iou_threshold: float = 0.5,
     iou_type: str = "bbox",
+    class_iou_thresholds: Mapping[int, float] | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Build compact per-class matching data from a batch of predictions and targets.
 
@@ -173,6 +175,7 @@ def build_matching_data(
         iou_threshold: IoU threshold for positive matching. Defaults to 0.5.
         iou_type: ``"bbox"`` for bounding-box IoU; ``"segm"`` for boolean-mask
             IoU. Defaults to ``"bbox"``.
+        class_iou_thresholds: 可选的逐类别 IoU 阈值，覆盖 ``iou_threshold``。
 
     Returns:
         Dict mapping ``class_id`` (int) to a compact matching dict with keys:
@@ -240,7 +243,12 @@ def build_matching_data(
                 gt_items = gt_masks[gt_mask_c]  # [n_gt, H, W]
 
             scores_np, matches_np, ignore_np, total_gt = _match_single_class(
-                p_scores, p_items, gt_items, gt_crowd_c, iou_threshold, iou_type
+                p_scores,
+                p_items,
+                gt_items,
+                gt_crowd_c,
+                (class_iou_thresholds or {}).get(class_id, iou_threshold),
+                iou_type,
             )
 
             cast(list[float], entry["scores"]).extend(float(score) for score in scores_np)
