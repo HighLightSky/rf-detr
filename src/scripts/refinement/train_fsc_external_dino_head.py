@@ -40,15 +40,25 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--negative-weight", type=float, default=1.0)
     parser.add_argument("--context-scale", type=float, default=None)
     parser.add_argument("--image-size", type=int, default=None)
+    parser.add_argument(
+        "--include-ground-truth",
+        action="store_true",
+        help="将 GT FSC 框作为额外正样本；默认只使用一级候选，保证验证口径一致",
+    )
     return parser.parse_args()
 
 
-def _load_rows(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+def _load_rows(
+    path: Path,
+    include_ground_truth: bool,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """读取不含测试集的 train/val 候选。"""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("format") != "shwx-fsc-verifier-cache-v1" or payload.get("metadata", {}).get("test_split_used"):
         raise ValueError("候选缓存必须是未使用测试集的版本")
-    rows = payload["candidates"] + payload["ground_truth"]
+    rows = list(payload["candidates"])
+    if include_ground_truth:
+        rows.extend(payload["ground_truth"])
     return payload, [row for row in rows if row["split"] == "train"], [row for row in rows if row["split"] == "val"]
 
 
@@ -87,7 +97,7 @@ def main() -> None:
     args = _parse_args()
     if args.negative_weight <= 0:
         raise ValueError("negative-weight 必须为正数")
-    cache, train_rows, val_rows = _load_rows(Path(args.cache).resolve())
+    cache, train_rows, val_rows = _load_rows(Path(args.cache).resolve(), args.include_ground_truth)
     policy = FSCVerifierPolicy.from_mapping(cache["metadata"]["policy"])
     if args.context_scale is not None or args.image_size is not None:
         policy = replace(
@@ -137,6 +147,7 @@ def main() -> None:
         "train_count": len(train_rows),
         "val_count": len(val_rows),
         "negative_weight": args.negative_weight,
+        "include_ground_truth": args.include_ground_truth,
         "selection": "验证集固定 argmax，不搜索阈值",
         "best": best_metrics,
         "history": history,

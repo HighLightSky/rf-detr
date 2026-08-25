@@ -19,6 +19,7 @@ from rfdetr.refinement.fsc_two_stage import (
     FSCVerifier,
     FSCVerifierPolicy,
     crop_fsc_context,
+    fsc_consensus_decision,
     label_fsc_candidate,
     pool_dino_features,
 )
@@ -93,3 +94,13 @@ def test_pool_dino_features_supports_spatial_average_and_maximum() -> None:
     assert pooled.shape == (2, 6)
     assert pooled[:, :3].shape == pooled[:, 3:].shape
     assert torch.all(pooled[:, 3:] >= pooled[:, :3])
+
+
+def test_fsc_consensus_requires_both_fixed_argmax_decisions() -> None:
+    """共识规则只能保留两个独立头均判为 FSC 的候选。"""
+    single = torch.tensor([[0.1, 0.9], [0.1, 0.9], [0.9, 0.1]])
+    rotation = torch.tensor([[0.2, 0.8], [0.8, 0.2], [0.1, 0.9]])
+
+    decision = fsc_consensus_decision(single, rotation)
+
+    assert decision.tolist() == [1, 0, 0]

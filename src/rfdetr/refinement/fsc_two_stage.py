@@ -462,6 +462,13 @@ class FSCEnsembleHead(nn.Module):
         return {"format": self._FORMAT, "feature_dim": self.feature_dim, "state_dict": self.state_dict(), "metadata": dict(metadata or {})}
 
 
+def fsc_consensus_decision(single_logits: Tensor, rotation_logits: Tensor) -> Tensor:
+    """仅当单视图和旋转头均按 argmax 判为 FSC 时保留候选。"""
+    if single_logits.ndim != 2 or rotation_logits.shape != single_logits.shape or single_logits.shape[1] != 2:
+        raise ValueError("single_logits 和 rotation_logits 必须同为 [N, 2]")
+    return ((single_logits.argmax(dim=1) == 1) & (rotation_logits.argmax(dim=1) == 1)).to(torch.long)
+
+
 def pool_dino_features(outputs: list[Tensor] | tuple[Tensor, ...], pooling: str = "avg") -> Tensor:
     """将 DINOv2 多尺度特征池化为二级分类头输入。"""
     if pooling not in {"avg", "avgmax"}:

@@ -24,7 +24,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from rfdetr import RFDETR  # noqa: E402
-from rfdetr.refinement import FSCEnsembleHead, FSCFeatureGeometryHead, FSCMultiViewHead, FSCScoreFusion, FSCDinoHead, FSCVerifier, FSCVerifierPolicy, crop_fsc_context, crop_transform, iou_xyxy, pool_dino_features  # noqa: E402
+from rfdetr.refinement import FSCEnsembleHead, FSCFeatureGeometryHead, FSCMultiViewHead, FSCScoreFusion, FSCDinoHead, FSCVerifier, FSCVerifierPolicy, crop_fsc_context, crop_transform, fsc_consensus_decision, iou_xyxy, pool_dino_features  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -37,6 +37,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--multiview-head", default=None, help="可选的 DINOv2 紧框/上下文双视图头 checkpoint")
     parser.add_argument("--geometry-head", default=None, help="可选的 DINOv2 几何辅助头 checkpoint")
     parser.add_argument("--ensemble-head", default=None, help="可选的单视图/旋转头 stacking checkpoint")
+    parser.add_argument("--consensus-single-head", default=None, help="共识模式的单视图头 checkpoint")
+    parser.add_argument("--consensus-rotation-head", default=None, help="共识模式的旋转不变头 checkpoint")
     parser.add_argument("--image", required=True, help="单张图像或图像目录")
     parser.add_argument("--output-dir", required=True)
     return parser.parse_args()
@@ -84,7 +86,11 @@ def main() -> None:
     multiview_head = FSCMultiViewHead.from_checkpoint(args.multiview_head, device=next(verifier.parameters()).device) if args.multiview_head else None
     geometry_head = FSCFeatureGeometryHead.from_checkpoint(args.geometry_head, device=next(verifier.parameters()).device) if args.geometry_head else None
     ensemble_head = FSCEnsembleHead.from_checkpoint(args.ensemble_head, device=next(verifier.parameters()).device) if args.ensemble_head else None
-    active_head = ensemble_head or geometry_head or multiview_head or dino_head
+    consensus_single = FSCDinoHead.from_checkpoint(args.consensus_single_head, device=next(verifier.parameters()).device) if args.consensus_single_head else None
+    consensus_rotation = FSCDinoHead.from_checkpoint(args.consensus_rotation_head, device=next(verifier.parameters()).device) if args.consensus_rotation_head else None
+    if (consensus_single is None) != (consensus_rotation is None):
+        raise ValueError("共识模式必须同时提供单视图和旋转头")
+    active_head = ensemble_head or geometry_head or multiview_head or dino_head or consensus_single
     dino_policy = FSCVerifierPolicy.from_mapping(active_head.checkpoint_metadata.get("policy")) if active_head else verifier.policy
     dino_encoder = None
     dino_external = False
@@ -136,7 +142,7 @@ def main() -> None:
         raw_boxes, raw_scores = boxes[fsc_indices], scores[fsc_indices]
         if active_head is not None and dino_encoder is not None and dino_transform is not None:
             context_scales = tuple(float(value) for value in active_head.checkpoint_metadata.get("context_scales", [dino_policy.context_scale]))
-            if multiview_head is not None or ensemble_head is not None:
+            if multiview_head is not None or ensemble_head is not None or consensus_single is not None:
                 context_scales = (dino_policy.context_scale,)
             crops = [
                 dino_transform(crop_fsc_context(image, boxes[index], scale, dino_policy.image_size))
@@ -155,7 +161,10 @@ def main() -> None:
                         pooled = torch.stack([_features(torchvision.transforms.functional.rotate(crop_batch, angle)) for angle in tta_rotations]).mean(dim=0)
                     else:
                         pooled = _features(crop_batch)
-                    if ensemble_head is not None:
+                    if consensus_single is not None:
+                        rotations = torch.stack([_features(torchvision.transforms.functional.rotate(crop_batch, angle)) for angle in (0, 90, 180, 270)]).mean(0)
+                        decisions = fsc_consensus_decision(consensus_single(pooled), consensus_rotation(rotations)).cpu().numpy()
+                    elif ensemble_head is not None:
                         rotations = torch.stack([_features(torchvision.transforms.functional.rotate(crop_batch, angle)) for angle in (0, 90, 180, 270)]).mean(0)
                         ensemble_features = torch.stack((ensemble_single(pooled).softmax(1)[:, 1], ensemble_rotation(rotations).softmax(1)[:, 1], torch.from_numpy(scores[fsc_indices]).to(crop_batch.device)), dim=1)
                         decisions = ensemble_head(ensemble_features).argmax(dim=1).cpu().numpy()
@@ -183,7 +192,7 @@ def main() -> None:
                 else:
                     pooling = str(active_head.checkpoint_metadata.get("pooling", "avg"))
                     dino_features = pool_dino_features(dino_encoder(crop_batch), pooling)
-                if multiview_head is None and geometry_head is None and ensemble_head is None:
+                if multiview_head is None and geometry_head is None and ensemble_head is None and consensus_single is None:
                     decisions = dino_head(dino_features).argmax(dim=1).cpu().numpy()
             keep = np.ones(len(class_ids), dtype=bool)
             keep[np.flatnonzero(fsc_mask)] = False
