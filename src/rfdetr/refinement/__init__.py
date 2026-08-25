@@ -8,6 +8,9 @@
 from rfdetr.refinement.fsc_two_stage import (
     FSCScoreFusion,
     FSCDinoHead,
+    FSCMultiViewHead,
+    FSCFeatureGeometryHead,
+    FSCEnsembleHead,
     FSCVerifier,
     FSCVerifierPolicy,
     crop_fsc_context,
@@ -20,6 +23,9 @@ from rfdetr.refinement.fsc_two_stage import (
 __all__ = [
     "FSCScoreFusion",
     "FSCDinoHead",
+    "FSCMultiViewHead",
+    "FSCFeatureGeometryHead",
+    "FSCEnsembleHead",
     "FSCVerifier",
     "FSCVerifierPolicy",
     "crop_fsc_context",

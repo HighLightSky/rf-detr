@@ -15,6 +15,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+import torchvision
 from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -23,7 +24,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from rfdetr import RFDETR  # noqa: E402
-from rfdetr.refinement import FSCScoreFusion, FSCDinoHead, FSCVerifier, FSCVerifierPolicy, crop_fsc_context, crop_transform, iou_xyxy, pool_dino_features  # noqa: E402
+from rfdetr.refinement import FSCEnsembleHead, FSCFeatureGeometryHead, FSCMultiViewHead, FSCScoreFusion, FSCDinoHead, FSCVerifier, FSCVerifierPolicy, crop_fsc_context, crop_transform, iou_xyxy, pool_dino_features  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -33,6 +34,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--verifier", required=True, help="二级 FSC/非FSC checkpoint")
     parser.add_argument("--fusion", default=None, help="可选的学习型视觉/一级分数融合 checkpoint")
     parser.add_argument("--dino-head", default=None, help="可选的冻结 RF-DETR DINOv2 分类头 checkpoint")
+    parser.add_argument("--multiview-head", default=None, help="可选的 DINOv2 紧框/上下文双视图头 checkpoint")
+    parser.add_argument("--geometry-head", default=None, help="可选的 DINOv2 几何辅助头 checkpoint")
+    parser.add_argument("--ensemble-head", default=None, help="可选的单视图/旋转头 stacking checkpoint")
     parser.add_argument("--image", required=True, help="单张图像或图像目录")
     parser.add_argument("--output-dir", required=True)
     return parser.parse_args()
@@ -77,22 +81,43 @@ def main() -> None:
     fusion = FSCScoreFusion.from_checkpoint(args.fusion, device=next(verifier.parameters()).device) if args.fusion else None
     detector = RFDETR.from_checkpoint(args.detector)
     dino_head = FSCDinoHead.from_checkpoint(args.dino_head, device=next(verifier.parameters()).device) if args.dino_head else None
-    dino_policy = FSCVerifierPolicy.from_mapping(dino_head.checkpoint_metadata.get("policy")) if dino_head else verifier.policy
+    multiview_head = FSCMultiViewHead.from_checkpoint(args.multiview_head, device=next(verifier.parameters()).device) if args.multiview_head else None
+    geometry_head = FSCFeatureGeometryHead.from_checkpoint(args.geometry_head, device=next(verifier.parameters()).device) if args.geometry_head else None
+    ensemble_head = FSCEnsembleHead.from_checkpoint(args.ensemble_head, device=next(verifier.parameters()).device) if args.ensemble_head else None
+    active_head = ensemble_head or geometry_head or multiview_head or dino_head
+    dino_policy = FSCVerifierPolicy.from_mapping(active_head.checkpoint_metadata.get("policy")) if active_head else verifier.policy
     dino_encoder = None
     dino_external = False
-    if dino_head is not None:
-        metadata = dino_head.checkpoint_metadata
+    ensemble_single = ensemble_rotation = None
+    if active_head is not None:
+        metadata = active_head.checkpoint_metadata
         if metadata.get("repo") and metadata.get("backbone_checkpoint"):
             sys.path.insert(0, str(Path(metadata["repo"]).resolve()))
             from dinov2.hub.backbones import dinov2_vitl14_reg
 
             dino_encoder = dinov2_vitl14_reg(pretrained=False)
             dino_encoder.load_state_dict(torch.load(metadata["backbone_checkpoint"], map_location="cpu", weights_only=True))
+            if ensemble_head is not None:
+                single_payload = torch.load(metadata["single_head"], map_location="cpu", weights_only=False)
+                rotation_payload = torch.load(metadata["rotation_head"], map_location="cpu", weights_only=False)
+                ensemble_single = FSCDinoHead(int(single_payload["feature_dim"])).to(next(verifier.parameters()).device)
+                ensemble_rotation = FSCDinoHead(int(rotation_payload["feature_dim"])).to(next(verifier.parameters()).device)
+                ensemble_single.load_state_dict(single_payload["state_dict"]); ensemble_rotation.load_state_dict(rotation_payload["state_dict"])
+                ensemble_single.eval(); ensemble_rotation.eval()
+            backbone_patch = metadata.get("backbone_patch")
+            if backbone_patch:
+                patch = torch.load(backbone_patch, map_location="cpu", weights_only=True)
+                if patch.get("format") != "shwx-fsc-dino-backbone-patch-v1":
+                    raise ValueError("不是 FSC DINO 尾部微调权重")
+                dino_encoder.load_state_dict(patch["state_dict"], strict=False)
+            fine_tuned_backbone = metadata.get("fine_tuned_backbone_checkpoint")
+            if fine_tuned_backbone:
+                dino_encoder.load_state_dict(torch.load(fine_tuned_backbone, map_location="cpu", weights_only=True))
             dino_external = True
         else:
             dino_encoder = detector.model.model.backbone[0].encoder
         dino_encoder = dino_encoder.to(next(verifier.parameters()).device).eval()
-    dino_transform = crop_transform(training=False) if dino_head else None
+    dino_transform = crop_transform(training=False) if active_head else None
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict[str, object]] = []
@@ -109,20 +134,57 @@ def main() -> None:
         raw_keep = _nms_indices(raw_boxes, raw_scores)
         fsc_indices = np.flatnonzero(fsc_mask)[raw_keep]
         raw_boxes, raw_scores = boxes[fsc_indices], scores[fsc_indices]
-        if dino_head is not None and dino_encoder is not None and dino_transform is not None:
+        if active_head is not None and dino_encoder is not None and dino_transform is not None:
+            context_scales = tuple(float(value) for value in active_head.checkpoint_metadata.get("context_scales", [dino_policy.context_scale]))
+            if multiview_head is not None or ensemble_head is not None:
+                context_scales = (dino_policy.context_scale,)
             crops = [
-                dino_transform(crop_fsc_context(image, boxes[index], dino_policy.context_scale, dino_policy.image_size))
+                dino_transform(crop_fsc_context(image, boxes[index], scale, dino_policy.image_size))
                 for index in fsc_indices
+                for scale in context_scales
             ]
             with torch.inference_mode():
                 crop_batch = torch.stack(crops).to(next(verifier.parameters()).device)
                 if dino_external:
-                    output = dino_encoder.forward_features(crop_batch)
-                    dino_features = torch.cat((output["x_norm_clstoken"], output["x_norm_patchtokens"].mean(dim=1)), dim=1)
+                    def _features(batch: torch.Tensor) -> torch.Tensor:
+                        output = dino_encoder.forward_features(batch)
+                        return torch.cat((output["x_norm_clstoken"], output["x_norm_patchtokens"].mean(dim=1)), dim=1)
+
+                    tta_rotations = tuple(float(value) for value in active_head.checkpoint_metadata.get("tta_rotations", []))
+                    if tta_rotations:
+                        pooled = torch.stack([_features(torchvision.transforms.functional.rotate(crop_batch, angle)) for angle in tta_rotations]).mean(dim=0)
+                    else:
+                        pooled = _features(crop_batch)
+                    if ensemble_head is not None:
+                        rotations = torch.stack([_features(torchvision.transforms.functional.rotate(crop_batch, angle)) for angle in (0, 90, 180, 270)]).mean(0)
+                        ensemble_features = torch.stack((ensemble_single(pooled).softmax(1)[:, 1], ensemble_rotation(rotations).softmax(1)[:, 1], torch.from_numpy(scores[fsc_indices]).to(crop_batch.device)), dim=1)
+                        decisions = ensemble_head(ensemble_features).argmax(dim=1).cpu().numpy()
+                    elif geometry_head is not None:
+                        geometry = torch.tensor([
+                            [
+                                (float(boxes[index][0]) + float(boxes[index][2])) / (2 * image.width),
+                                (float(boxes[index][1]) + float(boxes[index][3])) / (2 * image.height),
+                                (float(boxes[index][2]) - float(boxes[index][0])) / image.width,
+                                (float(boxes[index][3]) - float(boxes[index][1])) / image.height,
+                                float(scores[index]),
+                            ]
+                            for index in fsc_indices
+                        ], device=crop_batch.device)
+                        decisions = geometry_head(pooled, geometry).argmax(dim=1).cpu().numpy()
+                    elif multiview_head is not None:
+                        tight_scale = float(multiview_head.checkpoint_metadata.get("tight_scale", 0.575))
+                        tight_batch = torch.stack([
+                            dino_transform(crop_fsc_context(image, boxes[index], dino_policy.context_scale * tight_scale, dino_policy.image_size))
+                            for index in fsc_indices
+                        ]).to(next(verifier.parameters()).device)
+                        decisions = multiview_head(_features(tight_batch), pooled).argmax(dim=1).cpu().numpy()
+                    else:
+                        dino_features = pooled.reshape(len(fsc_indices), len(context_scales) * pooled.shape[1])
                 else:
-                    pooling = str(dino_head.checkpoint_metadata.get("pooling", "avg"))
+                    pooling = str(active_head.checkpoint_metadata.get("pooling", "avg"))
                     dino_features = pool_dino_features(dino_encoder(crop_batch), pooling)
-                decisions = dino_head(dino_features).argmax(dim=1).cpu().numpy()
+                if multiview_head is None and geometry_head is None and ensemble_head is None:
+                    decisions = dino_head(dino_features).argmax(dim=1).cpu().numpy()
             keep = np.ones(len(class_ids), dtype=bool)
             keep[np.flatnonzero(fsc_mask)] = False
             keep[fsc_indices] = decisions == 1

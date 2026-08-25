@@ -342,6 +342,126 @@ class FSCDinoHead(nn.Module):
         }
 
 
+class FSCMultiViewHead(nn.Module):
+    """融合紧框与大上下文 DINO 描述子的二级 FSC 头。"""
+
+    _FORMAT = "shwx-fsc-multiview-head-v1"
+
+    def __init__(self, feature_dim: int = 2048) -> None:
+        """初始化双视图分类头。"""
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.head = nn.Sequential(
+            nn.LayerNorm(feature_dim * 2),
+            nn.Linear(feature_dim * 2, 512),
+            nn.GELU(),
+            nn.Dropout(0.15),
+            nn.Linear(512, 2),
+        )
+        self.checkpoint_metadata: dict[str, Any] = {}
+
+    def forward(self, tight: Tensor, context: Tensor) -> Tensor:
+        """输出非FSC、FSC 两类 logits。"""
+        if tight.ndim != 2 or context.ndim != 2 or tight.shape != context.shape or tight.shape[1] != self.feature_dim:
+            raise ValueError(f"tight/context 必须同为 [N, {self.feature_dim}]")
+        return self.head(torch.cat((tight, context), dim=1))
+
+    @classmethod
+    def from_checkpoint(cls, path: str | Path, device: str | torch.device = "cpu") -> "FSCMultiViewHead":
+        """加载双视图头。"""
+        payload = torch.load(str(path), map_location="cpu", weights_only=False)
+        if payload.get("format") != cls._FORMAT:
+            raise ValueError(f"不是 {cls._FORMAT} checkpoint")
+        module = cls(int(payload.get("feature_dim", 2048)))
+        module.load_state_dict(payload["state_dict"])
+        module.checkpoint_metadata = dict(payload.get("metadata", {}))
+        return module.to(device).eval()
+
+    def checkpoint_payload(self, metadata: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """返回双视图 checkpoint。"""
+        return {
+            "format": self._FORMAT,
+            "feature_dim": self.feature_dim,
+            "state_dict": self.state_dict(),
+            "metadata": dict(metadata or {}),
+        }
+
+
+class FSCFeatureGeometryHead(nn.Module):
+    """融合 DINO 视觉特征、框几何与一级置信度的二级头。"""
+
+    _FORMAT = "shwx-fsc-feature-geometry-head-v1"
+
+    def __init__(self, feature_dim: int = 2048, geometry_dim: int = 5) -> None:
+        """初始化几何辅助分类头。"""
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.geometry_dim = geometry_dim
+        self.head = nn.Sequential(
+            nn.LayerNorm(feature_dim + geometry_dim),
+            nn.Linear(feature_dim + geometry_dim, 512),
+            nn.GELU(),
+            nn.Dropout(0.15),
+            nn.Linear(512, 2),
+        )
+        self.checkpoint_metadata: dict[str, Any] = {}
+
+    def forward(self, features: Tensor, geometry: Tensor) -> Tensor:
+        """输出非FSC、FSC 两类 logits。"""
+        if features.ndim != 2 or geometry.ndim != 2 or features.shape[0] != geometry.shape[0] or features.shape[1] != self.feature_dim or geometry.shape[1] != self.geometry_dim:
+            raise ValueError("features 或 geometry 形状错误")
+        return self.head(torch.cat((features, geometry), dim=1))
+
+    @classmethod
+    def from_checkpoint(cls, path: str | Path, device: str | torch.device = "cpu") -> "FSCFeatureGeometryHead":
+        """加载几何辅助头。"""
+        payload = torch.load(str(path), map_location="cpu", weights_only=False)
+        if payload.get("format") != cls._FORMAT:
+            raise ValueError(f"不是 {cls._FORMAT} checkpoint")
+        module = cls(int(payload.get("feature_dim", 2048)), int(payload.get("geometry_dim", 5)))
+        module.load_state_dict(payload["state_dict"])
+        module.checkpoint_metadata = dict(payload.get("metadata", {}))
+        return module.to(device).eval()
+
+    def checkpoint_payload(self, metadata: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """返回几何辅助头 checkpoint。"""
+        return {"format": self._FORMAT, "feature_dim": self.feature_dim, "geometry_dim": self.geometry_dim, "state_dict": self.state_dict(), "metadata": dict(metadata or {})}
+
+
+class FSCEnsembleHead(nn.Module):
+    """融合多个二级视图概率与一级分数的 stacking 头。"""
+
+    _FORMAT = "shwx-fsc-ensemble-head-v1"
+
+    def __init__(self, feature_dim: int = 3) -> None:
+        """初始化 stacking 分类器。"""
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.head = nn.Sequential(nn.LayerNorm(feature_dim), nn.Linear(feature_dim, 32), nn.GELU(), nn.Linear(32, 2))
+        self.checkpoint_metadata: dict[str, Any] = {}
+
+    def forward(self, features: Tensor) -> Tensor:
+        """输出非FSC、FSC 两类 logits。"""
+        if features.ndim != 2 or features.shape[1] != self.feature_dim:
+            raise ValueError(f"features 必须为 [N, {self.feature_dim}]")
+        return self.head(features)
+
+    @classmethod
+    def from_checkpoint(cls, path: str | Path, device: str | torch.device = "cpu") -> "FSCEnsembleHead":
+        """加载 stacking 头。"""
+        payload = torch.load(str(path), map_location="cpu", weights_only=False)
+        if payload.get("format") != cls._FORMAT:
+            raise ValueError(f"不是 {cls._FORMAT} checkpoint")
+        module = cls(int(payload.get("feature_dim", 3)))
+        module.load_state_dict(payload["state_dict"])
+        module.checkpoint_metadata = dict(payload.get("metadata", {}))
+        return module.to(device).eval()
+
+    def checkpoint_payload(self, metadata: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """返回 stacking checkpoint。"""
+        return {"format": self._FORMAT, "feature_dim": self.feature_dim, "state_dict": self.state_dict(), "metadata": dict(metadata or {})}
+
+
 def pool_dino_features(outputs: list[Tensor] | tuple[Tensor, ...], pooling: str = "avg") -> Tensor:
     """将 DINOv2 多尺度特征池化为二级分类头输入。"""
     if pooling not in {"avg", "avgmax"}:

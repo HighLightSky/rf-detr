@@ -1,0 +1,36 @@
+# 当前 SHWX 数据集上从 25 类基线扩展 truck=25 的一级检测器。
+model:
+  variant: medium
+  num_classes: 26
+  resolution: 1024
+  pretrain_weights: output/0818-SHWX-medium-baseline-26class-truck-1024/checkpoint_best_total.pth
+  gradient_checkpointing: true
+
+train:
+  dataset_dir: output/0826-shwx-current-26-truck-pseudo-v4
+  dataset_file: yolo
+  output_dir: output/0826-shwx-current-26-truck-detector-v4
+  epochs: 8
+  batch_size: 8
+  grad_accum_steps: 2
+  num_workers: 8
+  lr: 2e-5
+  lr_encoder: 5e-6
+  weight_decay: 1e-4
+  clip_max_norm: 0.1
+  multi_scale: true
+  lr_drop: 6
+  warmup_epochs: 1.0
+  tensorboard: true
+  wandb: false
+  device: cuda
+  devices: 1
+  num_nodes: 1
+  eval_interval: 2
+  use_ema: true
+  compute_val_loss: false
+  aug_config: AERIAL
+  mosaic_p: 0.1
+  class_balanced_sampling: true
+  class_balanced_class_ids: [24, 25]
+  dataset_cache_mode: raw
