@@ -9,7 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from scripts.refinement.train_fsc_dinov3_head import _load_rows
+from scripts.refinement.train_fsc_dinov3_head import _is_better_metric, _load_rows
 
 
 def test_load_rows_uses_only_train_candidates_for_holdout(tmp_path: Path) -> None:
@@ -40,3 +40,19 @@ def test_load_rows_uses_only_train_candidates_for_holdout(tmp_path: Path) -> Non
 
     assert {row["image"].split("/")[-1] for row in train} == expected_train
     assert {row["image"].split("/")[-1] for row in holdout} == expected_holdout
+
+
+def test_recall_constrained_selection_prioritizes_precision_after_recall_gate() -> None:
+    """达到固定召回下限后，应优先选择精确率更高的二级头。"""
+    current = {"precision": 0.60, "recall": 0.95, "f1": 0.73}
+    candidate = {"precision": 0.75, "recall": 0.92, "f1": 0.83}
+
+    assert _is_better_metric(candidate, current, min_recall=0.90)
+
+
+def test_recall_constrained_selection_rejects_lower_recall_before_gate() -> None:
+    """尚未达到召回下限时，优先提高召回而不是 F1。"""
+    current = {"precision": 0.90, "recall": 0.80, "f1": 0.85}
+    candidate = {"precision": 0.55, "recall": 0.88, "f1": 0.68}
+
+    assert _is_better_metric(candidate, current, min_recall=0.90)

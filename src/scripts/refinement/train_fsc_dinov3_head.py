@@ -61,6 +61,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=160)
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--negative-weight", type=float, default=4.0)
+    parser.add_argument("--min-holdout-recall", type=float, default=0.0)
     return parser.parse_args()
 
 
@@ -113,11 +114,34 @@ def _metric(logits: Tensor, labels: Tensor) -> dict[str, float]:
     return {"precision": precision, "recall": recall, "f1": 2 * precision * recall / max(precision + recall, 1e-8)}
 
 
+def _is_better_metric(candidate: dict[str, float], best: dict[str, float] | None, min_recall: float) -> bool:
+    """按内部留出集固定召回约束选择二级头。"""
+    if best is None:
+        return True
+    candidate_meets = candidate["recall"] >= min_recall
+    best_meets = best["recall"] >= min_recall
+    if candidate_meets != best_meets:
+        return candidate_meets
+    if candidate_meets:
+        return (candidate["precision"], candidate["recall"], candidate["f1"]) > (
+            best["precision"],
+            best["recall"],
+            best["f1"],
+        )
+    return (candidate["recall"], candidate["precision"], candidate["f1"]) > (
+        best["recall"],
+        best["precision"],
+        best["f1"],
+    )
+
+
 def main() -> None:
     """只从当前数据集训练候选二级复核头。"""
     args = _parse_args()
     if args.batch_size <= 0 or args.epochs <= 0 or args.negative_weight <= 0:
         raise ValueError("batch-size、epochs 和 negative-weight 必须为正数")
+    if not 0.0 <= args.min_holdout_recall <= 1.0:
+        raise ValueError("min-holdout-recall 必须位于 [0, 1]")
     import timm
     from timm.data import create_transform, resolve_model_data_config
 
@@ -144,11 +168,7 @@ def main() -> None:
         with torch.inference_mode():
             metric = _metric(head(holdout_x.to(device)), holdout_y.to(device))
         history.append({"epoch": epoch + 1, "loss": float(loss.detach()), **metric})
-        if best is None or (metric["f1"], metric["precision"], metric["recall"]) > (
-            best["f1"],
-            best["precision"],
-            best["recall"],
-        ):
+        if _is_better_metric(metric, best, args.min_holdout_recall):
             best, state = metric, {name: value.detach().cpu().clone() for name, value in head.state_dict().items()}
     assert best is not None and state is not None
     output = Path(args.output).resolve()
@@ -162,7 +182,8 @@ def main() -> None:
         "train_count": len(train_rows),
         "holdout_count": len(holdout_rows),
         "negative_weight": args.negative_weight,
-        "selection": "仅内部留出集固定 argmax，不搜索阈值",
+        "min_holdout_recall": args.min_holdout_recall,
+        "selection": "仅内部留出集固定 argmax，并按召回约束选择，不搜索阈值",
         "best": best,
         "history": history,
     }
