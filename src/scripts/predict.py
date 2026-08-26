@@ -464,6 +464,8 @@ def main() -> None:
             refined_records, stats = two_stage_plugin.refine_records(raw_records, {image_path.stem: image_path})
             two_stage_stats_total.routed += stats.routed
             two_stage_stats_total.candidate_nms_suppressed += stats.candidate_nms_suppressed
+            two_stage_stats_total.candidate_nms_iou_suppressed += stats.candidate_nms_iou_suppressed
+            two_stage_stats_total.candidate_nms_containment_suppressed += stats.candidate_nms_containment_suppressed
             two_stage_stats_total.kept += stats.kept
             two_stage_stats_total.rejected += stats.rejected
             two_stage_stats_total.images += stats.images
@@ -558,6 +560,9 @@ def main() -> None:
                         "class_ids": list(two_stage_cfg.class_ids),
                         "candidate_floor": two_stage_cfg.candidate_floor,
                         "candidate_nms_iou": two_stage_cfg.candidate_nms_iou,
+                        "candidate_containment_nms_enabled": two_stage_cfg.candidate_containment_nms_enabled,
+                        "candidate_nms_containment": two_stage_cfg.candidate_nms_containment,
+                        "candidate_nms_center_ratio": two_stage_cfg.candidate_nms_center_ratio,
                         "context_scale": two_stage_cfg.context_scale,
                         "image_size": two_stage_cfg.image_size,
                         "batch_size": two_stage_cfg.batch_size,

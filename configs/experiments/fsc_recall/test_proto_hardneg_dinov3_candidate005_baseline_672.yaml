@@ -1,0 +1,60 @@
+# 672 张当前测试集合的一级候选 NMS 基线，保留大图切分链路。
+test:
+  dataset: shwx
+  dataset_dir: /home/liu/wzt/datasets/SHWX-dataset-dict-redo
+  resolution: 1024
+  checkpoint: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级/checkpoint_best_total.pth
+  output_dir: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级/evaluation_candidate_containment_nms/redo_672_baseline
+  conf_threshold: 0.25
+  class_conf_thresholds: {}
+  ms_nms:
+    enabled: false
+  reason_plugin:
+    enabled: false
+  two_stage:
+    enabled: true
+    backend: dinov3
+    checkpoint: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级/fsc_dinov3_head_candidate005_recall85.pth
+    backbone_checkpoint: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级/dinov3_vit_base_patch16_lvd1689m_backbone.pth
+    class_ids: [24]
+    candidate_floor: 0.05
+    candidate_nms_iou: 0.5
+    candidate_containment_nms_enabled: false
+    candidate_nms_containment: 0.95
+    candidate_nms_center_ratio: 0.35
+    context_scale: 2.0
+    image_size: 224
+    batch_size: 64
+    positive_threshold: 0.5
+    bypass_score: null
+    detector_score_weight: 0.0
+  device: cuda:0
+  batch_size: 16
+  num_workers: 12
+  prefetch_factor: 3
+  precision: auto
+  compile_model: false
+  copy_prefetch: true
+  warmup_batches: 1
+  progress_interval_s: 1.0
+  gpu_monitor_enabled: false
+  save_fp_fn: true
+  save_yolo_preds: true
+  large_image_min_side: 2000
+  boundary_backend: rfdetr
+  boundary_checkpoint: data/large_cut/rf-detr-nano-large-cut.pth
+  boundary_resolution: 704
+  boundary_conf: 0.25
+  detector_conf: 0.25
+  tiling_padding: 0
+  tiling_nms_iou: 0.5
+  tiling_square_stretch: false
+  tiling_batch_size: 8
+  tiling_num_workers: 4
+  max_pending_crops: 128
+  roi_backend: auto
+  proxy_max_side: 704
+  roi_output_size: null
+  roi_queue_size: 128
+  roi_cache_dir: null
+  strict_roi_backend: false

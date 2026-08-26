@@ -27,6 +27,9 @@ def test_two_stage_config_disabled_and_enabled() -> None:
             "class_ids": [24, 25],
             "candidate_floor": 0.05,
             "candidate_nms_iou": 0.5,
+            "candidate_containment_nms_enabled": True,
+            "candidate_nms_containment": 0.95,
+            "candidate_nms_center_ratio": 0.35,
             "context_scale": 2.0,
             "image_size": 224,
             "batch_size": 8,
@@ -35,6 +38,9 @@ def test_two_stage_config_disabled_and_enabled() -> None:
     assert config is not None
     assert config.class_ids == (24, 25)
     assert config.batch_size == 8
+    assert config.candidate_containment_nms_enabled is True
+    assert config.candidate_nms_containment == 0.95
+    assert config.candidate_nms_center_ratio == 0.35
 
 
 def test_two_stage_config_uses_default_probability_gate() -> None:
@@ -51,6 +57,8 @@ def test_two_stage_config_uses_default_probability_gate() -> None:
         {"enabled": True, "checkpoint": "x", "backend": "unknown"},
         {"enabled": True, "checkpoint": "x", "candidate_floor": 1.1},
         {"enabled": True, "checkpoint": "x", "candidate_nms_iou": 0.0},
+        {"enabled": True, "checkpoint": "x", "candidate_nms_containment": 1.1},
+        {"enabled": True, "checkpoint": "x", "candidate_nms_center_ratio": -0.1},
         {"enabled": True, "checkpoint": "x", "positive_threshold": 1.1},
         {"enabled": True, "checkpoint": "x", "bypass_score": -0.1},
         {"enabled": True, "checkpoint": "x", "detector_score_weight": 1.1},
@@ -89,17 +97,18 @@ def test_two_stage_collection_floor_cannot_exceed_final_threshold() -> None:
 class _FakeTwoStagePlugin(TwoStagePlugin):
     """只用固定结果模拟二阶段分类器。"""
 
-    def __init__(self, decisions: list[bool]) -> None:
+    def __init__(self, decisions: list[bool], **config_values: object) -> None:
         """初始化固定分类结果。"""
-        self.config = TwoStageConfig(enabled=True, backend="resnet18", checkpoint="unused")
-        self.config = TwoStageConfig(
-            enabled=True,
-            backend="resnet18",
-            checkpoint="unused",
-            candidate_floor=0.05,
-            candidate_nms_iou=0.5,
-            batch_size=8,
-        )
+        values: dict[str, object] = {
+            "enabled": True,
+            "backend": "resnet18",
+            "checkpoint": "unused",
+            "candidate_floor": 0.05,
+            "candidate_nms_iou": 0.5,
+            "batch_size": 8,
+        }
+        values.update(config_values)
+        self.config = TwoStageConfig(**values)
         self._decisions = decisions
 
     def _predict(self, images: list[Image.Image], boxes: list[BoxRecord]) -> np.ndarray:
@@ -147,6 +156,8 @@ def test_two_stage_refine_keeps_other_classes_and_applies_candidate_nms(tmp_path
     assert output[1] == records[3]
     assert stats.routed == 1
     assert stats.candidate_nms_suppressed == 1
+    assert stats.candidate_nms_iou_suppressed == 1
+    assert stats.candidate_nms_containment_suppressed == 0
     assert stats.kept == 1
     assert stats.rejected == 0
 
@@ -186,3 +197,112 @@ def test_two_stage_refine_empty_candidates() -> None:
     assert output == []
     assert stats.routed == 0
     assert stats.images == 0
+
+
+def test_two_stage_containment_nms_suppresses_low_iou_duplicate(tmp_path: Path) -> None:
+    """小框被高分大框包含时，即使 IoU 偏低也应在一级阶段抑制。"""
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (100, 100), color=(128, 128, 128)).save(image_path)
+    records = [
+        BoxRecord("image", 24, (10.0, 10.0, 50.0, 50.0), 0.90),
+        BoxRecord("image", 24, (20.0, 20.0, 40.0, 40.0), 0.80),
+    ]
+
+    output, stats = _FakeTwoStagePlugin(
+        [True],
+        candidate_containment_nms_enabled=True,
+        candidate_nms_iou=0.40,
+        candidate_nms_containment=0.95,
+        candidate_nms_center_ratio=0.35,
+    ).refine_records(records, {"image": image_path})
+
+    assert [record.xyxy for record in output] == [records[0].xyxy]
+    assert stats.candidate_nms_suppressed == 1
+    assert stats.candidate_nms_iou_suppressed == 0
+    assert stats.candidate_nms_containment_suppressed == 1
+
+
+def test_two_stage_containment_nms_keeps_far_center_candidate(tmp_path: Path) -> None:
+    """中心距离过远的包含框可能属于相邻目标，必须保留。"""
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (100, 100), color=(128, 128, 128)).save(image_path)
+    records = [
+        BoxRecord("image", 24, (0.0, 0.0, 100.0, 100.0), 0.90),
+        BoxRecord("image", 24, (0.0, 0.0, 10.0, 10.0), 0.80),
+    ]
+
+    output, stats = _FakeTwoStagePlugin(
+        [True, True],
+        candidate_containment_nms_enabled=True,
+        candidate_nms_iou=0.40,
+        candidate_nms_containment=0.95,
+        candidate_nms_center_ratio=0.35,
+    ).refine_records(records, {"image": image_path})
+
+    assert [record.xyxy for record in output] == [record.xyxy for record in records]
+    assert stats.candidate_nms_suppressed == 0
+
+
+def test_two_stage_containment_nms_does_not_suppress_across_classes(tmp_path: Path) -> None:
+    """包含感知 NMS 必须按类别分组，不能压制另一目标类别。"""
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (100, 100), color=(128, 128, 128)).save(image_path)
+    records = [
+        BoxRecord("image", 24, (10.0, 10.0, 50.0, 50.0), 0.90),
+        BoxRecord("image", 25, (20.0, 20.0, 40.0, 40.0), 0.80),
+    ]
+
+    output, stats = _FakeTwoStagePlugin(
+        [True, True],
+        class_ids=(24, 25),
+        candidate_containment_nms_enabled=True,
+        candidate_nms_iou=0.40,
+        candidate_nms_containment=0.95,
+        candidate_nms_center_ratio=0.35,
+    ).refine_records(records, {"image": image_path})
+
+    assert [record.class_id for record in output] == [24, 25]
+    assert stats.candidate_nms_suppressed == 0
+
+
+def test_two_stage_containment_nms_disabled_keeps_legacy_iou_behavior(tmp_path: Path) -> None:
+    """开关关闭时低 IoU 的包含框应保持原始纯 IoU NMS 行为。"""
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (100, 100), color=(128, 128, 128)).save(image_path)
+    records = [
+        BoxRecord("image", 24, (10.0, 10.0, 50.0, 50.0), 0.90),
+        BoxRecord("image", 24, (20.0, 20.0, 40.0, 40.0), 0.80),
+    ]
+
+    output, stats = _FakeTwoStagePlugin([True, True]).refine_records(records, {"image": image_path})
+
+    assert [record.xyxy for record in output] == [record.xyxy for record in records]
+    assert stats.candidate_nms_suppressed == 0
+    assert stats.candidate_nms_iou_suppressed == 0
+    assert stats.candidate_nms_containment_suppressed == 0
+
+
+def test_two_stage_candidate_nms_reason_stats_sum_to_total(tmp_path: Path) -> None:
+    """总抑制数必须等于 IoU 与包含关系两种原因的计数之和。"""
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (100, 100), color=(128, 128, 128)).save(image_path)
+    records = [
+        BoxRecord("image", 24, (10.0, 10.0, 50.0, 50.0), 0.90),
+        BoxRecord("image", 24, (11.0, 11.0, 49.0, 49.0), 0.80),
+        BoxRecord("image", 24, (20.0, 20.0, 40.0, 40.0), 0.70),
+    ]
+
+    _, stats = _FakeTwoStagePlugin(
+        [True],
+        candidate_containment_nms_enabled=True,
+        candidate_nms_iou=0.40,
+        candidate_nms_containment=0.95,
+        candidate_nms_center_ratio=0.35,
+    ).refine_records(records, {"image": image_path})
+
+    assert stats.candidate_nms_suppressed == 2
+    assert stats.candidate_nms_iou_suppressed == 1
+    assert stats.candidate_nms_containment_suppressed == 1
+    assert stats.candidate_nms_suppressed == (
+        stats.candidate_nms_iou_suppressed + stats.candidate_nms_containment_suppressed
+    )

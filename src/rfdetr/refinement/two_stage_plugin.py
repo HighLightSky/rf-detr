@@ -43,6 +43,9 @@ class TwoStageConfig:
     class_ids: tuple[int, ...] = (24,)
     candidate_floor: float = 0.05
     candidate_nms_iou: float = 0.5
+    candidate_containment_nms_enabled: bool = False
+    candidate_nms_containment: float = 0.95
+    candidate_nms_center_ratio: float = 0.35
     context_scale: float = 2.0
     image_size: int = 224
     batch_size: int = 64
@@ -74,6 +77,9 @@ class TwoStageConfig:
             class_ids=parsed_ids,
             candidate_floor=float(value.get("candidate_floor", 0.05)),
             candidate_nms_iou=float(value.get("candidate_nms_iou", 0.5)),
+            candidate_containment_nms_enabled=bool(value.get("candidate_containment_nms_enabled", False)),
+            candidate_nms_containment=float(value.get("candidate_nms_containment", 0.95)),
+            candidate_nms_center_ratio=float(value.get("candidate_nms_center_ratio", 0.35)),
             context_scale=float(value.get("context_scale", 2.0)),
             image_size=int(value.get("image_size", 224)),
             batch_size=int(value.get("batch_size", 64)),
@@ -98,6 +104,10 @@ class TwoStageConfig:
             raise ValueError("two_stage.candidate_floor 必须位于 [0, 1]")
         if not 0.0 < self.candidate_nms_iou <= 1.0:
             raise ValueError("two_stage.candidate_nms_iou 必须位于 (0, 1]")
+        if not 0.0 <= self.candidate_nms_containment <= 1.0:
+            raise ValueError("two_stage.candidate_nms_containment 必须位于 [0, 1]")
+        if self.candidate_nms_center_ratio < 0.0:
+            raise ValueError("two_stage.candidate_nms_center_ratio 不能为负数")
         if not 0.0 <= self.positive_threshold <= 1.0:
             raise ValueError("two_stage.positive_threshold 必须位于 [0, 1]")
         if self.bypass_score is not None and not 0.0 <= self.bypass_score <= 1.0:
@@ -114,6 +124,8 @@ class TwoStageStats:
 
     routed: int = 0
     candidate_nms_suppressed: int = 0
+    candidate_nms_iou_suppressed: int = 0
+    candidate_nms_containment_suppressed: int = 0
     kept: int = 0
     rejected: int = 0
     images: int = 0
@@ -125,6 +137,8 @@ class TwoStageStats:
         return {
             "routed": self.routed,
             "candidate_nms_suppressed": self.candidate_nms_suppressed,
+            "candidate_nms_iou_suppressed": self.candidate_nms_iou_suppressed,
+            "candidate_nms_containment_suppressed": self.candidate_nms_containment_suppressed,
             "kept": self.kept,
             "rejected": self.rejected,
             "images": self.images,
@@ -153,13 +167,69 @@ class _DinoV3Head(nn.Module):
         return self.head(features)
 
 
-def _nms_indices(records: Sequence[BoxRecord], threshold: float) -> list[BoxRecord]:
-    """对同一类别候选执行置信度优先 NMS。"""
+def _candidate_overlap_metrics(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+) -> tuple[float, float]:
+    """计算较小框包含率和以较小框对角线归一化的中心距离。"""
+    intersection_left = max(first[0], second[0])
+    intersection_top = max(first[1], second[1])
+    intersection_right = min(first[2], second[2])
+    intersection_bottom = min(first[3], second[3])
+    intersection = max(0.0, intersection_right - intersection_left) * max(
+        0.0, intersection_bottom - intersection_top
+    )
+    first_width = max(0.0, first[2] - first[0])
+    first_height = max(0.0, first[3] - first[1])
+    second_width = max(0.0, second[2] - second[0])
+    second_height = max(0.0, second[3] - second[1])
+    smaller_area = min(first_width * first_height, second_width * second_height)
+    containment = intersection / smaller_area if smaller_area > 0.0 else 0.0
+    first_center_x = (first[0] + first[2]) * 0.5
+    first_center_y = (first[1] + first[3]) * 0.5
+    second_center_x = (second[0] + second[2]) * 0.5
+    second_center_y = (second[1] + second[3]) * 0.5
+    center_distance = (
+        (first_center_x - second_center_x) ** 2 + (first_center_y - second_center_y) ** 2
+    ) ** 0.5
+    smaller_diagonal = min(
+        (first_width**2 + first_height**2) ** 0.5,
+        (second_width**2 + second_height**2) ** 0.5,
+    )
+    center_ratio = center_distance / smaller_diagonal if smaller_diagonal > 0.0 else float("inf")
+    return containment, center_ratio
+
+
+def _nms_indices(records: Sequence[BoxRecord], config: TwoStageConfig) -> tuple[list[BoxRecord], int, int]:
+    """按一级分数执行候选 NMS，并返回 IoU 与包含关系抑制计数。"""
     kept: list[BoxRecord] = []
+    iou_suppressed = 0
+    containment_suppressed = 0
     for record in sorted(records, key=lambda item: float(item.score or 0.0), reverse=True):
-        if all(iou_xyxy(record.xyxy, chosen.xyxy) <= threshold for chosen in kept):
+        suppression_reason: str | None = None
+        for chosen in kept:
+            iou = iou_xyxy(record.xyxy, chosen.xyxy)
+            if not config.candidate_containment_nms_enabled:
+                if iou > config.candidate_nms_iou:
+                    suppression_reason = "iou"
+                    break
+                continue
+            containment, center_ratio = _candidate_overlap_metrics(record.xyxy, chosen.xyxy)
+            if center_ratio > config.candidate_nms_center_ratio:
+                continue
+            if iou > config.candidate_nms_iou:
+                suppression_reason = "iou"
+                break
+            if containment >= config.candidate_nms_containment:
+                suppression_reason = "containment"
+                break
+        if suppression_reason is None:
             kept.append(record)
-    return kept
+        elif suppression_reason == "iou":
+            iou_suppressed += 1
+        else:
+            containment_suppressed += 1
+    return kept, iou_suppressed, containment_suppressed
 
 
 def _load_backbone_state(path: str | Path) -> Mapping[str, Tensor]:
