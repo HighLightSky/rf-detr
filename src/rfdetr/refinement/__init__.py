@@ -20,6 +20,7 @@ from rfdetr.refinement.fsc_two_stage import (
     label_fsc_candidate,
     pool_dino_features,
 )
+from rfdetr.refinement.two_stage_plugin import TwoStageConfig, TwoStagePlugin, TwoStagePluginLoader, TwoStageStats
 
 __all__ = [
     "FSCScoreFusion",
@@ -35,4 +36,8 @@ __all__ = [
     "iou_xyxy",
     "label_fsc_candidate",
     "pool_dino_features",
+    "TwoStageConfig",
+    "TwoStagePlugin",
+    "TwoStagePluginLoader",
+    "TwoStageStats",
 ]

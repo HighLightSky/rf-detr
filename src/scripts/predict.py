@@ -315,6 +315,7 @@ def _infer_image(
     image_path: Path,
     conf_threshold: float,
     reason_plugin_kwargs: dict[str, object] | None = None,
+    two_stage_cfg: eval_lib.TwoStageConfig | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, tuple[int, int]]:
     """对单张图片执行推理。
 
@@ -336,7 +337,7 @@ def _infer_image(
     width, height = image_bgr.shape[1], image_bgr.shape[0]
 
     predict_kwargs: dict[str, object] = {
-        "threshold": conf_threshold,
+        "threshold": min(conf_threshold, two_stage_cfg.candidate_floor) if two_stage_cfg else conf_threshold,
         "include_source_image": False,
     }
     if reason_plugin_kwargs:
@@ -408,6 +409,9 @@ def main() -> None:
     if label_comparison_cfg is not None and not label_comparison_cfg.labels_dir.is_dir():
         raise FileNotFoundError(f"YOLO 标签目录不存在: {label_comparison_cfg.labels_dir}")
     reason_plugin_kwargs = _build_reason_plugin_kwargs(predict_cfg)
+    two_stage_cfg = eval_lib.TwoStageConfig.from_config(predict_cfg.get("two_stage"))
+    if reason_plugin_kwargs and two_stage_cfg is not None:
+        raise ValueError("predict.reason_plugin 与 predict.two_stage 不能同时启用")
     ms_nms_config = eval_lib.MsNmsConfig.from_config(predict_cfg.get("ms_nms"))
     ms_nms_total = eval_lib.SuppressionStats()
     if reason_plugin_kwargs:
@@ -421,6 +425,21 @@ def main() -> None:
     resolved_checkpoint = expcfg.resolve_paths(expcfg.PROJECT_ROOT, checkpoint)
     print(f"[i] 加载 checkpoint: {resolved_checkpoint}")
     model = RFDETR.from_checkpoint(str(resolved_checkpoint))
+    class_conf_thresholds = {
+        int(class_id): float(threshold)
+        for class_id, threshold in (predict_cfg.get("class_conf_thresholds") or {}).items()
+    }
+    if two_stage_cfg is not None:
+        eval_lib._two_stage_collection_thresholds(
+            eval_lib.InferenceCfg(conf_threshold=conf_threshold, class_conf_thresholds=class_conf_thresholds),
+            two_stage_cfg,
+        )
+    two_stage_plugin = (
+        eval_lib.TwoStagePluginLoader.load(two_stage_cfg, device=eval_lib.resolve_device("cuda:0"))
+        if two_stage_cfg is not None
+        else None
+    )
+    two_stage_stats_total = eval_lib.TwoStageStats()
 
     total_detections = 0
     pred_records: list[eval_lib.BoxRecord] = []
@@ -430,6 +449,7 @@ def main() -> None:
             image_path,
             conf_threshold,
             reason_plugin_kwargs,
+            two_stage_cfg,
         )
         raw_records = [
             eval_lib.BoxRecord(
@@ -440,6 +460,24 @@ def main() -> None:
             )
             for xyxy, score, class_id in zip(xyxy_array, score_array, class_id_array)
         ]
+        if two_stage_plugin is not None:
+            refined_records, stats = two_stage_plugin.refine_records(raw_records, {image_path.stem: image_path})
+            two_stage_stats_total.routed += stats.routed
+            two_stage_stats_total.candidate_nms_suppressed += stats.candidate_nms_suppressed
+            two_stage_stats_total.kept += stats.kept
+            two_stage_stats_total.rejected += stats.rejected
+            two_stage_stats_total.images += stats.images
+            two_stage_stats_total.elapsed_seconds += stats.elapsed_seconds
+            two_stage_stats_total.per_image_candidates.update(stats.per_image_candidates)
+            refined_records = eval_lib.filter_records_by_thresholds(
+                refined_records,
+                conf_threshold,
+                class_conf_thresholds,
+            )
+            xyxy_array = np.asarray([record.xyxy for record in refined_records], dtype=np.float32).reshape(-1, 4)
+            score_array = np.asarray([record.score for record in refined_records], dtype=np.float32)
+            class_id_array = np.asarray([record.class_id for record in refined_records], dtype=int)
+            raw_records = refined_records
         filtered_records, image_nms_stats = eval_lib.apply_shwx_ms_nms(raw_records, ms_nms_config)
         ms_nms_total = eval_lib.SuppressionStats(
             input_count=ms_nms_total.input_count + image_nms_stats.input_count,
@@ -507,6 +545,33 @@ def main() -> None:
             f"同类删除 {ms_nms_total.same_class_suppressed}，"
             f"跨类删除 {ms_nms_total.cross_class_suppressed}，"
             f"歧义保留 {ms_nms_total.ambiguous_cross_class_kept}"
+        )
+
+    if two_stage_cfg is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "two_stage_report.json").write_text(
+            json.dumps(
+                {
+                    "backend": two_stage_cfg.backend,
+                    "checkpoint": str(two_stage_cfg.checkpoint),
+                    "config": {
+                        "class_ids": list(two_stage_cfg.class_ids),
+                        "candidate_floor": two_stage_cfg.candidate_floor,
+                        "candidate_nms_iou": two_stage_cfg.candidate_nms_iou,
+                        "context_scale": two_stage_cfg.context_scale,
+                        "image_size": two_stage_cfg.image_size,
+                        "batch_size": two_stage_cfg.batch_size,
+                        "positive_threshold": two_stage_cfg.positive_threshold,
+                        "bypass_score": two_stage_cfg.bypass_score,
+                        "detector_score_weight": two_stage_cfg.detector_score_weight,
+                    },
+                    "stats": two_stage_stats_total.to_dict(),
+                    "final_count": len(pred_records),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
         )
 
     if not single_mode:

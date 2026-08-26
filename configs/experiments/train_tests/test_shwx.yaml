@@ -38,6 +38,22 @@ test:
     checkpoint: output/0818reasoning-candidate/reason_plugin_fsc.pth # 已训练插件 checkpoint 路径
     class_ids: [24] # 重打分类别；null 表示全部类别
     conf_low: null # 候选框下限；null 使用插件 checkpoint 内置值
+  # --- 二阶段 FSC 复核插件（默认关闭）---
+  # 启用时先以 candidate_floor 收集 FSC 候选，再按最终 class_conf_thresholds 筛选。
+  two_stage:
+    enabled: false
+    backend: dinov3 # dinov3 / resnet18 / mobilenet_v3_small
+    checkpoint: null # 二阶段头或自包含复核器 checkpoint
+    backbone_checkpoint: null # DINOv3 头 checkpoint 未自包含 backbone 时必填
+    class_ids: [24]
+    candidate_floor: 0.05
+    candidate_nms_iou: 0.5
+    context_scale: 2.0
+    image_size: 224
+    batch_size: 64
+    positive_threshold: 0.5 # 二阶段正类概率阈值
+    bypass_score: null # 可选：一级高置信框旁路二阶段
+    detector_score_weight: 0.0 # 联合门控中一级置信度权重
   save_fp_fn: true # 保存 FP/FN 可视化
   large_image_min_side: 2000 # 大图判定阈值（长边≥该值视为大图），大图的 FP/FN 可视化单独存到 output_dir/large_errors/
   # --- 大图切分（边界检测 → 裁切 → 目标检测 → 映射回原图）---

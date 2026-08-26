@@ -93,6 +93,7 @@ def main() -> None:
         la_bias_cfg = eval_lib.LaBiasCfg(**{k: v for k, v in la_bias_section.items() if k in la_fields})
 
     reason_plugin_cfg = eval_lib.ReasonPluginCfg.from_config(test_cfg.get("reason_plugin"))
+    two_stage_cfg = eval_lib.TwoStageConfig.from_config(test_cfg.get("two_stage"))
     ms_nms_config = eval_lib.MsNmsConfig.from_config(test_cfg.get("ms_nms"))
 
     # 可选地构造大图边界检测和 crop 队列配置。
@@ -128,6 +129,7 @@ def main() -> None:
         save_yolo_preds=bool(test_cfg.get("save_yolo_preds", False)),
         la_bias=la_bias_cfg,
         reason_plugin_cfg=reason_plugin_cfg,
+        two_stage_cfg=two_stage_cfg,
         resolution=int(test_cfg["resolution"]) if test_cfg.get("resolution") else None,
         large_image_cfg=large_image_cfg,
         ms_nms_config=ms_nms_config,

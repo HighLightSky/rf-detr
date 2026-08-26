@@ -194,7 +194,13 @@ def apply_overrides(cfg: dict[str, Any], overrides: list[str]) -> dict[str, Any]
             if not isinstance(node, dict) or key not in node:
                 raise ConfigError(f"--set 覆盖的路径不存在: {path}")
             node = node[key]
-        node[keys[-1]] = _parse_override_value(raw_value)
+        final_key: Any = keys[-1]
+        if isinstance(node, dict) and final_key not in node:
+            for existing_key in node:
+                if str(existing_key) == final_key:
+                    final_key = existing_key
+                    break
+        node[final_key] = _parse_override_value(raw_value)
     return cfg
 
 

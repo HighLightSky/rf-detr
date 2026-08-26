@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from rfdetr.models.postprocess import PostProcess
-from scripts.eval_lib import InferenceCfg, predict_batched_to_records, predict_mixed_to_records
+from scripts.eval_lib import InferenceCfg, predict_batched_to_records, predict_mixed_to_records, read_test_image_paths
 
 
 class _TinyDetector(torch.nn.Module):
@@ -49,6 +49,15 @@ def _write_image(path: Path, value: int) -> None:
     """写入固定尺寸测试图像。"""
     image = np.full((24, 32, 3), value, dtype=np.uint8)
     assert cv2.imwrite(str(path), image)
+
+
+def test_read_test_image_paths_includes_mixed_supported_formats(tmp_path: Path) -> None:
+    """测试集目录中的 JPG、JPEG 和 PNG 应同时进入评测。"""
+    for name in ("b.PNG", "a.jpg", "c.jpeg"):
+        (tmp_path / name).touch()
+    (tmp_path / "ignored.txt").touch()
+
+    assert [path.name for path in read_test_image_paths(tmp_path)] == ["a.jpg", "b.PNG", "c.jpeg"]
 
 
 def test_inference_cfg_uses_new_runtime_fields() -> None:

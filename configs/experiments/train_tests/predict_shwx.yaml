@@ -29,3 +29,18 @@ predict:
     checkpoint: null # 插件 checkpoint 路径，例如 output/reason_plugin.pth
     class_ids: [24] # 需要重打分的类别；null 表示全部类别
     conf_low: null # 候选框下限；null 使用插件 checkpoint 内置值
+  # --- 二阶段 FSC 复核插件（默认关闭）---
+  two_stage:
+    enabled: false
+    backend: dinov3
+    checkpoint: null
+    backbone_checkpoint: null
+    class_ids: [24]
+    candidate_floor: 0.05
+    candidate_nms_iou: 0.5
+    context_scale: 2.0
+    image_size: 224
+    batch_size: 64
+    positive_threshold: 0.5
+    bypass_score: null
+    detector_score_weight: 0.0

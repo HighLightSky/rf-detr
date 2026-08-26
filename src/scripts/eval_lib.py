@@ -41,6 +41,7 @@ if str(SRC_DIR) not in sys.path:
 
 # 类别名称统一来自 sscl/prompts/*.yaml，保证与语义矩阵的类别索引一致
 from rfdetr import RFDETR  # noqa: E402
+from rfdetr.refinement import TwoStageConfig, TwoStagePlugin, TwoStagePluginLoader, TwoStageStats  # noqa: E402
 from rfdetr.sscl.prompts import (  # noqa: E402
     DIOR_CLASS_NAMES,
     SHWX_CLASS_NAMES,
@@ -334,6 +335,39 @@ class ReasonPluginCfg:
         return cls(checkpoint=checkpoint, class_ids=class_ids, conf_low=conf_low)
 
 
+def filter_records_by_thresholds(
+    records: list[BoxRecord],
+    conf_threshold: float,
+    class_conf_thresholds: Mapping[int, float] | None = None,
+) -> list[BoxRecord]:
+    """按最终全局和逐类阈值筛选检测框。"""
+    return [
+        record
+        for record in records
+        if float(record.score or 0.0)
+        > float(class_conf_thresholds.get(record.class_id, conf_threshold) if class_conf_thresholds else conf_threshold)
+    ]
+
+
+def _two_stage_collection_thresholds(
+    infer: InferenceCfg,
+    config: TwoStageConfig | None,
+) -> dict[int, float]:
+    """构造二阶段候选收集阈值，目标类别保留到 candidate_floor。"""
+    thresholds = dict(infer.class_conf_thresholds)
+    if config is None:
+        return thresholds
+    for class_id in config.class_ids:
+        final_threshold = thresholds.get(class_id, infer.conf_threshold)
+        if config.candidate_floor > final_threshold:
+            raise ValueError(
+                "two_stage.candidate_floor 不能高于目标类别最终阈值: "
+                f"class_id={class_id}, candidate_floor={config.candidate_floor}, final={final_threshold}"
+            )
+        thresholds[class_id] = config.candidate_floor
+    return thresholds
+
+
 @dataclass(frozen=True)
 class LabelComparisonCfg:
     """YOLO 标签对比可视化配置。
@@ -492,11 +526,14 @@ class LaBiasCfg:
 
 def read_test_image_paths(image_dir: Path) -> list[Path]:
     """从测试图像目录扫描图像路径列表（按文件名排序）。"""
-    image_paths = sorted(image_dir.glob("*.jpg"))
+    supported_suffixes = {".jpg", ".jpeg", ".png"}
+    image_paths = sorted(
+        path
+        for path in image_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in supported_suffixes
+    )
     if not image_paths:
-        image_paths = sorted(image_dir.glob("*.png"))
-    if not image_paths:
-        raise FileNotFoundError(f"测试图像目录中未找到 .jpg/.png 文件: {image_dir}")
+        raise FileNotFoundError(f"测试图像目录中未找到 .jpg/.jpeg/.png 文件: {image_dir}")
     return image_paths
 
 
@@ -2020,6 +2057,7 @@ def run_evaluation(
     save_yolo_preds: bool = False,
     la_bias: LaBiasCfg | None = None,
     reason_plugin_cfg: ReasonPluginCfg | None = None,
+    two_stage_cfg: TwoStageConfig | None = None,
     resolution: int | None = None,
     large_image_cfg: LargeImageCfg | None = None,
     ms_nms_config: MsNmsConfig | None = None,
@@ -2038,6 +2076,7 @@ def run_evaluation(
         save_yolo_preds: 是否输出 YOLO 格式预测框（每图一个 txt，供归因脚本使用）。
         la_bias: 推理侧 LA bias 配置（``None`` 表示不生效）。
         reason_plugin_cfg: FFT 一致性插件配置；``None`` 时保持普通测试流程。
+        two_stage_cfg: 二阶段视觉复核插件配置；``None`` 时保持普通测试流程。
         resolution: 可选：推理输入分辨率。构造参数优先于 checkpoint 记录的
             ``model_config``（例如 nano 以 704 训练时强制 704 推理）；
             ``None`` 用 checkpoint 记录的分辨率。
@@ -2124,6 +2163,18 @@ def run_evaluation(
     print(f"[i] 已加载模型: {type(model).__name__} | 分辨率: {int(model.model.resolution)}")
     # from_checkpoint 已用同一份 state dict 完成语义头重建。
 
+    if reason_plugin_cfg is not None and two_stage_cfg is not None:
+        raise ValueError("reason_plugin 与 two_stage 不能同时启用")
+    two_stage_plugin: TwoStagePlugin | None = None
+    if two_stage_cfg is not None:
+        two_stage_plugin = TwoStagePluginLoader.load(two_stage_cfg, device=device)
+        print(
+            f"[i] 启用二阶段插件: backend={two_stage_cfg.backend} "
+            f"class_ids={two_stage_cfg.class_ids} candidate_floor={two_stage_cfg.candidate_floor}"
+        )
+
+    collection_thresholds = _two_stage_collection_thresholds(infer, two_stage_cfg)
+
     # reason plugin 只加载一次，普通图和大图 crop 共用同一实例并保持 FP32。
     reason_plugin = None
     reason_class_embed: torch.Tensor | None = None
@@ -2170,7 +2221,7 @@ def run_evaluation(
             crop_sources,
             device,
             conf_threshold=infer.conf_threshold,
-            class_conf_thresholds=infer.class_conf_thresholds,
+            class_conf_thresholds=collection_thresholds,
             batch_size=infer.batch_size,
             num_workers=infer.num_workers,
             crop_conf_threshold=large_image_cfg.detector_conf,
@@ -2219,7 +2270,7 @@ def run_evaluation(
             test_image_paths,
             device,
             conf_threshold=infer.conf_threshold,
-            class_conf_thresholds=infer.class_conf_thresholds,
+            class_conf_thresholds=collection_thresholds,
             batch_size=infer.batch_size,
             num_workers=infer.num_workers,
             la_bias=la_bias,
@@ -2238,6 +2289,12 @@ def run_evaluation(
     del model
     release_cuda_cache(device)
 
+    two_stage_stats: TwoStageStats | None = None
+    if two_stage_plugin is not None:
+        image_sources = {path.stem: path for path in test_image_paths}
+        pred_records, two_stage_stats = two_stage_plugin.refine_records(pred_records, image_sources)
+        pred_records = filter_records_by_thresholds(pred_records, infer.conf_threshold, infer.class_conf_thresholds)
+
     # 所有普通图片和 crop 已经完成坐标还原并合并后，再执行最终候选框去重。
     ms_nms_stats = SuppressionStats(input_count=len(pred_records), output_count=len(pred_records))
     if ms_nms_config is not None and ms_nms_config.enabled:
@@ -2253,6 +2310,29 @@ def run_evaluation(
             f"同类删除 {ms_nms_stats.same_class_suppressed}，"
             f"跨类删除 {ms_nms_stats.cross_class_suppressed}，"
             f"歧义保留 {ms_nms_stats.ambiguous_cross_class_kept}"
+        )
+
+    if two_stage_plugin is not None and two_stage_cfg is not None and two_stage_stats is not None:
+        dataset.exp_output_dir.mkdir(parents=True, exist_ok=True)
+        report = {
+            "backend": two_stage_cfg.backend,
+            "checkpoint": str(two_stage_cfg.checkpoint),
+            "config": {
+                "class_ids": list(two_stage_cfg.class_ids),
+                "candidate_floor": two_stage_cfg.candidate_floor,
+                "candidate_nms_iou": two_stage_cfg.candidate_nms_iou,
+                "context_scale": two_stage_cfg.context_scale,
+                "image_size": two_stage_cfg.image_size,
+                "batch_size": two_stage_cfg.batch_size,
+                "positive_threshold": two_stage_cfg.positive_threshold,
+                "bypass_score": two_stage_cfg.bypass_score,
+                "detector_score_weight": two_stage_cfg.detector_score_weight,
+            },
+            "stats": two_stage_stats.to_dict(),
+            "final_count": len(pred_records),
+        }
+        (dataset.exp_output_dir / "two_stage_report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
     # 可选保存 YOLO 格式预测，供漏检和虚警归因脚本使用。
