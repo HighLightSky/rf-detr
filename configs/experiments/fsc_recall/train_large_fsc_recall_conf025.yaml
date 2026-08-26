@@ -1,24 +1,25 @@
-# 从固定 medium baseline 续训一级 FSC 检测器。
+# 从 Large 训练断点恢复，并以固定部署阈值选择一级检测权重。
 model:
-  variant: medium
+  variant: large
   num_classes: 25
   resolution: 1024
   gradient_checkpointing: true
-  pretrain_weights: output/0825-rfdetr-final-baseline/checkpoint_best_total.pth
+  pretrain_weights: /home/liu/.roboflow/models/rf-detr-large-2026.pth
 
 train:
   dataset_dir: output/0826_发射车细粒度检测/04_数据准备与候选缓存/0826-fsc-internal-holdout
   dataset_file: yolo
-  output_dir: output/0826_发射车细粒度检测/01_一级检测器召回实验/0826-fsc-recall-medium
-  epochs: 20
+  output_dir: output/0826_发射车细粒度检测/01_一级检测器召回实验/0826-fsc-recall-large-conf025
+  resume: output/0826_发射车细粒度检测/01_一级检测器召回实验/0826-fsc-recall-large/last.ckpt
+  epochs: 24
   batch_size: 16
   grad_accum_steps: 4
   num_workers: 8
   prefetch_factor: 4
   persistent_workers: true
   pin_memory: true
-  lr: 2.0e-5
-  lr_encoder: 5.0e-6
+  lr: 1.0e-4
+  lr_encoder: 1.5e-4
   lr_drop: 14
   weight_decay: 1.0e-4
   clip_max_norm: 0.1
@@ -28,9 +29,11 @@ train:
   mosaic_p: 0.1
   class_balanced_sampling: true
   class_balanced_class_ids: [24]
+  checkpoint_interval: 1
   best_metric: f1
   f1_class_groups: {vehicle: [24]}
   f1_group_iou_thresholds: {vehicle: 0.35}
+  f1_confidence_threshold: 0.25
   eval_interval: 1
   use_ema: true
   compute_val_loss: false

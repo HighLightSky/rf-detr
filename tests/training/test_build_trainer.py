@@ -179,6 +179,13 @@ class TestBuildTrainerCallbacks:
 
         assert eval_cb._f1_class_iou_thresholds == {24: 0.35}
 
+    def test_detection_f1_confidence_threshold_is_forwarded_to_eval_callback(self, tmp_path):
+        """固定 F1 置信度应传递给 COCO 评估回调。"""
+        trainer = build_trainer(_tc(tmp_path, best_metric="f1", f1_confidence_threshold=0.25), _mc())
+        eval_cb = next(cb for cb in trainer.callbacks if cb.__class__.__name__ == "COCOEvalCallback")
+
+        assert eval_cb._f1_confidence_threshold == 0.25
+
     def test_detection_f1_rejects_ema_only_validation(self, tmp_path):
         """F1 选择拒绝仅 EMA 验证，避免保存未被验证的 regular 权重。"""
         with pytest.raises(ValueError, match="best_metric='f1'"):

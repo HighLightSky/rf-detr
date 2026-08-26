@@ -9,7 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from scripts.refinement.train_fsc_dinov3_head import _is_better_metric, _load_rows
+from scripts.refinement.train_fsc_dinov3_head import _INTERNAL_HOLDOUT_SALT, _is_better_metric, _load_rows
 
 
 def test_load_rows_uses_only_train_candidates_for_holdout(tmp_path: Path) -> None:
@@ -21,7 +21,7 @@ def test_load_rows_uses_only_train_candidates_for_holdout(tmp_path: Path) -> Non
         name = f"image-{index}.png"
         row = {"image": f"/data/{name}", "split": "train", "label": index % 2, "xyxy": [0, 0, 1, 1]}
         candidates.append(row)
-        digest = hashlib.sha256(name.encode("utf-8")).digest()
+        digest = hashlib.sha256(f"{_INTERNAL_HOLDOUT_SALT}{name}".encode("utf-8")).digest()
         (expected_holdout if int.from_bytes(digest[:8], "big") % 5 == 0 else expected_train).add(name)
     candidates.append({"image": "/data/test-like.png", "split": "val", "label": 0, "xyxy": [0, 0, 1, 1]})
     path = tmp_path / "cache.json"

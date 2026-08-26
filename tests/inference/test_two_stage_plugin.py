@@ -107,6 +107,26 @@ class _FakeTwoStagePlugin(TwoStagePlugin):
         return np.asarray(self._decisions[: len(boxes)], dtype=bool)
 
 
+class _ScoredFakeTwoStagePlugin(TwoStagePlugin):
+    """返回固定二阶段 FSC 概率的测试插件。"""
+
+    def __init__(self, probabilities: list[float]) -> None:
+        """初始化固定二阶段概率。"""
+        self.config = TwoStageConfig(
+            enabled=True,
+            backend="resnet18",
+            checkpoint="unused",
+            candidate_floor=0.05,
+            candidate_nms_iou=0.5,
+            batch_size=8,
+        )
+        self._probabilities = probabilities
+
+    def _predict(self, images: list[Image.Image], boxes: list[BoxRecord]) -> np.ndarray:
+        """返回预设的二阶段 FSC 概率。"""
+        return np.asarray(self._probabilities[: len(boxes)], dtype=np.float32)
+
+
 def test_two_stage_refine_keeps_other_classes_and_applies_candidate_nms(tmp_path: Path) -> None:
     """二阶段只处理目标类别，并在分类前抑制重叠候选。"""
     image_path = tmp_path / "image.png"
@@ -119,7 +139,12 @@ def test_two_stage_refine_keeps_other_classes_and_applies_candidate_nms(tmp_path
     ]
     plugin = _FakeTwoStagePlugin([True])
     output, stats = plugin.refine_records(records, {"image": image_path})
-    assert output == [records[0], records[3]]
+    assert len(output) == 2
+    assert output[0].image_id == records[0].image_id
+    assert output[0].class_id == records[0].class_id
+    assert output[0].xyxy == records[0].xyxy
+    assert output[0].score == 1.0
+    assert output[1] == records[3]
     assert stats.routed == 1
     assert stats.candidate_nms_suppressed == 1
     assert stats.kept == 1
@@ -137,6 +162,22 @@ def test_two_stage_refine_rejects_target_candidate(tmp_path: Path) -> None:
     assert stats.routed == 1
     assert stats.kept == 0
     assert stats.rejected == 1
+
+
+def test_two_stage_refine_replaces_accepted_target_score_with_second_stage_probability(tmp_path: Path) -> None:
+    """二阶段接受低分候选时，最终分数应来自二阶段而非一级。"""
+    image_path = tmp_path / "image.png"
+    Image.new("RGB", (32, 32), color=(0, 0, 0)).save(image_path)
+    target = BoxRecord("image", 24, (2.0, 2.0, 20.0, 20.0), 0.08)
+
+    output, stats = _ScoredFakeTwoStagePlugin([0.76]).refine_records([target], {"image": image_path})
+
+    assert len(output) == 1
+    assert output[0].image_id == target.image_id
+    assert output[0].class_id == target.class_id
+    assert output[0].xyxy == target.xyxy
+    assert output[0].score == pytest.approx(0.76)
+    assert stats.kept == 1
 
 
 def test_two_stage_refine_empty_candidates() -> None:

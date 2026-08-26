@@ -233,6 +233,18 @@ class TestTrainConfigRejectsUnknownKwargs:
 
         assert config.f1_class_groups is None
 
+    def test_f1_confidence_threshold_accepts_fixed_deployment_value(self, tmp_path) -> None:
+        """TrainConfig 接受用于固定部署阈值选权的置信度。"""
+        config = TrainConfig(dataset_dir=str(tmp_path), output_dir=str(tmp_path), f1_confidence_threshold=0.25)
+
+        assert config.f1_confidence_threshold == 0.25
+
+    @pytest.mark.parametrize("threshold", [-0.01, 1.01])
+    def test_f1_confidence_threshold_rejects_out_of_range_value(self, tmp_path, threshold: float) -> None:
+        """TrainConfig 拒绝区间外的固定 F1 置信度。"""
+        with pytest.raises(ValidationError, match="f1_confidence_threshold"):
+            TrainConfig(dataset_dir=str(tmp_path), output_dir=str(tmp_path), f1_confidence_threshold=threshold)
+
     def test_f1_class_groups_accept_valid_groups(self, tmp_path) -> None:
         """TrainConfig 接受非重叠的 F1 类别分组。"""
         groups = {"ship": [0, 1], "aircraft": [2, 3], "vehicle": [24]}

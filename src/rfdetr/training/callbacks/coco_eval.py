@@ -120,8 +120,9 @@ class COCOEvalCallback(Callback):
             always computed when ``trainer.test()`` is called.
         log_per_class_metrics: When ``False``, skip per-class AP computation
             (``MeanAveragePrecision(class_metrics=False)``) as well as the per-class logging/table.
-        f1_class_groups: F1 扫描使用的组名到类别 ID 映射。
-        f1_group_iou_thresholds: F1 扫描使用的组名到 IoU 阈值映射。
+        f1_class_groups: F1 评估使用的组名到类别 ID 映射。
+        f1_group_iou_thresholds: F1 评估使用的组名到 IoU 阈值映射。
+        f1_confidence_threshold: 固定 F1 评估阈值；None 时扫描全部候选阈值。
         eval_ema_only: When ``True``, ``validation_step`` already forwarded through the EMA
             model directly (see ``TrainConfig.eval_ema_only``), so the independent duplicate
             EMA forward pass this callback would otherwise run every validation batch is
@@ -139,6 +140,7 @@ class COCOEvalCallback(Callback):
         eval_ema_only: bool = False,
         f1_class_groups: Mapping[str, Sequence[int]] | None = None,
         f1_group_iou_thresholds: Mapping[str, float] | None = None,
+        f1_confidence_threshold: float | None = None,
     ) -> None:
         super().__init__()
         self._max_dets = max_dets
@@ -156,6 +158,7 @@ class COCOEvalCallback(Callback):
             for group_name, class_ids in (self._f1_class_groups or {}).items()
             for class_id in class_ids
         }
+        self._f1_confidence_threshold = f1_confidence_threshold
         self._class_names: list[str] = []
         self._cat_id_to_name: dict[int, str] = {}
         self._f1_local: dict[int, dict[str, Any]] = init_matching_accumulator()
@@ -175,6 +178,12 @@ class COCOEvalCallback(Callback):
             self._in_notebook = _is_running_in_notebook()
         else:
             self._in_notebook = in_notebook
+
+    def _f1_thresholds(self) -> np.ndarray:
+        """返回本次 F1 评估需要使用的置信度阈值。"""
+        if self._f1_confidence_threshold is not None:
+            return np.asarray([self._f1_confidence_threshold], dtype=np.float64)
+        return np.linspace(0, 1, 101)
 
     # ------------------------------------------------------------------
     # PTL lifecycle hooks
@@ -705,7 +714,7 @@ class COCOEvalCallback(Callback):
             classes_with_gt = [i for i, cid in enumerate(sorted_ids) if merged[cid]["total_gt"] > 0]
             f1_results = sweep_confidence_thresholds(
                 per_class_list,
-                np.linspace(0, 1, 101),
+                self._f1_thresholds(),
                 classes_with_gt,
                 class_ids=sorted_ids,
                 class_groups=self._f1_class_groups,

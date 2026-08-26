@@ -7,9 +7,9 @@ model:
   gradient_checkpointing: true
 
 train:
-  dataset_dir: output/0826-shwx-current-26-truck-pseudo-v4
+  dataset_dir: output/0826_发射车细粒度检测/06_26类卡车辅助实验/0826-shwx-current-26-truck-pseudo-v4
   dataset_file: yolo
-  output_dir: output/0826-shwx-current-26-truck-detector-v4
+  output_dir: output/0826_发射车细粒度检测/06_26类卡车辅助实验/0826-shwx-current-26-truck-detector-v4
   epochs: 8
   batch_size: 8
   grad_accum_steps: 2

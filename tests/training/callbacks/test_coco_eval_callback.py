@@ -91,6 +91,18 @@ class TestSetup:
 
         assert cb._in_notebook is False
 
+    def test_fixed_f1_confidence_uses_exactly_one_threshold(self) -> None:
+        """固定 F1 评估不能退化为全阈值扫描。"""
+        cb = COCOEvalCallback(f1_confidence_threshold=0.25)
+
+        assert np.array_equal(cb._f1_thresholds(), np.asarray([0.25]))
+
+    def test_default_f1_confidence_keeps_full_threshold_sweep(self) -> None:
+        """未指定固定置信度时保持原有 F1 阈值扫描。"""
+        cb = COCOEvalCallback()
+
+        assert np.array_equal(cb._f1_thresholds(), np.linspace(0, 1, 101))
+
     def test_detection_iou_type_is_bbox(self) -> None:
         """Detection mode uses iou_type='bbox'."""
         cb = COCOEvalCallback(max_dets=300, segmentation=False)

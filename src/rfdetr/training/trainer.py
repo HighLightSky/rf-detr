@@ -563,6 +563,7 @@ def build_trainer(
             eval_ema_only=tc.eval_ema_only,
             f1_class_groups=tc.f1_class_groups,
             f1_group_iou_thresholds=tc.f1_group_iou_thresholds,
+            f1_confidence_threshold=tc.f1_confidence_threshold,
         )
     )
 

@@ -1202,6 +1202,12 @@ class TrainConfig(BaseConfig):
         default=None,
         description="F1 分组匹配 IoU 阈值，格式为 {组名: 阈值}；未配置的组和类别使用 0.5。",
     )
+    f1_confidence_threshold: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="F1 选权的固定置信度阈值；None 时沿用全阈值扫描。",
+    )
     skip_best_epochs: int = Field(default=0, ge=0)
     smooth_alpha: float = 0.0
     warmup_epochs: float = 0.0

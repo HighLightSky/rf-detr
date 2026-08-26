@@ -293,7 +293,7 @@ class TwoStagePlugin:
             classify_records.extend(group)
 
         decisions = self._predict(classify_images, classify_records)
-        accepted = set()
+        accepted_scores: dict[int, float] = {}
         for record, probability in zip(classify_records, decisions, strict=True):
             detector_score = float(record.score or 0.0)
             fused_probability = (
@@ -303,14 +303,23 @@ class TwoStagePlugin:
             if fused_probability >= self.config.positive_threshold or (
                 self.config.bypass_score is not None and detector_score >= self.config.bypass_score
             ):
-                accepted.add(id(record))
+                # 二阶段已完成 FSC 最终分类，必须以其置信度取代一级候选分数。
+                # 否则低分但被二阶段正确识别的候选会被后续统一阈值再次错误过滤。
+                accepted_scores[id(record)] = fused_probability
         output: list[BoxRecord] = []
         for record in records:
             if record.class_id not in self.config.class_ids:
                 output.append(record)
-            elif id(record) in accepted:
-                output.append(record)
-        stats.kept = len(accepted)
+            elif id(record) in accepted_scores:
+                output.append(
+                    BoxRecord(
+                        image_id=record.image_id,
+                        class_id=record.class_id,
+                        xyxy=record.xyxy,
+                        score=accepted_scores[id(record)],
+                    )
+                )
+        stats.kept = len(accepted_scores)
         stats.rejected = stats.routed - stats.kept
         stats.elapsed_seconds = time.perf_counter() - started
         for image in image_cache.values():

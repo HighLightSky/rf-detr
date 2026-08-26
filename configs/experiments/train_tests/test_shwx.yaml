@@ -4,14 +4,14 @@ test:
   dataset: shwx # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
   dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand
   resolution: 1024
-  checkpoint: output/0825发射车虚警抑制/原型前向加难负样本抑制/checkpoint_best_total.pth
-  output_dir: output/0825发射车虚警抑制/原型前向加难负样本抑制
+  checkpoint: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级/checkpoint_best_total.pth
+  output_dir: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级
   conf_threshold: 0.25 # 全局置信度阈值
-  class_conf_thresholds: {24 : 0.35} # 逐类阈值 {类别id: 阈值}
+  class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}
 
   # 民船NMS
   ms_nms:
-    enabled: true
+    enabled: false
     ms_class_id: 3
     ship_class_ids: [0, 1, 2, 3]
     same_class_iou: 0.80
@@ -41,10 +41,10 @@ test:
   # --- 二阶段 FSC 复核插件（默认关闭）---
   # 启用时先以 candidate_floor 收集 FSC 候选，再按最终 class_conf_thresholds 筛选。
   two_stage:
-    enabled: false
+    enabled: true
     backend: dinov3 # dinov3 / resnet18 / mobilenet_v3_small
-    checkpoint: null # 二阶段头或自包含复核器 checkpoint
-    backbone_checkpoint: null # DINOv3 头 checkpoint 未自包含 backbone 时必填
+    checkpoint: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级/fsc_dinov3_head_candidate005_recall85.pth # 二阶段头或自包含复核器 checkpoint
+    backbone_checkpoint: data/dinov3_vit_base_patch16_backbone.pth # DINOv3 头 checkpoint 未自包含 backbone 时必填
     class_ids: [24]
     candidate_floor: 0.05
     candidate_nms_iou: 0.5

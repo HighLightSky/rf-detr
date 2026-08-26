@@ -1,0 +1,38 @@
+# 原型引导+难负样本一级模型与训练集专属 DINOv3 二阶段复核的完整测试。
+# FSC 的 0.05 仅为二阶段候选入口；最终全部类别统一使用 0.25。
+test:
+  dataset: shwx
+  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand
+  resolution: 1024
+  checkpoint: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级/checkpoint_best_total.pth
+  output_dir: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级/test_full_conf025_dinov3_candidate005
+  conf_threshold: 0.25
+  ms_nms:
+    enabled: false
+  reason_plugin:
+    enabled: false
+  two_stage:
+    enabled: true
+    backend: dinov3
+    checkpoint: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级/fsc_dinov3_head_candidate005_recall85.pth
+    backbone_checkpoint: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级/dinov3_vit_base_patch16_lvd1689m_backbone.pth
+    class_ids: [24]
+    candidate_floor: 0.05
+    candidate_nms_iou: 0.5
+    context_scale: 2.0
+    image_size: 224
+    batch_size: 64
+    positive_threshold: 0.5
+    detector_score_weight: 0.0
+  device: cuda:0
+  batch_size: 16
+  num_workers: 12
+  prefetch_factor: 3
+  precision: auto
+  compile_model: false
+  copy_prefetch: true
+  warmup_batches: 1
+  progress_interval_s: 1.0
+  gpu_monitor_enabled: false
+  save_fp_fn: true
+  save_yolo_preds: false

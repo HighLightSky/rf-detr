@@ -26,6 +26,7 @@ if str(SRC_DIR) not in sys.path:
 from rfdetr.refinement import crop_fsc_context  # noqa: E402
 
 FORMAT = "shwx-fsc-dinov3-head-v1"
+_INTERNAL_HOLDOUT_SALT = "fsc-dinov3-head-v1:"
 
 
 class FSCDinoV3Head(nn.Module):
@@ -66,7 +67,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _load_rows(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    """从缓存 train 候选构建图像名哈希内部留出集。"""
+    """从缓存 train 候选构建独立哈希内部留出集。"""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("format") != "shwx-fsc-verifier-cache-v1" or payload.get("metadata", {}).get("test_split_used"):
         raise ValueError("候选缓存格式错误或已使用测试集")
@@ -75,8 +76,12 @@ def _load_rows(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[d
     for row in payload["candidates"]:
         if row["split"] != "train":
             continue
-        digest = hashlib.sha256(Path(row["image"]).name.encode("utf-8")).digest()
+        # 加 salt 避免与外层数据集的文件名哈希划分共用同一分桶规则。
+        split_key = f"{_INTERNAL_HOLDOUT_SALT}{Path(row['image']).name}"
+        digest = hashlib.sha256(split_key.encode("utf-8")).digest()
         (holdout if int.from_bytes(digest[:8], "big") % 5 == 0 else train).append(row)
+    if not train or not holdout:
+        raise ValueError("二阶段 train/holdout 候选不能为空；请检查缓存和内部切分规则")
     return payload, train, holdout
 
 
