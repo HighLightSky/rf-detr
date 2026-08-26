@@ -27,6 +27,7 @@ from rfdetr.refinement import crop_fsc_context  # noqa: E402
 
 FORMAT = "shwx-fsc-dinov3-head-v1"
 _INTERNAL_HOLDOUT_SALT = "fsc-dinov3-head-v1:"
+_DEFAULT_CONTEXT_SCALES = (2.0,)
 
 
 class FSCDinoV3Head(nn.Module):
@@ -51,6 +52,18 @@ class FSCDinoV3Head(nn.Module):
         return self.head(features)
 
 
+def normalize_context_scales(values: list[float] | tuple[float, ...]) -> tuple[float, ...]:
+    """校验并规范化固定的上下文尺度序列。"""
+    scales = tuple(float(value) for value in values)
+    if not scales:
+        raise ValueError("context-scales 不能为空")
+    if any(value <= 0.0 for value in scales):
+        raise ValueError("context-scales 必须全部为正数")
+    if len(set(scales)) != len(scales):
+        raise ValueError("context-scales 不能包含重复尺度")
+    return scales
+
+
 def _parse_args() -> argparse.Namespace:
     """解析 DINOv3 训练参数。"""
     parser = argparse.ArgumentParser(description="训练 DINOv3 FSC 二级复核头")
@@ -63,6 +76,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--negative-weight", type=float, default=4.0)
     parser.add_argument("--min-holdout-recall", type=float, default=0.0)
+    parser.add_argument("--context-scales", type=float, nargs="+", default=_DEFAULT_CONTEXT_SCALES)
     return parser.parse_args()
 
 
@@ -91,18 +105,24 @@ def _features(
     rows: list[dict[str, Any]],
     device: torch.device,
     batch_size: int,
+    context_scales: tuple[float, ...],
 ) -> tuple[Tensor, Tensor]:
-    """批量提取 DINOv3 全局图像描述子。"""
+    """批量提取并拼接多个上下文尺度的 DINOv3 描述子。"""
     features: list[Tensor] = []
     labels: list[int] = []
-    for start in range(0, len(rows), batch_size):
-        chunk = rows[start : start + batch_size]
+    sample_batch_size = max(1, batch_size // len(context_scales))
+    for start in range(0, len(rows), sample_batch_size):
+        chunk = rows[start : start + sample_batch_size]
         crops: list[Tensor] = []
         for row in chunk:
             with Image.open(row["image"]) as image:
-                crops.append(transform(crop_fsc_context(image, row["xyxy"], context_scale=2.0, output_size=224)))
+                crops.extend(
+                    transform(crop_fsc_context(image, row["xyxy"], context_scale=scale, output_size=224))
+                    for scale in context_scales
+                )
         with torch.inference_mode():
-            features.append(model(torch.stack(crops).to(device)).float().cpu())
+            encoded = model(torch.stack(crops).to(device)).float().cpu()
+        features.append(encoded.reshape(len(chunk), len(context_scales), -1).flatten(1))
         labels.extend(int(row["label"]) for row in chunk)
         if start % 512 == 0:
             print(f"[特征] {start}/{len(rows)}")
@@ -151,13 +171,14 @@ def main() -> None:
     from timm.data import create_transform, resolve_model_data_config
 
     cache, train_rows, holdout_rows = _load_rows(Path(args.cache).resolve())
+    context_scales = normalize_context_scales(args.context_scales)
     device = torch.device(args.device if torch.cuda.is_available() or not args.device.startswith("cuda") else "cpu")
     backbone = timm.create_model(args.model_name, pretrained=True, num_classes=0).to(device).eval()
     for parameter in backbone.parameters():
         parameter.requires_grad_(False)
     transform = create_transform(**resolve_model_data_config(backbone), is_training=False)
-    train_x, train_y = _features(backbone, transform, train_rows, device, args.batch_size)
-    holdout_x, holdout_y = _features(backbone, transform, holdout_rows, device, args.batch_size)
+    train_x, train_y = _features(backbone, transform, train_rows, device, args.batch_size, context_scales)
+    holdout_x, holdout_y = _features(backbone, transform, holdout_rows, device, args.batch_size, context_scales)
     head = FSCDinoV3Head(train_x.shape[1]).to(device)
     optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=1e-3)
     criterion = nn.CrossEntropyLoss(weight=torch.tensor([args.negative_weight, 1.0], device=device))
@@ -183,7 +204,9 @@ def main() -> None:
         "model_name": args.model_name,
         "source_split": "cache train only, image-name SHA256 internal holdout",
         "test_used_for_training": False,
-        "context_scale": 2.0,
+        "context_scale": context_scales[0],
+        "context_scales": list(context_scales),
+        "feature_dim_per_scale": train_x.shape[1] // len(context_scales),
         "train_count": len(train_rows),
         "holdout_count": len(holdout_rows),
         "negative_weight": args.negative_weight,

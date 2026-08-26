@@ -43,7 +43,7 @@ test:
   two_stage:
     enabled: true
     backend: dinov3 # dinov3 / resnet18 / mobilenet_v3_small
-    checkpoint: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级/fsc_dinov3_head_candidate005_recall85.pth # 二阶段头或自包含复核器 checkpoint
+    checkpoint: output/0826_发射车细粒度检测/00_当前最佳方案/原型前向_难负样本抑制_DINOv3两级/fsc_dinov3_head_candidate005_recall85.pth # 当前官方测试指标最优的 DINOv3 二阶段头
     backbone_checkpoint: data/dinov3_vit_base_patch16_backbone.pth # DINOv3 头 checkpoint 未自包含 backbone 时必填
     class_ids: [24]
     candidate_floor: 0.05

@@ -148,12 +148,26 @@ class TwoStageStats:
         }
 
 
+def _context_scales_from_metadata(metadata: Mapping[str, Any], legacy_scale: float) -> tuple[float, ...]:
+    """从 checkpoint 元数据恢复训练时固定的上下文尺度。"""
+    raw_scales = metadata.get("context_scales", [metadata.get("context_scale", legacy_scale)])
+    if not isinstance(raw_scales, (list, tuple)):
+        raise ValueError("DINOv3 checkpoint 的 context_scales 必须是数值列表")
+    scales = tuple(float(value) for value in raw_scales)
+    if not scales or any(value <= 0.0 for value in scales):
+        raise ValueError("DINOv3 checkpoint 的 context_scales 必须全部为正数")
+    if len(set(scales)) != len(scales):
+        raise ValueError("DINOv3 checkpoint 的 context_scales 不能重复")
+    return scales
+
+
 class _DinoV3Head(nn.Module):
     """兼容现有 DINOv3 FSC 头 checkpoint 的小型分类头。"""
 
     def __init__(self, feature_dim: int) -> None:
         """初始化分类头。"""
         super().__init__()
+        self.feature_dim = feature_dim
         self.head = nn.Sequential(
             nn.LayerNorm(feature_dim),
             nn.Linear(feature_dim, 256),
@@ -164,6 +178,8 @@ class _DinoV3Head(nn.Module):
 
     def forward(self, features: Tensor) -> Tensor:
         """输出非 FSC、FSC 两类 logits。"""
+        if features.ndim != 2 or features.shape[1] != self.feature_dim:
+            raise ValueError(f"features 必须为 [N, {self.feature_dim}]")
         return self.head(features)
 
 
@@ -259,6 +275,7 @@ class TwoStagePlugin:
         self._verifier: FSCVerifier | None = None
         self._backbone: nn.Module | None = None
         self._head: nn.Module | None = None
+        self._dinov3_context_scales = (config.context_scale,)
         if config.backend in {"resnet18", "mobilenet_v3_small"}:
             self._verifier = FSCVerifier.from_checkpoint(config.checkpoint, device=self.device)
             if self._verifier.policy.architecture != config.backend:
@@ -280,6 +297,7 @@ class TwoStagePlugin:
         except ImportError as exc:
             raise ImportError("dinov3 backend 需要安装 timm") from exc
         metadata = dict(payload.get("metadata") or {})
+        self._dinov3_context_scales = _context_scales_from_metadata(metadata, self.config.context_scale)
         model_name = metadata.get("model_name", "vit_base_patch16_dinov3.lvd1689m")
         backbone = timm.create_model(model_name, pretrained=False, num_classes=0)
         backbone_state = payload.get("backbone_state_dict")
@@ -310,15 +328,19 @@ class TwoStagePlugin:
                     output.append(torch.softmax(logits, dim=1)[:, 1].cpu().numpy())
             return np.concatenate(output) if output else np.zeros((0,), dtype=bool)
         assert self._backbone is not None and self._head is not None
-        crops = [self._transform(crop_fsc_context(image, record.xyxy, self.config.context_scale, self.config.image_size)) for image, record in zip(images, boxes, strict=True)]
-        output: list[np.ndarray] = []
+        crops = [
+            self._transform(crop_fsc_context(image, record.xyxy, scale, self.config.image_size))
+            for image, record in zip(images, boxes, strict=True)
+            for scale in self._dinov3_context_scales
+        ]
+        features: list[Tensor] = []
         with torch.inference_mode():
             for start in range(0, len(crops), self.config.batch_size):
                 batch = torch.stack(crops[start : start + self.config.batch_size]).to(self.device)
-                features = self._backbone(batch)
-                logits = self._head(features)
-                output.append(torch.softmax(logits, dim=1)[:, 1].cpu().numpy())
-        return np.concatenate(output) if output else np.zeros((0,), dtype=bool)
+                features.append(self._backbone(batch).float())
+            merged = torch.cat(features).reshape(len(boxes), len(self._dinov3_context_scales), -1).flatten(1)
+            logits = self._head(merged)
+        return torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
 
     def refine_records(
         self,
@@ -338,7 +360,10 @@ class TwoStagePlugin:
             kept: list[BoxRecord] = []
             for class_id in self.config.class_ids:
                 class_group = [record for record in group if record.class_id == class_id]
-                kept.extend(_nms_indices(class_group, self.config.candidate_nms_iou))
+                class_kept, iou_suppressed, containment_suppressed = _nms_indices(class_group, self.config)
+                kept.extend(class_kept)
+                stats.candidate_nms_iou_suppressed += iou_suppressed
+                stats.candidate_nms_containment_suppressed += containment_suppressed
             kept.sort(key=lambda item: float(item.score or 0.0), reverse=True)
             stats.per_image_candidates[image_id] = len(group)
             stats.routed += len(kept)
