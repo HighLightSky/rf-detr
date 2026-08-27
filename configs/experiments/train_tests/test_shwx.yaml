@@ -6,14 +6,14 @@ test:
   resolution: 1024
   checkpoint: output/0827-0825基线方案/2基线+多模态原型+SSCL+难例抑制/onnx/shwx_detector_1024.onnx
   # checkpoint: output/0827-0825基线方案/2基线+多模态原型+SSCL+难例抑制/stage1.pth
-  output_dir: output/0827-0825基线方案/2基线+多模态原型+SSCL+难例抑制/实验二-加民船NMS
+  output_dir: output/0827-0825基线方案/2基线+多模态原型+SSCL+难例抑制/实验4-加发射车NMS
   conf_threshold: 0.25 # 全局置信度阈值
   class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}
 
   # 民船NMS
   ms_nms:
-    # enabled: false
-    enabled: tiling_square_stretch
+    enabled: false
+    # enabled: tiling_square_stretch
     ms_class_id: 3
     ship_class_ids: [0, 1, 2, 3]
     same_class_iou: 0.80
@@ -24,6 +24,14 @@ test:
     cross_class_center_ratio: 0.25
     cross_class_score_margin: 0.05
     keep_ambiguous_cross_class: true
+
+  # 发射车一级候选的 IoU 与包含感知去重。
+  fsc_containment_nms:
+    enabled: true
+    containment_enabled: true
+    iou_threshold: 0.5
+    containment_threshold: 0.95
+    center_ratio_threshold: 0.35
 
   device: cuda:0 # 无 CUDA 时自动回退 CPU
   batch_size: 8 # GPU 单次前向图像数
@@ -51,10 +59,6 @@ test:
     backbone_checkpoint: data/dinov3_vit_base_patch16_backbone.pth # DINOv3 头 checkpoint 未自包含 backbone 时必填
     class_ids: [24]
     candidate_floor: 0.05
-    candidate_nms_iou: 0.5
-    candidate_containment_nms_enabled: true # 包含感知 NMS；true 时额外按包含率和中心距离抑制重复候选
-    candidate_nms_containment: 0.95
-    candidate_nms_center_ratio: 0.35
     context_scale: 2.0
     image_size: 224
     batch_size: 64

@@ -167,7 +167,7 @@ def test_per_image_runtime_keeps_each_large_image_timing_separate() -> None:
         compile_model=False,
         copy_prefetch=False,
     )
-    records, timings, stage_stats = predict_large_images_per_image(
+    records, timings, stage_stats, fsc_nms_stats = predict_large_images_per_image(
         model,
         [Path("large_a.jpg"), Path("large_b.jpg")],
         _Tiler(),
@@ -179,6 +179,8 @@ def test_per_image_runtime_keeps_each_large_image_timing_separate() -> None:
     )
 
     assert stage_stats is None
+    assert fsc_nms_stats.input_count == 2
+    assert fsc_nms_stats.output_count == 2
     assert [item["image_id"] for item in timings] == ["large_a", "large_b"]
     assert all(item["crop_count"] == 1 for item in timings)
     assert all(item["boundary_seconds"] == 0.01 for item in timings)

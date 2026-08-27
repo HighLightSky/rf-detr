@@ -48,6 +48,11 @@ from rfdetr.sscl.prompts import (  # noqa: E402
     SHWX_CLASS_NAMES,
     SHWX_TRUCK_CLASS_NAMES,
 )
+from scripts.fsc_containment_nms import (  # noqa: E402
+    FscContainmentNmsConfig,
+    FscContainmentNmsStats,
+    apply_fsc_containment_nms,
+)
 from scripts.ms_nms import MsNmsConfig, SuppressionStats, apply_shwx_ms_nms  # noqa: E402
 from val.competition_metrics import (  # noqa: E402
     BoxRecord,
@@ -2101,6 +2106,7 @@ def predict_large_images_per_image(
     two_stage_plugin: TwoStagePlugin | None,
     two_stage_cfg: TwoStageConfig | None,
     *,
+    fsc_containment_nms_config: FscContainmentNmsConfig | None = None,
     class_conf_thresholds: Mapping[int, float] | None = None,
     reason_plugin: Any | None = None,
     reason_class_embed: torch.Tensor | None = None,
@@ -2112,11 +2118,12 @@ def predict_large_images_per_image(
     roi_queue_size: int = 128,
     max_pending_crops: int = 128,
     progress_interval_s: float = 1.0,
-) -> tuple[list[BoxRecord], list[dict[str, Any]], TwoStageStats | None]:
+) -> tuple[list[BoxRecord], list[dict[str, Any]], TwoStageStats | None, FscContainmentNmsStats]:
     """逐张执行大图切分、一级检测和可选二阶段复核并记录耗时。"""
     records: list[BoxRecord] = []
     timing: list[dict[str, Any]] = []
     aggregate: TwoStageStats | None = TwoStageStats() if two_stage_plugin is not None else None
+    fsc_nms_total = FscContainmentNmsStats()
     for index, image_path in enumerate(large_paths, start=1):
         started = time.perf_counter()
         crop_sources, _, prepare_stats = tiler.prepare_one(image_path)
@@ -2150,6 +2157,16 @@ def predict_large_images_per_image(
             roi_queue_size=roi_queue_size,
             _runtime=runtime,
         )
+        crop_records, fsc_nms_stats = apply_fsc_containment_nms(
+            crop_records,
+            fsc_containment_nms_config or FscContainmentNmsConfig(),
+        )
+        fsc_nms_total = FscContainmentNmsStats(
+            input_count=fsc_nms_total.input_count + fsc_nms_stats.input_count,
+            output_count=fsc_nms_total.output_count + fsc_nms_stats.output_count,
+            iou_suppressed=fsc_nms_total.iou_suppressed + fsc_nms_stats.iou_suppressed,
+            containment_suppressed=fsc_nms_total.containment_suppressed + fsc_nms_stats.containment_suppressed,
+        )
         two_stage_elapsed = 0.0
         if two_stage_plugin is not None:
             stage_started = time.perf_counter()
@@ -2157,9 +2174,6 @@ def predict_large_images_per_image(
             two_stage_elapsed = time.perf_counter() - stage_started
             if aggregate is not None:
                 aggregate.routed += stage_stats.routed
-                aggregate.candidate_nms_suppressed += stage_stats.candidate_nms_suppressed
-                aggregate.candidate_nms_iou_suppressed += stage_stats.candidate_nms_iou_suppressed
-                aggregate.candidate_nms_containment_suppressed += stage_stats.candidate_nms_containment_suppressed
                 aggregate.kept += stage_stats.kept
                 aggregate.rejected += stage_stats.rejected
                 aggregate.images += stage_stats.images
@@ -2180,7 +2194,7 @@ def predict_large_images_per_image(
         print(f"[i] 大图 {index}/{len(large_paths)} {image_path.stem}: {total:.3f}s", flush=True)
     if aggregate is not None:
         aggregate.elapsed_seconds = sum(float(item["two_stage_seconds"]) for item in timing)
-    return records, timing, aggregate
+    return records, timing, aggregate, fsc_nms_total
 
 
 # 完整评估主流程。
@@ -2231,6 +2245,7 @@ def run_evaluation(
     resolution: int | None = None,
     large_image_cfg: LargeImageCfg | None = None,
     ms_nms_config: MsNmsConfig | None = None,
+    fsc_containment_nms_config: FscContainmentNmsConfig | None = None,
 ) -> None:
     """按比赛口径在测试集上完整评估一个 checkpoint。
 
@@ -2256,6 +2271,7 @@ def run_evaluation(
             大图 FP/FN 可视化单独保存到 ``output_dir/large_errors/``。
             ``None`` 表示不启用（保持原逻辑，全部整图推理）。
         ms_nms_config: SHWX MS 专用保守 NMS 配置；``None`` 或关闭时保持原输出。
+        fsc_containment_nms_config: 一级发射车候选的 IoU 与包含感知 NMS 配置。
     """
     os.chdir(PROJECT_ROOT)
 
@@ -2387,6 +2403,7 @@ def run_evaluation(
     two_stage_stats: TwoStageStats | None = None
     two_stage_preprocessed = False
     small_two_stage_elapsed = 0.0
+    fsc_nms_total = FscContainmentNmsStats()
     if per_image_mode:
         assert large_tiler is not None and large_image_cfg is not None
         runtime = _InferenceRuntime(
@@ -2421,6 +2438,16 @@ def run_evaluation(
             reason_class_names=reason_class_names,
             _runtime=runtime,
         )
+        small_records, small_fsc_nms_stats = apply_fsc_containment_nms(
+            small_records,
+            fsc_containment_nms_config or FscContainmentNmsConfig(),
+        )
+        fsc_nms_total = FscContainmentNmsStats(
+            input_count=small_fsc_nms_stats.input_count,
+            output_count=small_fsc_nms_stats.output_count,
+            iou_suppressed=small_fsc_nms_stats.iou_suppressed,
+            containment_suppressed=small_fsc_nms_stats.containment_suppressed,
+        )
         if two_stage_plugin is not None:
             stage_started = time.perf_counter()
             small_records, two_stage_stats = two_stage_plugin.refine_records(
@@ -2428,7 +2455,7 @@ def run_evaluation(
             )
             small_two_stage_elapsed = time.perf_counter() - stage_started
             two_stage_preprocessed = True
-        large_records, per_image_timings, large_two_stage_stats = predict_large_images_per_image(
+        large_records, per_image_timings, large_two_stage_stats, large_fsc_nms_stats = predict_large_images_per_image(
             model,
             large_paths,
             large_tiler,
@@ -2436,6 +2463,7 @@ def run_evaluation(
             large_image_cfg.detector_conf,
             two_stage_plugin,
             two_stage_cfg,
+            fsc_containment_nms_config=fsc_containment_nms_config,
             class_conf_thresholds=collection_thresholds,
             reason_plugin=reason_plugin,
             reason_class_embed=reason_class_embed,
@@ -2448,14 +2476,17 @@ def run_evaluation(
             max_pending_crops=large_image_cfg.max_pending_crops,
             progress_interval_s=infer.progress_interval_s,
         )
+        fsc_nms_total = FscContainmentNmsStats(
+            input_count=fsc_nms_total.input_count + large_fsc_nms_stats.input_count,
+            output_count=fsc_nms_total.output_count + large_fsc_nms_stats.output_count,
+            iou_suppressed=fsc_nms_total.iou_suppressed + large_fsc_nms_stats.iou_suppressed,
+            containment_suppressed=fsc_nms_total.containment_suppressed + large_fsc_nms_stats.containment_suppressed,
+        )
         if two_stage_plugin is not None:
             if two_stage_stats is None:
                 two_stage_stats = large_two_stage_stats
             elif large_two_stage_stats is not None:
                 two_stage_stats.routed += large_two_stage_stats.routed
-                two_stage_stats.candidate_nms_suppressed += large_two_stage_stats.candidate_nms_suppressed
-                two_stage_stats.candidate_nms_iou_suppressed += large_two_stage_stats.candidate_nms_iou_suppressed
-                two_stage_stats.candidate_nms_containment_suppressed += large_two_stage_stats.candidate_nms_containment_suppressed
                 two_stage_stats.kept += large_two_stage_stats.kept
                 two_stage_stats.rejected += large_two_stage_stats.rejected
                 two_stage_stats.images += large_two_stage_stats.images
@@ -2569,10 +2600,29 @@ def run_evaluation(
     del model
     release_cuda_cache(device)
 
+    if not per_image_mode:
+        pred_records, fsc_nms_total = apply_fsc_containment_nms(
+            pred_records,
+            fsc_containment_nms_config or FscContainmentNmsConfig(),
+        )
+
     if two_stage_plugin is not None and not two_stage_preprocessed:
         image_sources = {path.stem: path for path in test_image_paths}
         pred_records, two_stage_stats = two_stage_plugin.refine_records(pred_records, image_sources)
         pred_records = filter_records_by_thresholds(pred_records, infer.conf_threshold, infer.class_conf_thresholds)
+
+    if fsc_containment_nms_config is not None and fsc_containment_nms_config.enabled:
+        dataset.exp_output_dir.mkdir(parents=True, exist_ok=True)
+        (dataset.exp_output_dir / "fsc_containment_nms_stats.json").write_text(
+            json.dumps(fsc_nms_total.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(
+            "[i] FSC 一级包含 NMS: "
+            f"输入 {fsc_nms_total.input_count}，输出 {fsc_nms_total.output_count}，"
+            f"IoU 删除 {fsc_nms_total.iou_suppressed}，"
+            f"包含删除 {fsc_nms_total.containment_suppressed}"
+        )
 
     # 所有普通图片和 crop 已经完成坐标还原并合并后，再执行最终候选框去重。
     ms_nms_stats = SuppressionStats(input_count=len(pred_records), output_count=len(pred_records))
@@ -2599,10 +2649,6 @@ def run_evaluation(
             "config": {
                 "class_ids": list(two_stage_cfg.class_ids),
                 "candidate_floor": two_stage_cfg.candidate_floor,
-                "candidate_nms_iou": two_stage_cfg.candidate_nms_iou,
-                "candidate_containment_nms_enabled": two_stage_cfg.candidate_containment_nms_enabled,
-                "candidate_nms_containment": two_stage_cfg.candidate_nms_containment,
-                "candidate_nms_center_ratio": two_stage_cfg.candidate_nms_center_ratio,
                 "context_scale": two_stage_cfg.context_scale,
                 "image_size": two_stage_cfg.image_size,
                 "batch_size": two_stage_cfg.batch_size,

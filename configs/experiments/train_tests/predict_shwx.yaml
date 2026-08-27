@@ -20,6 +20,12 @@ predict:
     cross_class_center_ratio: 0.25
     cross_class_score_margin: 0.05
     keep_ambiguous_cross_class: true
+  fsc_containment_nms:
+    enabled: false
+    containment_enabled: false
+    iou_threshold: 0.5
+    containment_threshold: 0.95
+    center_ratio_threshold: 0.35
   label_comparison:
     enabled: true
     labels_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand/labels/train/
@@ -37,10 +43,6 @@ predict:
     backbone_checkpoint: null
     class_ids: [24]
     candidate_floor: 0.05
-    candidate_nms_iou: 0.5
-    candidate_containment_nms_enabled: false # 包含感知 NMS；true 时额外按包含率和中心距离抑制重复候选
-    candidate_nms_containment: 0.95
-    candidate_nms_center_ratio: 0.35
     context_scale: 2.0
     image_size: 224
     batch_size: 64
