@@ -1,0 +1,44 @@
+pipeline:
+  preprocess:
+    name: shwx_large_image
+    large_image_min_side: 2000
+    boundary_confidence: 0.25
+    padding: 0
+    boundary_nms_iou: 0.50
+    proxy_max_side: 704
+  detector:
+    name: rfdetr_multi_backend
+    device: cuda:0
+    batch_size: 1
+    roles:
+      main:
+        backend: pytorch
+        model: stage1.pth
+        proto_guidance_artifact: proto_guidance_shwx_1024_from120ep.pt
+        resolution: 1024
+      boundary:
+        backend: onnx
+        model: large_cut_boundary_704.onnx
+        resolution: 704
+  postprocess:
+    name: shwx_competition_v1
+    confidence_threshold: 0.25
+    class_names: resources/shwx_class_names.yaml
+    ms_nms:
+      enabled: true
+      ms_class_id: 3
+      ship_class_ids: [0, 1, 2, 3]
+      same_class_iou: 0.80
+      same_class_containment: 0.90
+      same_class_center_ratio: 0.35
+      cross_class_iou: 0.90
+      cross_class_containment: 0.95
+      cross_class_center_ratio: 0.25
+      cross_class_score_margin: 0.05
+      keep_ambiguous_cross_class: true
+    fsc_containment_nms:
+      enabled: true
+      containment_enabled: true
+      iou_threshold: 0.50
+      containment_threshold: 0.95
+      center_ratio_threshold: 0.35
