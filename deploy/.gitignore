@@ -5,3 +5,6 @@ app/vendor/rfdetr/
 environment.yml
 __pycache__/
 *.py[cod]
+
+test-input
+test-output

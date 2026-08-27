@@ -21,6 +21,13 @@ class OnnxRfdetrDetector(Detector):
             import onnxruntime as ort
         except ImportError as exc:
             raise RuntimeError("ONNX 后端缺少 onnxruntime-gpu 依赖") from exc
+        preload_dlls = getattr(ort, "preload_dlls", None)
+        if not callable(preload_dlls):
+            raise RuntimeError("当前 onnxruntime-gpu 不支持 preload_dlls，请使用 1.21 或更高版本")
+        try:
+            preload_dlls(directory="")
+        except Exception as exc:
+            raise RuntimeError("无法从 Python NVIDIA 运行库预加载 CUDA/cuDNN 动态库") from exc
         self._role = role
         self._batch_size = detector_config.batch_size
         self._session = ort.InferenceSession(
