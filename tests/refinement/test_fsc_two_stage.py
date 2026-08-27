@@ -47,6 +47,17 @@ def test_crop_fsc_context_returns_square_rgb_for_degenerate_box() -> None:
     assert crop.size == (32, 32)
 
 
+def test_crop_fsc_context_shifts_edge_window_without_aspect_distortion() -> None:
+    """左侧越界的正方形窗口应平移回图内，不能截短后拉伸。"""
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    image[:, 20, 0] = 255
+
+    crop = crop_fsc_context(image, (0.0, 10.0, 20.0, 30.0), context_scale=2.0, output_size=40)
+
+    red_column = int(np.asarray(crop)[..., 0].mean(axis=0).argmax())
+    assert red_column == 20
+
+
 def test_label_fsc_candidate_uses_fsc_iou_threshold() -> None:
     """只有达到车辆评测 IoU 门槛的 FSC 候选才是正样本。"""
     gt = [(24, (0.0, 0.0, 10.0, 10.0)), (8, (20.0, 20.0, 30.0, 30.0))]

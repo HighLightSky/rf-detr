@@ -11,6 +11,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -71,10 +72,11 @@ def _candidate_overview(image: Image.Image, xyxy: list[float]) -> Image.Image:
     """生成带候选框的较宽局部场景视图。"""
     x0, y0, x1, y1 = xyxy
     width, height = max(x1 - x0, 1.0), max(y1 - y0, 1.0)
-    left = max(int(x0 - width), 0)
-    top = max(int(y0 - height), 0)
-    right = min(int(x1 + width), image.width)
-    bottom = min(int(y1 + height), image.height)
+    side = min(max(1, int(math.ceil(max(width, height) * 3.0))), image.width, image.height)
+    center_x, center_y = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+    left = min(max(0, int(math.floor(center_x - side * 0.5))), image.width - side)
+    top = min(max(0, int(math.floor(center_y - side * 0.5))), image.height - side)
+    right, bottom = left + side, top + side
     overview = image.crop((left, top, right, bottom)).resize((_TILE_SIZE, _TILE_SIZE))
     draw = ImageDraw.Draw(overview)
     scale_x = _TILE_SIZE / max(right - left, 1)

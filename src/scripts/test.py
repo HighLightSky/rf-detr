@@ -118,6 +118,7 @@ def main() -> None:
             roi_queue_size=int(test_cfg.get("roi_queue_size", 128)),
             roi_cache_dir=test_cfg.get("roi_cache_dir"),
             strict_roi_backend=bool(test_cfg.get("strict_roi_backend", False)),
+            inference_mode=str(test_cfg.get("large_image_inference_mode", "mixed")),
         )
 
     # 可选覆盖推理分辨率；省略时使用 checkpoint 记录的分辨率。

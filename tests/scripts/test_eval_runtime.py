@@ -15,7 +15,14 @@ import numpy as np
 import torch
 
 from rfdetr.models.postprocess import PostProcess
-from scripts.eval_lib import InferenceCfg, predict_batched_to_records, predict_mixed_to_records, read_test_image_paths
+from scripts.eval_lib import (
+    InferenceCfg,
+    _InferenceRuntime,
+    predict_batched_to_records,
+    predict_large_images_per_image,
+    predict_mixed_to_records,
+    read_test_image_paths,
+)
 
 
 class _TinyDetector(torch.nn.Module):
@@ -129,3 +136,50 @@ def test_mixed_runtime_maps_crop_boxes_and_keeps_small_images(tmp_path: Path) ->
     assert gpu_util is None
     assert timed_images == 2
     assert elapsed >= 0.0
+
+
+def test_per_image_runtime_keeps_each_large_image_timing_separate() -> None:
+    """逐张模式的耗时明细应只包含对应大图的 crop 推理。"""
+    class _Tiler:
+        """返回固定 crop 的最小切分器。"""
+
+        def prepare_one(
+            self, image_path: Path
+        ) -> tuple[
+            list[tuple[str, np.ndarray, tuple[int, int, int, int]]],
+            list[tuple[float, float, float, float]],
+            dict[str, float],
+        ]:
+            """为每张输入返回一个内存 crop。"""
+            image = np.full((32, 32, 3), 120, dtype=np.uint8)
+            return [(image_path.stem, image, (0, 0, 32, 32))], [], {
+                "boundary_seconds": 0.01,
+                "crop_prepare_seconds": 0.02,
+            }
+
+    model = _fake_model()
+    runtime = _InferenceRuntime(
+        model,
+        device="cpu",
+        resolution=32,
+        batch_size=2,
+        precision="fp32",
+        compile_model=False,
+        copy_prefetch=False,
+    )
+    records, timings, stage_stats = predict_large_images_per_image(
+        model,
+        [Path("large_a.jpg"), Path("large_b.jpg")],
+        _Tiler(),
+        runtime,
+        detector_conf=0.5,
+        two_stage_plugin=None,
+        two_stage_cfg=None,
+        progress_interval_s=0.0,
+    )
+
+    assert stage_stats is None
+    assert [item["image_id"] for item in timings] == ["large_a", "large_b"]
+    assert all(item["crop_count"] == 1 for item in timings)
+    assert all(item["boundary_seconds"] == 0.01 for item in timings)
+    assert len(records) == 2

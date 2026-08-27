@@ -202,3 +202,67 @@ class LargeImageTiler:
             "fallback_count": float(fallback_count),
             "crop_prepare_seconds": crop_prepare_elapsed,
         }
+
+    def prepare_one(
+        self,
+        image_path: Path,
+    ) -> tuple[
+        list[tuple[str, Path, tuple[int, int, int, int]]],
+        list[tuple[float, float, float, float]],
+        dict[str, float],
+    ]:
+        """为单张大图执行边界检测并生成 crop 来源，保留边界模型供后续图像复用。"""
+        boundary_t0 = time.perf_counter()
+        proxy_t0 = boundary_t0
+        source = create_image_source(
+            image_path,
+            backend=self.roi_backend,
+            cache_dir=self.roi_cache_dir,
+            strict=self.strict_roi_backend,
+        )
+        proxy, original_size = source.read_proxy(self.proxy_max_side)
+        proxy_elapsed = time.perf_counter() - proxy_t0
+        boundary_results = predict_proxy_boundaries(
+            self.boundary_model,
+            [(image_path.stem, proxy, original_size)],
+            device=self.device,
+            resolution=self.boundary_resolution,
+            conf_threshold=self.boundary_conf,
+            batch_size=1,
+            backend=self.boundary_backend,
+            square_stretch=self.square_stretch,
+            progress_interval_s=0.0,
+        )
+        if self.device.startswith("cuda"):
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self.device)
+        boundary_elapsed = time.perf_counter() - boundary_t0
+        result = boundary_results[0]
+        proxy_w, proxy_h = result["proxy_size"]
+        image_w, image_h = result["original_size"]
+        if self.boundary_backend == "yolo":
+            boxes_proxy = result["boxes"]
+        else:
+            boxes_proxy = map_boxes_to_original(
+                result["boxes"], result["scale"], result["pad_x"], result["pad_y"], proxy_w, proxy_h
+            )
+        boxes_orig = boxes_proxy.astype(np.float64, copy=True)
+        boxes_orig[:, [0, 2]] *= float(image_w) / max(proxy_w, 1)
+        boxes_orig[:, [1, 3]] *= float(image_h) / max(proxy_h, 1)
+        if self.nms_iou > 0 and boxes_orig.shape[0] > 0:
+            boxes_orig = _nms_boxes(boxes_orig, self.nms_iou)
+        crop_sources: list[tuple[str, Path, tuple[int, int, int, int]]] = []
+        crop_boxes: list[tuple[float, float, float, float]] = []
+        crop_t0 = time.perf_counter()
+        for box in boxes_orig:
+            crop_xyxy = _crop_bounds((image_h, image_w), tuple(int(value) for value in box), self.padding)
+            crop_sources.append((image_path.stem, image_path, crop_xyxy))
+            crop_boxes.append(tuple(float(value) for value in crop_xyxy))
+        return crop_sources, crop_boxes, {
+            "proxy_seconds": proxy_elapsed,
+            "boundary_seconds": boundary_elapsed,
+            "crop_prepare_seconds": time.perf_counter() - crop_t0,
+            "fallback_count": float(source.used_fallback),
+        }

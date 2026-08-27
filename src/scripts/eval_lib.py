@@ -17,6 +17,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import gc
 import json
 import os
+import statistics
 import subprocess
 import sys
 import threading
@@ -436,6 +437,7 @@ class LargeImageCfg:
         roi_queue_size: ROI 像素队列上限。
         roi_cache_dir: 可选 proxy 缓存目录。
         strict_roi_backend: 严格要求 pyvips 时失败。
+        inference_mode: 大图推理模式；``mixed`` 为批量混合模式，``per_image`` 为逐张模式。
     """
 
     min_side: int = 2000
@@ -456,6 +458,15 @@ class LargeImageCfg:
     roi_queue_size: int = 128
     roi_cache_dir: str | None = None
     strict_roi_backend: bool = False
+    inference_mode: Literal["mixed", "per_image"] = "mixed"
+
+    def __post_init__(self) -> None:
+        """校验大图推理模式。"""
+        if self.inference_mode not in {"mixed", "per_image"}:
+            raise ValueError(
+                "large_image_inference_mode 必须为 'mixed' 或 'per_image'，"
+                f"实际为 {self.inference_mode!r}"
+            )
 
 
 @dataclass
@@ -882,7 +893,7 @@ def build_test_report(
     infer: InferenceCfg,
     test_resolution: int | None = None,
     large_errors_dir: Path | None = None,
-    large_image_stats: dict[str, float] | None = None,
+    large_image_stats: dict[str, Any] | None = None,
 ) -> list[str]:
     """组装 test_result.txt 报告文本行列表。
 
@@ -903,8 +914,8 @@ def build_test_report(
         infer: 推理参数。
         test_resolution: 实际生效的测试输入分辨率。
         large_errors_dir: 大图错误可视化目录；非 ``None`` 时写入报告。
-        large_image_stats: 大图切分目标检测的耗时统计（``count``/``avg``/
-            ``max``/``total``，秒）；非 ``None`` 时写入报告。
+        large_image_stats: 大图切分目标检测的耗时统计；逐张模式还包含中位数、P95
+            和明细文件路径；非 ``None`` 时写入报告。
 
     Returns:
         报告文本行列表。
@@ -965,11 +976,21 @@ def build_test_report(
     if gpu_util is not None:
         report_lines.append(f"推理期间 GPU 平均利用率: {gpu_util:.1f}%")
     if large_image_stats is not None:
-        report_lines.append(
-            f"大图目标检测（裁切推理）: {int(large_image_stats['count'])} 张 | "
-            f"平均 {large_image_stats['avg']:.2f}s | 最大 {large_image_stats['max']:.2f}s | "
-            f"合计 {large_image_stats['total']:.2f}s"
-        )
+        if large_image_stats.get("mode") == "per_image":
+            report_lines.append(
+                f"大图目标检测（逐张实测）: {int(large_image_stats['count'])} 张 | "
+                f"平均 {large_image_stats['avg']:.2f}s | 中位数 {large_image_stats['median']:.2f}s | "
+                f"P95 {large_image_stats['p95']:.2f}s | 最大 {large_image_stats['max']:.2f}s | "
+                f"合计 {large_image_stats['total']:.2f}s"
+            )
+            if large_image_stats.get("timing_path"):
+                report_lines.append(f"逐张大图耗时明细: {large_image_stats['timing_path']}")
+        else:
+            report_lines.append(
+                f"大图目标检测（裁切推理）: {int(large_image_stats['count'])} 张 | "
+                f"平均 {large_image_stats['avg']:.2f}s | 最大 {large_image_stats['max']:.2f}s | "
+                f"合计 {large_image_stats['total']:.2f}s"
+            )
         if "detector_seconds" in large_image_stats:
             report_lines.append(
                 f"统一 detector 阶段（小图+crop 混合）: {float(large_image_stats['detector_seconds']):.2f}s"
@@ -1383,6 +1404,7 @@ def predict_batched_to_records(
     warmup_batches: int = 1,
     progress_interval_s: float = 1.0,
     gpu_monitor_enabled: bool = False,
+    _runtime: _InferenceRuntime | None = None,
     reason_plugin: Any | None = None,
     reason_class_embed: torch.Tensor | None = None,
     reason_class_names: list[str] | None = None,
@@ -1458,7 +1480,7 @@ def predict_batched_to_records(
     )
 
     # 初始化统一 runtime，接管设备、精度、编译和 CUDA 拷贝流。
-    runtime = _InferenceRuntime(
+    runtime = _runtime or _InferenceRuntime(
         model=model,
         device=device,
         resolution=resolution,
@@ -1648,6 +1670,7 @@ def predict_mixed_to_records(
     roi_cache_dir: str | Path | None = None,
     strict_roi_backend: bool = False,
     roi_queue_size: int = 128,
+    _runtime: _InferenceRuntime | None = None,
 ) -> tuple[list[BoxRecord], float, float | None, int, float]:
     """将普通图片和大图 crop 放入同一个 detector runtime 批量推理。"""
     if reason_plugin is not None and (reason_class_embed is None or reason_class_names is None):
@@ -1694,7 +1717,8 @@ def predict_mixed_to_records(
     )
 
     # 小图和 crop 共用一个 runtime，避免重复创建 stream 或重复 compile。
-    runtime = _InferenceRuntime(
+    owns_runtime = _runtime is None
+    runtime = _runtime or _InferenceRuntime(
         model=model,
         device=device,
         resolution=resolution,
@@ -2006,11 +2030,134 @@ def predict_mixed_to_records(
         roi_executor.shutdown(wait=True)
     if runtime.device.type == "cuda":
         torch.cuda.synchronize(runtime.device)
+    if owns_runtime:
+        runtime.copy_stream = None
     if progress_interval_s > 0:
         print()
     elapsed = time.perf_counter() - bench_start
     throughput = timed_samples / elapsed if elapsed > 0 else 0.0
     return pred_records, throughput, gpu_monitor.average_utilization() if gpu_monitor else None, timed_samples, elapsed
+
+
+def _warmup_per_image_models(
+    model: RFDETR,
+    runtime: _InferenceRuntime,
+    tiler: Any,
+    first_large_path: Path,
+    two_stage_plugin: TwoStagePlugin | None,
+    two_stage_cfg: TwoStageConfig | None,
+) -> None:
+    """使用首张大图和合成候选完成逐张模式的模型预热。"""
+    print("[i] 逐张大图模式开始模型预热", flush=True)
+    tiler.prepare_one(first_large_path)
+    synthetic = torch.zeros((3, runtime.resolution, runtime.resolution), dtype=torch.uint8)
+    staged = runtime.stage_batch([synthetic])
+    predictions, _ = runtime.forward(staged)
+    model.model.postprocess(predictions, target_sizes=torch.tensor([(runtime.resolution, runtime.resolution)], device=runtime.device))
+    if two_stage_plugin is not None and two_stage_cfg is not None:
+        record = BoxRecord(
+            image_id=first_large_path.stem,
+            class_id=two_stage_cfg.class_ids[0],
+            xyxy=(0.0, 0.0, float(runtime.resolution), float(runtime.resolution)),
+            score=max(two_stage_cfg.candidate_floor, 0.5),
+        )
+        two_stage_plugin.refine_records(
+            [record],
+            {first_large_path.stem: np.zeros((runtime.resolution, runtime.resolution, 3), dtype=np.uint8)},
+        )
+    if runtime.device.type == "cuda":
+        torch.cuda.synchronize(runtime.device)
+
+
+def predict_large_images_per_image(
+    model: RFDETR,
+    large_paths: list[Path],
+    tiler: Any,
+    runtime: _InferenceRuntime,
+    detector_conf: float,
+    two_stage_plugin: TwoStagePlugin | None,
+    two_stage_cfg: TwoStageConfig | None,
+    *,
+    class_conf_thresholds: Mapping[int, float] | None = None,
+    reason_plugin: Any | None = None,
+    reason_class_embed: torch.Tensor | None = None,
+    reason_class_names: list[str] | None = None,
+    roi_backend: str = "auto",
+    roi_output_size: int | None = None,
+    roi_cache_dir: str | Path | None = None,
+    strict_roi_backend: bool = False,
+    roi_queue_size: int = 128,
+    max_pending_crops: int = 128,
+    progress_interval_s: float = 1.0,
+) -> tuple[list[BoxRecord], list[dict[str, Any]], TwoStageStats | None]:
+    """逐张执行大图切分、一级检测和可选二阶段复核并记录耗时。"""
+    records: list[BoxRecord] = []
+    timing: list[dict[str, Any]] = []
+    aggregate: TwoStageStats | None = TwoStageStats() if two_stage_plugin is not None else None
+    for index, image_path in enumerate(large_paths, start=1):
+        started = time.perf_counter()
+        crop_sources, _, prepare_stats = tiler.prepare_one(image_path)
+        crop_prepare_elapsed = float(prepare_stats.get("crop_prepare_seconds", 0.0))
+        boundary_elapsed = float(prepare_stats.get("boundary_seconds", 0.0))
+        crop_records, _, _, _, detector_elapsed = predict_mixed_to_records(
+            model,
+            [],
+            crop_sources,
+            str(runtime.device),
+            conf_threshold=detector_conf,
+            crop_conf_threshold=detector_conf,
+            batch_size=runtime.batch_size,
+            num_workers=0,
+            class_conf_thresholds=class_conf_thresholds,
+            max_pending_crops=max_pending_crops,
+            prefetch_factor=1,
+            precision="fp32",
+            compile_model=False,
+            copy_prefetch=runtime.copy_prefetch,
+            warmup_batches=0,
+            progress_interval_s=0.0,
+            gpu_monitor_enabled=False,
+            reason_plugin=reason_plugin,
+            reason_class_embed=reason_class_embed,
+            reason_class_names=reason_class_names,
+            roi_backend=roi_backend,
+            roi_output_size=roi_output_size,
+            roi_cache_dir=roi_cache_dir,
+            strict_roi_backend=strict_roi_backend,
+            roi_queue_size=roi_queue_size,
+            _runtime=runtime,
+        )
+        two_stage_elapsed = 0.0
+        if two_stage_plugin is not None:
+            stage_started = time.perf_counter()
+            crop_records, stage_stats = two_stage_plugin.refine_records(crop_records, {image_path.stem: image_path})
+            two_stage_elapsed = time.perf_counter() - stage_started
+            if aggregate is not None:
+                aggregate.routed += stage_stats.routed
+                aggregate.candidate_nms_suppressed += stage_stats.candidate_nms_suppressed
+                aggregate.candidate_nms_iou_suppressed += stage_stats.candidate_nms_iou_suppressed
+                aggregate.candidate_nms_containment_suppressed += stage_stats.candidate_nms_containment_suppressed
+                aggregate.kept += stage_stats.kept
+                aggregate.rejected += stage_stats.rejected
+                aggregate.images += stage_stats.images
+                aggregate.per_image_candidates.update(stage_stats.per_image_candidates)
+        records.extend(crop_records)
+        total = time.perf_counter() - started
+        timing.append(
+            {
+                "image_id": image_path.stem,
+                "total_seconds": total,
+                "boundary_seconds": boundary_elapsed,
+                "crop_prepare_seconds": crop_prepare_elapsed,
+                "detector_seconds": detector_elapsed,
+                "two_stage_seconds": two_stage_elapsed,
+                "crop_count": len(crop_sources),
+            }
+        )
+        print(f"[i] 大图 {index}/{len(large_paths)} {image_path.stem}: {total:.3f}s", flush=True)
+    if aggregate is not None:
+        aggregate.elapsed_seconds = sum(float(item["two_stage_seconds"]) for item in timing)
+    return records, timing, aggregate
 
 
 # 完整评估主流程。
@@ -2082,7 +2229,8 @@ def run_evaluation(
             ``None`` 用 checkpoint 记录的分辨率。
         large_image_cfg: 大图切分测试配置。传入时，长边 ≥ ``min_side`` 的
             图像走 nano 边界检测切分流程（nano 只加载一次），其余小图仍按
-            整图推理；大图 FP/FN 可视化单独保存到 ``output_dir/large_errors/``。
+            整图推理；``inference_mode=per_image`` 时逐张完成大图流程并记录耗时；
+            大图 FP/FN 可视化单独保存到 ``output_dir/large_errors/``。
             ``None`` 表示不启用（保持原逻辑，全部整图推理）。
         ms_nms_config: SHWX MS 专用保守 NMS 配置；``None`` 或关闭时保持原输出。
     """
@@ -2130,6 +2278,7 @@ def run_evaluation(
     crop_boxes_by_image: dict[str, list[tuple[float, float, float, float]]] = {}
     large_prepare_stats: dict[str, float] = {}
     large_tiler: Any | None = None
+    per_image_mode = bool(use_large_branch and large_image_cfg is not None and large_image_cfg.inference_mode == "per_image")
     if use_large_branch:
         from scripts.large_cut.large_image_tiler import LargeImageTiler
 
@@ -2150,7 +2299,8 @@ def run_evaluation(
             strict_roi_backend=large_image_cfg.strict_roi_backend,
             progress_interval_s=infer.progress_interval_s,
         )
-        crop_sources, crop_boxes_by_image, large_prepare_stats = large_tiler.prepare_crops(large_paths)
+        if not per_image_mode:
+            crop_sources, crop_boxes_by_image, large_prepare_stats = large_tiler.prepare_crops(large_paths)
 
     # 只加载一次 RF-DETR，模型尺寸由 checkpoint 中的 model_name 自动确定。
     print(f"[i] 正在从 {checkpoint_path} 加载 RF-DETR 模型...")
@@ -2213,8 +2363,118 @@ def run_evaluation(
         )
 
     # 小图和已准备好的 crop 统一进入同一个 detector runtime。
-    large_image_stats: dict[str, float] | None = None
-    if use_large_branch:
+    large_image_stats: dict[str, Any] | None = None
+    two_stage_stats: TwoStageStats | None = None
+    two_stage_preprocessed = False
+    small_two_stage_elapsed = 0.0
+    if per_image_mode:
+        assert large_tiler is not None and large_image_cfg is not None
+        runtime = _InferenceRuntime(
+            model=model,
+            device=device,
+            resolution=test_resolution,
+            batch_size=infer.batch_size,
+            precision=infer.precision,
+            compile_model=infer.compile_model,
+            copy_prefetch=infer.copy_prefetch,
+        )
+        _warmup_per_image_models(model, runtime, large_tiler, large_paths[0], two_stage_plugin, two_stage_cfg)
+        small_records, throughput, gpu_util, timed_images = predict_batched_to_records(
+            model,
+            small_paths,
+            device,
+            conf_threshold=infer.conf_threshold,
+            class_conf_thresholds=collection_thresholds,
+            batch_size=infer.batch_size,
+            num_workers=infer.num_workers,
+            la_bias=la_bias,
+            num_classes=dataset.num_classes,
+            prefetch_factor=infer.prefetch_factor,
+            precision=infer.precision,
+            compile_model=infer.compile_model,
+            copy_prefetch=infer.copy_prefetch,
+            warmup_batches=0,
+            progress_interval_s=infer.progress_interval_s,
+            gpu_monitor_enabled=infer.gpu_monitor_enabled,
+            reason_plugin=reason_plugin,
+            reason_class_embed=reason_class_embed,
+            reason_class_names=reason_class_names,
+            _runtime=runtime,
+        )
+        if two_stage_plugin is not None:
+            stage_started = time.perf_counter()
+            small_records, two_stage_stats = two_stage_plugin.refine_records(
+                small_records, {path.stem: path for path in small_paths}
+            )
+            small_two_stage_elapsed = time.perf_counter() - stage_started
+            two_stage_preprocessed = True
+        large_records, per_image_timings, large_two_stage_stats = predict_large_images_per_image(
+            model,
+            large_paths,
+            large_tiler,
+            runtime,
+            large_image_cfg.detector_conf,
+            two_stage_plugin,
+            two_stage_cfg,
+            class_conf_thresholds=collection_thresholds,
+            reason_plugin=reason_plugin,
+            reason_class_embed=reason_class_embed,
+            reason_class_names=reason_class_names,
+            roi_backend=large_image_cfg.roi_backend,
+            roi_output_size=large_image_cfg.roi_output_size,
+            roi_cache_dir=large_image_cfg.roi_cache_dir,
+            strict_roi_backend=large_image_cfg.strict_roi_backend,
+            roi_queue_size=large_image_cfg.roi_queue_size,
+            max_pending_crops=large_image_cfg.max_pending_crops,
+            progress_interval_s=infer.progress_interval_s,
+        )
+        if two_stage_plugin is not None:
+            if two_stage_stats is None:
+                two_stage_stats = large_two_stage_stats
+            elif large_two_stage_stats is not None:
+                two_stage_stats.routed += large_two_stage_stats.routed
+                two_stage_stats.candidate_nms_suppressed += large_two_stage_stats.candidate_nms_suppressed
+                two_stage_stats.candidate_nms_iou_suppressed += large_two_stage_stats.candidate_nms_iou_suppressed
+                two_stage_stats.candidate_nms_containment_suppressed += large_two_stage_stats.candidate_nms_containment_suppressed
+                two_stage_stats.kept += large_two_stage_stats.kept
+                two_stage_stats.rejected += large_two_stage_stats.rejected
+                two_stage_stats.images += large_two_stage_stats.images
+                two_stage_stats.per_image_candidates.update(large_two_stage_stats.per_image_candidates)
+        if two_stage_stats is not None:
+            two_stage_stats.elapsed_seconds = small_two_stage_elapsed + float(
+                large_two_stage_stats.elapsed_seconds if large_two_stage_stats is not None else 0.0
+            )
+        pred_records = small_records + large_records
+        if two_stage_plugin is not None:
+            pred_records = filter_records_by_thresholds(pred_records, infer.conf_threshold, infer.class_conf_thresholds)
+        total_values = [float(item["total_seconds"]) for item in per_image_timings]
+        total_elapsed = sum(total_values)
+        timing_summary = {
+            "count": len(per_image_timings),
+            "total_seconds": total_elapsed,
+            "average_seconds": statistics.mean(total_values) if total_values else 0.0,
+            "median_seconds": statistics.median(total_values) if total_values else 0.0,
+            "p95_seconds": float(np.percentile(total_values, 95)) if total_values else 0.0,
+            "max_seconds": max(total_values) if total_values else 0.0,
+        }
+        timing_payload = {"mode": "per_image", "images": per_image_timings, "summary": timing_summary}
+        dataset.exp_output_dir.mkdir(parents=True, exist_ok=True)
+        timing_path = dataset.exp_output_dir / "large_image_timing.json"
+        timing_path.write_text(json.dumps(timing_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[i] 逐张大图耗时明细已保存: {timing_path}", flush=True)
+        large_image_stats = {
+            "mode": "per_image",
+            "count": float(len(per_image_timings)),
+            "avg": timing_summary["average_seconds"],
+            "median": timing_summary["median_seconds"],
+            "p95": timing_summary["p95_seconds"],
+            "max": timing_summary["max_seconds"],
+            "total": total_elapsed,
+            "timing_path": str(timing_path),
+        }
+        if large_tiler is not None:
+            large_tiler.release_boundary_model()
+    elif use_large_branch:
         pred_records, throughput, gpu_util, timed_images, detector_elapsed = predict_mixed_to_records(
             model,
             small_paths,
@@ -2289,8 +2549,7 @@ def run_evaluation(
     del model
     release_cuda_cache(device)
 
-    two_stage_stats: TwoStageStats | None = None
-    if two_stage_plugin is not None:
+    if two_stage_plugin is not None and not two_stage_preprocessed:
         image_sources = {path.stem: path for path in test_image_paths}
         pred_records, two_stage_stats = two_stage_plugin.refine_records(pred_records, image_sources)
         pred_records = filter_records_by_thresholds(pred_records, infer.conf_threshold, infer.class_conf_thresholds)
@@ -2351,11 +2610,21 @@ def run_evaluation(
     if gpu_util is not None:
         print(f"推理期间 GPU 平均利用率: {gpu_util:.1f}%")
     if large_image_stats is not None:
-        print(
-            f"大图目标检测（裁切推理）: {int(large_image_stats['count'])} 张 | "
-            f"平均 {large_image_stats['avg']:.2f}s | 最大 {large_image_stats['max']:.2f}s | "
-            f"合计 {large_image_stats['total']:.2f}s"
-        )
+        if large_image_stats.get("mode") == "per_image":
+            print(
+                f"大图目标检测（逐张实测）: {int(large_image_stats['count'])} 张 | "
+                f"平均 {large_image_stats['avg']:.2f}s | 中位数 {large_image_stats['median']:.2f}s | "
+                f"P95 {large_image_stats['p95']:.2f}s | 最大 {large_image_stats['max']:.2f}s | "
+                f"合计 {large_image_stats['total']:.2f}s"
+            )
+            if large_image_stats.get("timing_path"):
+                print(f"逐张大图耗时明细: {large_image_stats['timing_path']}")
+        else:
+            print(
+                f"大图目标检测（裁切推理）: {int(large_image_stats['count'])} 张 | "
+                f"平均 {large_image_stats['avg']:.2f}s | 最大 {large_image_stats['max']:.2f}s | "
+                f"合计 {large_image_stats['total']:.2f}s"
+            )
         if "proxy_seconds" in large_image_stats:
             print(f"proxy 读取合计: {float(large_image_stats['proxy_seconds']):.2f}s")
         if "fallback_count" in large_image_stats:

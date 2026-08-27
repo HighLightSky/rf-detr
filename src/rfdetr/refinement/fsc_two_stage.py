@@ -70,7 +70,7 @@ def crop_fsc_context(
     context_scale: float = 2.0,
     output_size: int = _IMAGE_SIZE,
 ) -> Image.Image:
-    """围绕候选框裁剪正方形上下文并缩放到分类器尺寸。"""
+    """围绕候选框裁剪不形变的正方形上下文并缩放到分类器尺寸。"""
     if context_scale <= 0 or output_size <= 0:
         raise ValueError("context_scale 和 output_size 必须为正数")
     if isinstance(image, np.ndarray):
@@ -91,10 +91,12 @@ def crop_fsc_context(
     width, height = source.size
     side = max(abs(x1 - x0), abs(y1 - y0), 1.0) * context_scale
     center_x, center_y = (x0 + x1) * 0.5, (y0 + y1) * 0.5
-    left = max(0, min(width - 1, int(np.floor(center_x - side * 0.5))))
-    top = max(0, min(height - 1, int(np.floor(center_y - side * 0.5))))
-    right = max(left + 1, min(width, int(np.ceil(center_x + side * 0.5))))
-    bottom = max(top + 1, min(height, int(np.ceil(center_y + side * 0.5))))
+    crop_side = min(max(1, int(np.ceil(side))), width, height)
+
+    # 越过图像边缘时整体平移窗口，始终保持正方形，避免截短后缩放造成形变。
+    left = min(max(0, int(np.floor(center_x - crop_side * 0.5))), width - crop_side)
+    top = min(max(0, int(np.floor(center_y - crop_side * 0.5))), height - crop_side)
+    right, bottom = left + crop_side, top + crop_side
     return source.crop((left, top, right, bottom)).resize((output_size, output_size), Image.Resampling.BILINEAR)
 
 

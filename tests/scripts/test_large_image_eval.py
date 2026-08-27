@@ -17,6 +17,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from scripts import eval_lib
 
@@ -41,6 +42,14 @@ def test_large_image_cfg_defaults() -> None:
     assert cfg.batch_size == 8
     assert cfg.num_workers == 4
     assert cfg.max_pending_crops == 128
+    assert cfg.inference_mode == "mixed"
+
+
+def test_large_image_cfg_accepts_per_image_mode() -> None:
+    """逐张大图模式应为显式且受校验的配置值。"""
+    assert eval_lib.LargeImageCfg(inference_mode="per_image").inference_mode == "per_image"
+    with pytest.raises(ValueError, match="inference_mode"):
+        eval_lib.LargeImageCfg(inference_mode="invalid")
 
 
 def test_classify_large_images_with_size_map() -> None:
@@ -92,6 +101,44 @@ def test_build_test_report_includes_large_image_timing(tmp_path: Path) -> None:
         large_image_stats={"count": 4.0, "avg": 1.25, "max": 2.0, "total": 5.0},
     )
     assert any("大图目标检测" in line and "平均 1.25s" in line and "最大 2.00s" in line for line in lines)
+
+
+def test_build_test_report_includes_per_image_timing_summary(tmp_path: Path) -> None:
+    """逐张模式报告应说明统计来自逐图实测明细。"""
+    dataset = eval_lib.build_dataset_cfg("shwx", root=tmp_path, output_dir="output/x")
+    lines = eval_lib.build_test_report(
+        dataset_name="shwx",
+        checkpoint_path=Path("/tmp/ckpt.pth"),
+        test_image_paths=[],
+        gt_records=[],
+        pred_records=[],
+        throughput=10.0,
+        timed_images=2,
+        gpu_util=None,
+        eval_results={"all": eval_lib.EvalResult(1, 0, 0), "groups": {}},
+        group_macro={},
+        total_macro={
+            "avg_tp": 1.0,
+            "avg_fp": 0.0,
+            "avg_fn": 0.0,
+            "recall": 1.0,
+            "fdr": 0.0,
+            "precision": 1.0,
+        },
+        per_class_results={"groups": {}},
+        dataset=dataset,
+        infer=eval_lib.InferenceCfg(),
+        large_image_stats={
+            "mode": "per_image",
+            "count": 2.0,
+            "avg": 1.25,
+            "median": 1.25,
+            "p95": 1.48,
+            "max": 1.5,
+            "total": 2.5,
+        },
+    )
+    assert any("逐张实测" in line and "P95 1.48s" in line and "最大 1.50s" in line for line in lines)
 
 
 def test_f1_is_reported_for_class_and_macro_levels(tmp_path: Path) -> None:

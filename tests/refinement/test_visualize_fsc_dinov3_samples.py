@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from scripts.refinement.visualize_fsc_dinov3_samples import select_rows
+import numpy as np
+from PIL import Image
+
+from scripts.refinement.visualize_fsc_dinov3_samples import _candidate_overview, select_rows
 
 
 def test_select_rows_uses_training_split_and_label() -> None:
@@ -27,3 +30,14 @@ def test_select_rows_is_deterministic() -> None:
     ]}
 
     assert select_rows(payload, "train", 0, 5) == select_rows(payload, "train", 0, 5)
+
+
+def test_candidate_overview_preserves_edge_geometry() -> None:
+    """边缘候选的概览图应使用正方形窗口，不能因拉伸移动目标位置。"""
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    image[:, 20, 0] = 255
+
+    overview = _candidate_overview(Image.fromarray(image), [0.0, 10.0, 20.0, 30.0])
+
+    red_column = int(np.asarray(overview)[..., 0].mean(axis=0).argmax())
+    assert 74 <= red_column <= 76

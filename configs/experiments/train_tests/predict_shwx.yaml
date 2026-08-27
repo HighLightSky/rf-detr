@@ -38,6 +38,9 @@ predict:
     class_ids: [24]
     candidate_floor: 0.05
     candidate_nms_iou: 0.5
+    candidate_containment_nms_enabled: false # 包含感知 NMS；true 时额外按包含率和中心距离抑制重复候选
+    candidate_nms_containment: 0.95
+    candidate_nms_center_ratio: 0.35
     context_scale: 2.0
     image_size: 224
     batch_size: 64

@@ -51,6 +51,13 @@ def test_two_stage_config_uses_default_probability_gate() -> None:
     assert config.bypass_score is None
 
 
+def test_two_stage_config_disables_containment_nms_by_default() -> None:
+    """未配置时只使用 IoU NMS，包含感知 NMS 默认关闭。"""
+    config = TwoStageConfig.from_config({"enabled": True, "checkpoint": "output/verifier.pth"})
+    assert config is not None
+    assert config.candidate_containment_nms_enabled is False
+
+
 @pytest.mark.parametrize(
     "value",
     [
