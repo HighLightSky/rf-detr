@@ -13,7 +13,6 @@ test.py、分析脚本和语义实验脚本都复用本模块。标准图片由 
 from __future__ import annotations
 
 import contextlib
-from concurrent.futures import Future, ThreadPoolExecutor
 import gc
 import json
 import os
@@ -23,6 +22,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict, defaultdict, deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +48,7 @@ from rfdetr.sscl.prompts import (  # noqa: E402
     SHWX_CLASS_NAMES,
     SHWX_TRUCK_CLASS_NAMES,
 )
+from scripts.ms_nms import MsNmsConfig, SuppressionStats, apply_shwx_ms_nms  # noqa: E402
 from val.competition_metrics import (  # noqa: E402
     BoxRecord,
     EvalConfig,
@@ -55,14 +56,13 @@ from val.competition_metrics import (  # noqa: E402
     evaluate_competition_metrics,
     load_yolo_labels,
 )
-from scripts.ms_nms import MsNmsConfig, SuppressionStats, apply_shwx_ms_nms  # noqa: E402
 from visualization.detection import (  # noqa: E402
     build_confusion_matrix,
     clear_vis_dirs,
     match_per_image_per_class,
     plot_confusion_matrix,
-    save_label_comparison_visualizations,
     save_fp_fn_visualizations,
+    save_label_comparison_visualizations,
 )
 
 
@@ -421,7 +421,6 @@ class LargeImageCfg:
     Attributes:
         min_side: 大图判定阈值（长边像素数），长边 ≥ 该值的图像走切分流程。
         boundary_checkpoint: 边界检测器 checkpoint 路径（切分流程必需）。
-        boundary_backend: 边界模型后端，支持 ``rfdetr`` 与 ``yolo``。
         boundary_resolution: 边界检测器输入分辨率（须与训练一致）。
         boundary_conf: 边界框置信度阈值。
         detector_conf: 裁窗目标检测置信度阈值。
@@ -442,7 +441,6 @@ class LargeImageCfg:
 
     min_side: int = 2000
     boundary_checkpoint: str | None = None
-    boundary_backend: str = "rfdetr"
     boundary_resolution: int = 704
     boundary_conf: float = 0.25
     detector_conf: float = 0.25
@@ -467,6 +465,31 @@ class LargeImageCfg:
                 "large_image_inference_mode 必须为 'mixed' 或 'per_image'，"
                 f"实际为 {self.inference_mode!r}"
             )
+
+
+def _build_detector_model(
+    checkpoint_path: Path,
+    resolution: int | None,
+    device: str | torch.device | None = None,
+) -> Any:
+    """按 checkpoint 后缀加载 PyTorch 或 ONNX 主检测器。"""
+    suffix = checkpoint_path.suffix.lower()
+    if suffix == ".onnx":
+        from rfdetr.export._onnx.inference import ONNXDetector
+
+        providers = None if device is None or str(device).startswith("cuda") else ["CPUExecutionProvider"]
+        model = ONNXDetector(checkpoint_path, providers=providers)
+        if resolution is not None and model.resolution != resolution:
+            raise ValueError(f"ONNX 模型分辨率为 {model.resolution}，不能覆盖为 {resolution}")
+        return model
+    if suffix != ".pth":
+        raise ValueError(f"主检测 checkpoint 仅支持 .pth 或 .onnx，实际为: {checkpoint_path}")
+    from rfdetr import RFDETR
+
+    ckpt_kwargs: dict[str, int] = {}
+    if resolution is not None:
+        ckpt_kwargs["resolution"] = resolution
+    return RFDETR.from_checkpoint(str(checkpoint_path), **ckpt_kwargs)
 
 
 @dataclass
@@ -2284,7 +2307,6 @@ def run_evaluation(
 
         large_tiler = LargeImageTiler(
             large_image_cfg.boundary_checkpoint,
-            boundary_backend=large_image_cfg.boundary_backend,
             boundary_resolution=large_image_cfg.boundary_resolution,
             boundary_conf=large_image_cfg.boundary_conf,
             padding=large_image_cfg.padding,
@@ -2302,16 +2324,14 @@ def run_evaluation(
         if not per_image_mode:
             crop_sources, crop_boxes_by_image, large_prepare_stats = large_tiler.prepare_crops(large_paths)
 
-    # 只加载一次 RF-DETR，模型尺寸由 checkpoint 中的 model_name 自动确定。
-    print(f"[i] 正在从 {checkpoint_path} 加载 RF-DETR 模型...")
-    ckpt_kwargs: dict[str, int] = {}
-    if resolution is not None:
-        ckpt_kwargs["resolution"] = resolution
-        print(f"[i] 推理分辨率覆盖为: {resolution}")
-    model = RFDETR.from_checkpoint(str(checkpoint_path), **ckpt_kwargs)
+    # 只加载一次主检测器，按 checkpoint 后缀自动选择 PyTorch 或 ONNX Runtime。
+    print(f"[i] 正在加载主检测模型: {checkpoint_path}")
+    model = _build_detector_model(checkpoint_path, resolution, device=device)
+    is_onnx_model = checkpoint_path.suffix.lower() == ".onnx"
     test_resolution = int(model.model.resolution)
-    print(f"[i] 已加载模型: {type(model).__name__} | 分辨率: {int(model.model.resolution)}")
-    # from_checkpoint 已用同一份 state dict 完成语义头重建。
+    print(f"[i] 已加载模型: {type(model).__name__} | 分辨率: {test_resolution}")
+    if is_onnx_model and (reason_plugin_cfg is not None or two_stage_cfg is not None):
+        raise ValueError("ONNX 主检测后端暂不支持 reason_plugin 或 two_stage，请关闭插件后运行")
 
     if reason_plugin_cfg is not None and two_stage_cfg is not None:
         raise ValueError("reason_plugin 与 two_stage 不能同时启用")

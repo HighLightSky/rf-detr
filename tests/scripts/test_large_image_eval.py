@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -33,7 +35,6 @@ def test_large_image_cfg_defaults() -> None:
     cfg = eval_lib.LargeImageCfg()
     assert cfg.min_side == 2000
     assert cfg.boundary_checkpoint is None
-    assert cfg.boundary_backend == "rfdetr"
     assert cfg.boundary_resolution == 704
     assert cfg.boundary_conf == 0.25
     assert cfg.detector_conf == 0.25
@@ -50,6 +51,32 @@ def test_large_image_cfg_accepts_per_image_mode() -> None:
     assert eval_lib.LargeImageCfg(inference_mode="per_image").inference_mode == "per_image"
     with pytest.raises(ValueError, match="inference_mode"):
         eval_lib.LargeImageCfg(inference_mode="invalid")
+
+
+def test_detector_loader_uses_onnx_suffix() -> None:
+    """主检测 checkpoint 为 .onnx 时应加载 ONNX Runtime 适配器。"""
+    detector = SimpleNamespace(resolution=1024)
+    with mock.patch("rfdetr.export._onnx.inference.ONNXDetector", return_value=detector) as onnx_detector:
+        result = eval_lib._build_detector_model(Path("detector.onnx"), resolution=1024, device="cpu")
+
+    assert result is detector
+    onnx_detector.assert_called_once_with(Path("detector.onnx"), providers=["CPUExecutionProvider"])
+
+
+def test_detector_loader_uses_pth_suffix() -> None:
+    """主检测 checkpoint 为 .pth 时应加载 RF-DETR。"""
+    detector = object()
+    with mock.patch("rfdetr.RFDETR.from_checkpoint", return_value=detector) as from_checkpoint:
+        result = eval_lib._build_detector_model(Path("detector.pth"), resolution=1024)
+
+    assert result is detector
+    from_checkpoint.assert_called_once_with("detector.pth", resolution=1024)
+
+
+def test_detector_loader_rejects_unknown_suffix() -> None:
+    """主检测 checkpoint 不支持的后缀应立即失败。"""
+    with pytest.raises(ValueError, match=".pth 或 .onnx"):
+        eval_lib._build_detector_model(Path("detector.engine"), resolution=1024)
 
 
 def test_classify_large_images_with_size_map() -> None:

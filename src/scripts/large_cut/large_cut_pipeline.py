@@ -476,9 +476,11 @@ def predict_proxy_boundaries(
                 )
         return results
 
-    model.model.model = model.model.model.to(device)
-    model.model.model.eval()
-    model_dtype = next(model.model.model.parameters()).dtype
+    is_onnx = backend == "onnx"
+    detector = model if is_onnx else model.model.model
+    detector = detector.to(device)
+    detector.eval()
+    model_dtype = next(detector.parameters()).dtype if hasattr(detector, "parameters") else torch.float32
     means: list[float] = model.means
     stds: list[float] = model.stds
     results = []
@@ -504,9 +506,10 @@ def predict_proxy_boundaries(
                 pads.append((pad_x, pad_y))
             batch_tensor = torch.stack(processed_tensors).to(device, non_blocking=True).to(model_dtype).div_(255.0)
             batch_tensor = F.normalize(batch_tensor, means, stds)
-            predictions = model.model.model(batch_tensor)
+            predictions = detector(batch_tensor)
             target_sizes = torch.tensor([[resolution, resolution]] * len(chunk), device=device)
-            post = model.model.postprocess(predictions, target_sizes=target_sizes)
+            postprocess = model.postprocess if is_onnx else model.model.postprocess
+            post = postprocess(predictions, target_sizes=target_sizes)
             for (stem, proxy, original_size), result, scale, (pad_x, pad_y) in zip(
                 chunk, post, scales, pads, strict=True
             ):

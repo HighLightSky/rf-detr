@@ -1,11 +1,12 @@
 # SHWX 数据集测试评估配置（比赛口径：ship/aircraft IoU=0.50，vehicle=0.35）
-# 用法: python src/scripts/test.py -c configs/experiments/test_shwx.yaml
+# 用法: uv run --no-sync python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml
 test:
   dataset: shwx # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
-  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand
+  dataset_dir: /home/liu/datasets/SHWX-FINAL-no-FSC-expand
   resolution: 1024
-  checkpoint: output/0827-0825基线方案/2基线+多模态原型+SSCL+难例抑制/stage1.pth
-  output_dir: output/0827-0825基线方案/3基线+多模态抑制+SSCL+难例抑制+发射车两阶段/实验二-一阶段多模态-包含感知NMS
+  checkpoint: output/0827-0825基线方案/2基线+多模态原型+SSCL+难例抑制/onnx/shwx_detector_1024.onnx
+  # checkpoint: output/0827-0825基线方案/2基线+多模态原型+SSCL+难例抑制/stage1.pth
+  output_dir: output/0827-0825基线方案/2基线+多模态原型+SSCL+难例抑制/实验二-加民船NMS
   conf_threshold: 0.25 # 全局置信度阈值
   class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}
 
@@ -25,7 +26,7 @@ test:
     keep_ambiguous_cross_class: true
 
   device: cuda:0 # 无 CUDA 时自动回退 CPU
-  batch_size: 16 # GPU 单次前向图像数
+  batch_size: 8 # GPU 单次前向图像数
   num_workers: 12 # CPU 预取 worker 数
   prefetch_factor: 3
   precision: auto
@@ -44,7 +45,7 @@ test:
   # --- 二阶段 FSC 复核插件（默认关闭）---
   # 启用时先以 candidate_floor 收集 FSC 候选，再按最终 class_conf_thresholds 筛选。
   two_stage:
-    enabled: true
+    enabled: false
     backend: dinov3 # dinov3 / resnet18 / mobilenet_v3_small
     checkpoint: output/0827-0825基线方案/3基线+多模态抑制+SSCL+难例抑制+发射车两阶段/stage2.pth
     backbone_checkpoint: data/dinov3_vit_base_patch16_backbone.pth # DINOv3 头 checkpoint 未自包含 backbone 时必填
@@ -63,12 +64,12 @@ test:
 
   save_fp_fn: true # 保存 FP/FN 可视化
 
-    # --- 大图切分（边界检测 → 裁切 → 目标检测 → 映射回原图）---
+  # --- 大图切分（边界检测 → 裁切 → 目标检测 → 映射回原图）---
   large_image_min_side: 2000
   large_image_inference_mode: per_image # mixed：小图与裁窗混合批量；per_image：逐张大图端到端计时
 
-  boundary_backend: rfdetr
-  boundary_checkpoint: data/large_cut/rf-detr-nano-large-cut.pth
+  boundary_checkpoint: output/0827-0825基线方案/2基线+多模态原型+SSCL+难例抑制/onnx/large_cut_boundary_704.onnx
+  # boundary_checkpoint: data/large-cut/rf-detr-nano-large-cut.pth
   boundary_resolution: 704 # RF-DETR nano 704
   boundary_conf: 0.25 # 边界框置信度阈值
   detector_conf: 0.25 # 裁窗目标检测置信度阈值

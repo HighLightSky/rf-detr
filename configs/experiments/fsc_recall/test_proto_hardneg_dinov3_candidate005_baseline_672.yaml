@@ -41,7 +41,6 @@ test:
   save_fp_fn: true
   save_yolo_preds: true
   large_image_min_side: 2000
-  boundary_backend: rfdetr
   boundary_checkpoint: data/large_cut/rf-detr-nano-large-cut.pth
   boundary_resolution: 704
   boundary_conf: 0.25

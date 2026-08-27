@@ -102,7 +102,6 @@ def main() -> None:
         large_image_cfg = eval_lib.LargeImageCfg(
             min_side=int(test_cfg.get("large_image_min_side", 2000)),
             boundary_checkpoint=test_cfg.get("boundary_checkpoint"),
-            boundary_backend=str(test_cfg.get("boundary_backend", "rfdetr")),
             boundary_resolution=int(test_cfg.get("boundary_resolution", 704)),
             boundary_conf=float(test_cfg.get("boundary_conf", 0.25)),
             detector_conf=float(test_cfg.get("detector_conf", 0.25)),
