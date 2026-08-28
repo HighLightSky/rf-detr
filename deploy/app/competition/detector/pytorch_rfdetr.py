@@ -17,9 +17,9 @@ class PytorchRfdetrDetector(Detector):
     """加载交付目录内 RF-DETR 运行时并执行 PyTorch GPU 推理。"""
 
     def __init__(self, role: RoleConfig, detector_config: DetectorConfig) -> None:
-        """加载指定 checkpoint 和对应的 ProtoGuidance 工件。"""
-        if role.backend != "pytorch" or role.proto_guidance_artifact is None:
-            raise ValueError("PyTorch 检测器需要带 ProtoGuidance 工件的 pytorch 角色配置")
+        """加载指定 checkpoint，并按配置挂载可选的 ProtoGuidance 工件。"""
+        if role.backend != "pytorch":
+            raise ValueError("PyTorch 检测器只能接收 pytorch 角色配置")
         vendor_dir = Path(__file__).resolve().parents[2] / "vendor"
         if str(vendor_dir) not in sys.path:
             sys.path.insert(0, str(vendor_dir))
@@ -33,10 +33,15 @@ class PytorchRfdetrDetector(Detector):
         self._device = detector_config.device
         self._batch_size = detector_config.batch_size
         self.check_gpu()
-        self._model = RFDETR.from_checkpoint(
-            str(role.model_path),
-            proto_guidance_artifacts_path=str(role.proto_guidance_artifact),
-        )
+        checkpoint_kwargs: dict[str, str] = {}
+        if role.proto_guidance_artifact is not None:
+            checkpoint_kwargs["proto_guidance_artifacts_path"] = str(role.proto_guidance_artifact)
+        self._model = RFDETR.from_checkpoint(str(role.model_path), **checkpoint_kwargs)
+        proto_guidance = getattr(self._model.model.model.transformer, "proto_guidance", None)
+        if self._model.model_config.proto_guidance_enabled and proto_guidance is None:
+            raise RuntimeError(
+                f"PyTorch 模型 {role.model_path.name} 启用了 ProtoGuidance，但未能挂载匹配的原型工件"
+            )
         self._model.model.model.to(self._device).eval()
 
     def check_gpu(self) -> None:

@@ -15,6 +15,8 @@ RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
     | tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba
 
 COPY environment.yml /tmp/environment.yml
+ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple \
+    PIP_FIND_LINKS=https://mirrors.aliyun.com/pytorch-wheels/cu121
 RUN micromamba create -y -n detector -f /tmp/environment.yml \
     && micromamba clean --all --yes
 

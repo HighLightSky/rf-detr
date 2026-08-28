@@ -115,6 +115,57 @@ def test_config_accepts_onnx_and_pytorch_roles(tmp_path: Path) -> None:
     assert loaded.detector.roles["boundary"].backend == "onnx"
 
 
+def test_config_accepts_pytorch_boundary_without_proto_guidance(tmp_path: Path) -> None:
+    """普通 PyTorch 边界模型不应被强制要求 ProtoGuidance 工件。"""
+    for file_name in ("main.pth", "boundary.pth", "proto.pt"):
+        (tmp_path / file_name).touch()
+    config_file = tmp_path / "submission.yaml"
+    config_file.write_text(
+        yaml.safe_dump(
+            {
+                "pipeline": {
+                    "preprocess": {
+                        "name": "shwx_large_image",
+                        "large_image_min_side": 2000,
+                        "boundary_confidence": 0.25,
+                        "padding": 0,
+                        "boundary_nms_iou": 0.5,
+                        "proxy_max_side": 704,
+                    },
+                    "detector": {
+                        "name": "rfdetr_multi_backend",
+                        "device": "cuda:0",
+                        "batch_size": 1,
+                        "roles": {
+                            "main": {
+                                "backend": "pytorch",
+                                "model": "main.pth",
+                                "proto_guidance_artifact": "proto.pt",
+                                "resolution": 1024,
+                            },
+                            "boundary": {"backend": "pytorch", "model": "boundary.pth", "resolution": 704},
+                        },
+                    },
+                    "postprocess": {
+                        "name": "shwx_competition_v1",
+                        "confidence_threshold": 0.25,
+                        "class_names": "resources/shwx_class_names.yaml",
+                        "ms_nms": {"enabled": True, "ms_class_id": 3, "ship_class_ids": [0, 1, 2, 3]},
+                        "fsc_containment_nms": {"enabled": True, "containment_enabled": True},
+                    },
+                }
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_submission_config(config_file, tmp_path)
+    assert loaded.detector.batch_size == 1
+    assert loaded.detector.roles["main"].backend == "pytorch"
+    assert loaded.detector.roles["boundary"].backend == "pytorch"
+    assert loaded.detector.roles["boundary"].proto_guidance_artifact is None
+
+
 def test_decoder_preserves_task_identity_and_box_coordinates() -> None:
     """解码后的检测框保留裁切来源并处于模型输入坐标系。"""
     task = InferenceTask(

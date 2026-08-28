@@ -133,8 +133,6 @@ def _parse_role(value: Any, label: str, model_dir: Path) -> RoleConfig:
     artifact: Path | None = None
     if mapping.get("proto_guidance_artifact") is not None:
         artifact = _model_path(model_dir, mapping["proto_guidance_artifact"], f"{label}.proto_guidance_artifact")
-    if backend == "pytorch" and artifact is None:
-        raise ValueError(f"{label} 使用 pytorch 时必须配置 proto_guidance_artifact")
     return RoleConfig(
         backend=backend,
         model_path=_model_path(model_dir, mapping.get("model"), f"{label}.model"),

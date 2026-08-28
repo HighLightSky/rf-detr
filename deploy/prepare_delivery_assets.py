@@ -29,13 +29,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include-pytorch-runtime",
         action="store_true",
-        help="同时复制 stage1 checkpoint、ProtoGuidance 工件和 rfdetr 运行时",
+        help="同时复制 25 类主模型、边界模型、ProtoGuidance 工件和 rfdetr 运行时",
     )
     return parser.parse_args()
 
 
 def _default_assets(source_root: Path, include_pytorch_runtime: bool) -> list[Asset]:
-    """返回首版 ONNX 配置及可选 PyTorch 变体的明确资产清单。"""
+    """返回默认 ONNX 资产及 25 类 PyTorch 运行时资产清单。"""
     experiment_dir = source_root / "output/0827-0825基线方案/2基线+多模态原型+SSCL+难例抑制"
     assets = [
         Asset(experiment_dir / "onnx/shwx_detector_1024.onnx", "shwx_detector_1024.onnx"),
@@ -44,7 +44,8 @@ def _default_assets(source_root: Path, include_pytorch_runtime: bool) -> list[As
     if include_pytorch_runtime:
         assets.extend(
             [
-                Asset(experiment_dir / "stage1.pth", "stage1.pth"),
+                Asset(experiment_dir / "stage1.pth", "main.pth"),
+                Asset(source_root / "data/large-cut/rf-detr-nano-large-cut.pth", "boundary.pth"),
                 Asset(
                     source_root / "data/proto_guidance_shwx_1024_from120ep.pt",
                     "proto_guidance_shwx_1024_from120ep.pt",
