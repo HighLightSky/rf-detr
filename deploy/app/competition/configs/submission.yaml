@@ -22,6 +22,7 @@ pipeline:
   postprocess:
     name: shwx_competition_v1
     confidence_threshold: 0.25
+    ms_min_box_area: 800
     class_names: resources/shwx_class_names.yaml
     ms_nms:
       enabled: true

@@ -26,13 +26,18 @@ from competition.postprocess.shwx_competition import ShwxCompetitionPostprocesso
 from competition.preprocess.shwx_large_image import ShwxLargeImagePreprocessor  # noqa: E402
 
 
-def _postprocessor(ms_enabled: bool = True, fsc_enabled: bool = True) -> ShwxCompetitionPostprocessor:
+def _postprocessor(
+    ms_enabled: bool = True,
+    fsc_enabled: bool = True,
+    ms_min_box_area: float = 0.0,
+) -> ShwxCompetitionPostprocessor:
     """构造使用交付资源类别名称的后处理器。"""
     return ShwxCompetitionPostprocessor(
         PostprocessConfig(
             name="shwx_competition_v1",
             confidence_threshold=0.25,
             class_names_path=Path("resources/shwx_class_names.yaml"),
+            ms_min_box_area=ms_min_box_area,
             ms_nms=MsNmsConfig(
                 enabled=ms_enabled,
                 ms_class_id=3,
@@ -172,3 +177,24 @@ def test_postprocessor_applies_fsc_then_ms_nms() -> None:
         (100, 100),
     )
     assert [(item["category_id"], item["score"]) for item in result] == [(24, 0.9), (3, 0.9)]
+
+
+@pytest.mark.parametrize(
+    ("class_id", "xyxy", "expected_count"),
+    [
+        pytest.param(3, (10.0, 10.0, 29.0, 30.0), 0, id="discard_small_ms"),
+        pytest.param(3, (10.0, 10.0, 35.0, 30.0), 1, id="keep_boundary_area_ms"),
+        pytest.param(0, (10.0, 10.0, 29.0, 30.0), 1, id="keep_small_other_class"),
+    ],
+)
+def test_postprocessor_filters_only_ms_boxes_below_configured_area(
+    class_id: int,
+    xyxy: tuple[float, float, float, float],
+    expected_count: int,
+) -> None:
+    """仅过滤面积低于阈值的民船预测框。"""
+    result = _postprocessor(ms_min_box_area=500.0).process(
+        [RawDetection("image", class_id, 0.9, xyxy)],
+        (100, 100),
+    )
+    assert len(result) == expected_count

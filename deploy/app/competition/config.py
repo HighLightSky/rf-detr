@@ -106,6 +106,7 @@ class PostprocessConfig:
     name: str
     confidence_threshold: float
     class_names_path: Path
+    ms_min_box_area: float
     ms_nms: MsNmsConfig
     fsc_containment_nms: FscNmsConfig
 
@@ -234,14 +235,21 @@ def load_submission_config(config_path: Path, model_dir: Path) -> SubmissionConf
     if detector.name != "rfdetr_multi_backend" or detector.batch_size <= 0:
         raise ValueError("detector.name 必须为 rfdetr_multi_backend，且 batch_size 必须为正整数")
     post = _mapping(pipeline.get("postprocess"), "postprocess")
-    _strict_keys(post, "postprocess", {"name", "confidence_threshold", "class_names", "ms_nms", "fsc_containment_nms"})
+    _strict_keys(post, "postprocess", {
+        "name", "confidence_threshold", "class_names", "ms_min_box_area", "ms_nms", "fsc_containment_nms",
+    })
     postprocess = PostprocessConfig(
         name=str(post.get("name", "")),
         confidence_threshold=float(post.get("confidence_threshold", 0.25)),
         class_names_path=Path(str(post.get("class_names", "resources/shwx_class_names.yaml"))),
+        ms_min_box_area=float(post.get("ms_min_box_area", 0.0)),
         ms_nms=_parse_ms_nms(post.get("ms_nms", {})),
         fsc_containment_nms=_parse_fsc_nms(post.get("fsc_containment_nms", {})),
     )
-    if postprocess.name != "shwx_competition_v1" or not 0.0 <= postprocess.confidence_threshold <= 1.0:
+    if (
+        postprocess.name != "shwx_competition_v1"
+        or not 0.0 <= postprocess.confidence_threshold <= 1.0
+        or postprocess.ms_min_box_area < 0.0
+    ):
         raise ValueError("postprocess 配置不合法")
     return SubmissionConfig(preprocess=preprocess, detector=detector, postprocess=postprocess)

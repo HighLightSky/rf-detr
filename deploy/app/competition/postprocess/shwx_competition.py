@@ -43,6 +43,12 @@ class ShwxCompetitionPostprocessor(Postprocessor):
             bounded = (max(0.0, left), max(0.0, top), min(float(width), right), min(float(height), bottom))
             if bounded[2] <= bounded[0] or bounded[3] <= bounded[1]:
                 continue
+            if (
+                item.class_id == self._config.ms_nms.ms_class_id
+                and self._config.ms_min_box_area > 0.0
+                and (bounded[2] - bounded[0]) * (bounded[3] - bounded[1]) < self._config.ms_min_box_area
+            ):
+                continue
             candidates.append(
                 RawDetection(
                     image_id=item.image_id,
