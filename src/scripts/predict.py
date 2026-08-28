@@ -413,7 +413,11 @@ def main() -> None:
     if reason_plugin_kwargs and two_stage_cfg is not None:
         raise ValueError("predict.reason_plugin 与 predict.two_stage 不能同时启用")
     ms_nms_config = eval_lib.MsNmsConfig.from_config(predict_cfg.get("ms_nms"))
+    fsc_containment_nms_config = eval_lib.FscContainmentNmsConfig.from_config(
+        predict_cfg.get("fsc_containment_nms")
+    )
     ms_nms_total = eval_lib.SuppressionStats()
+    fsc_nms_total = eval_lib.FscContainmentNmsStats()
     if reason_plugin_kwargs:
         print(f"[i] 启用 FFT 一致性插件: {reason_plugin_kwargs['reason_plugin']}")
 
@@ -460,12 +464,22 @@ def main() -> None:
             )
             for xyxy, score, class_id in zip(xyxy_array, score_array, class_id_array)
         ]
+        raw_records, image_fsc_nms_stats = eval_lib.apply_fsc_containment_nms(
+            raw_records,
+            fsc_containment_nms_config,
+        )
+        fsc_nms_total = eval_lib.FscContainmentNmsStats(
+            input_count=fsc_nms_total.input_count + image_fsc_nms_stats.input_count,
+            output_count=fsc_nms_total.output_count + image_fsc_nms_stats.output_count,
+            iou_suppressed=fsc_nms_total.iou_suppressed + image_fsc_nms_stats.iou_suppressed,
+            containment_suppressed=fsc_nms_total.containment_suppressed + image_fsc_nms_stats.containment_suppressed,
+        )
+        xyxy_array = np.asarray([record.xyxy for record in raw_records], dtype=np.float32).reshape(-1, 4)
+        score_array = np.asarray([record.score for record in raw_records], dtype=np.float32)
+        class_id_array = np.asarray([record.class_id for record in raw_records], dtype=int)
         if two_stage_plugin is not None:
             refined_records, stats = two_stage_plugin.refine_records(raw_records, {image_path.stem: image_path})
             two_stage_stats_total.routed += stats.routed
-            two_stage_stats_total.candidate_nms_suppressed += stats.candidate_nms_suppressed
-            two_stage_stats_total.candidate_nms_iou_suppressed += stats.candidate_nms_iou_suppressed
-            two_stage_stats_total.candidate_nms_containment_suppressed += stats.candidate_nms_containment_suppressed
             two_stage_stats_total.kept += stats.kept
             two_stage_stats_total.rejected += stats.rejected
             two_stage_stats_total.images += stats.images
@@ -489,10 +503,9 @@ def main() -> None:
             ambiguous_cross_class_kept=ms_nms_total.ambiguous_cross_class_kept
             + image_nms_stats.ambiguous_cross_class_kept,
         )
-        if ms_nms_config.enabled:
-            xyxy_array = np.asarray([record.xyxy for record in filtered_records], dtype=np.float32).reshape(-1, 4)
-            score_array = np.asarray([record.score for record in filtered_records], dtype=np.float32)
-            class_id_array = np.asarray([record.class_id for record in filtered_records], dtype=int)
+        xyxy_array = np.asarray([record.xyxy for record in filtered_records], dtype=np.float32).reshape(-1, 4)
+        score_array = np.asarray([record.score for record in filtered_records], dtype=np.float32)
+        class_id_array = np.asarray([record.class_id for record in filtered_records], dtype=int)
         label_path, vis_path = _save_results(
             image_path,
             xyxy_array,
@@ -535,6 +548,19 @@ def main() -> None:
             f"[完成] 标签对比图: {comparison_dir}（{saved_images} 张，FP={fp_count}，FN={fn_count}）"
         )
 
+    if fsc_containment_nms_config.enabled:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "fsc_containment_nms_stats.json").write_text(
+            json.dumps(fsc_nms_total.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(
+            "[i] FSC 一级包含 NMS: "
+            f"输入 {fsc_nms_total.input_count}，输出 {fsc_nms_total.output_count}，"
+            f"IoU 删除 {fsc_nms_total.iou_suppressed}，"
+            f"包含删除 {fsc_nms_total.containment_suppressed}"
+        )
+
     if ms_nms_config.enabled:
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "ms_nms_stats.json").write_text(
@@ -559,10 +585,6 @@ def main() -> None:
                     "config": {
                         "class_ids": list(two_stage_cfg.class_ids),
                         "candidate_floor": two_stage_cfg.candidate_floor,
-                        "candidate_nms_iou": two_stage_cfg.candidate_nms_iou,
-                        "candidate_containment_nms_enabled": two_stage_cfg.candidate_containment_nms_enabled,
-                        "candidate_nms_containment": two_stage_cfg.candidate_nms_containment,
-                        "candidate_nms_center_ratio": two_stage_cfg.candidate_nms_center_ratio,
                         "context_scale": two_stage_cfg.context_scale,
                         "image_size": two_stage_cfg.image_size,
                         "batch_size": two_stage_cfg.batch_size,

@@ -47,7 +47,9 @@ As an AI agent contributing to RF-DETR, you are responsible for:
 
 6. **Committing**
 
-    - 每次 commit 都不要携带 `Co-Authored-By` 尾注（包括 Claude 默认附带的尾注），保持提交信息简洁
+    - 提交信息采用约定式格式：<type>(<scope>): <subject>，例如 feat: add login，正文可选但保持精炼。
+    - 禁止任何尾注（包括但不限于 Co-Authored-By、Signed-off-by 等），确保 commit 信息仅含标题和必要说明
+    - 使用中文写commit信息，如果提交内容多，可以分点来写
 
 > [!NOTE]
 > Keeping documentation current ensures consistency across agent contributions and reduces repeated feedback on the same issues.
@@ -131,15 +133,6 @@ See [CI Testing](.github/CONTRIBUTING.md#ci-testing) in CONTRIBUTING.md for deta
 
 - `pyproject.toml` - Ruff linting rules (`[tool.ruff]` section)
 
-**License Header (required for all Python files):**
-
-```python
-# ------------------------------------------------------------------------
-# RF-DETR
-# Copyright (c) 2025 Roboflow. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
-# ------------------------------------------------------------------------
-```
 
 ## Documentation
 

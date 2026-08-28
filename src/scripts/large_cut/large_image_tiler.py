@@ -14,16 +14,15 @@ from __future__ import annotations
 import gc
 import time
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
+from scripts.large_cut.image_source import create_image_source
 from scripts.large_cut.large_cut_pipeline import (
     _nms_boxes,
     map_boxes_to_original,
     predict_proxy_boundaries,
 )
-from scripts.large_cut.image_source import create_image_source
 
 
 def _crop_bounds(
@@ -49,7 +48,6 @@ class LargeImageTiler:
         self,
         boundary_checkpoint: str | Path,
         *,
-        boundary_backend: str = "rfdetr",
         boundary_resolution: int = 704,
         boundary_conf: float = 0.25,
         padding: int = 32,
@@ -64,12 +62,12 @@ class LargeImageTiler:
         strict_roi_backend: bool = False,
         progress_interval_s: float = 1.0,
     ) -> None:
-        from rfdetr import RFDETR
-
         self.boundary_checkpoint = str(boundary_checkpoint)
-        self.boundary_backend = boundary_backend.lower()
-        if self.boundary_backend not in {"rfdetr", "yolo"}:
-            raise ValueError(f"boundary_backend 必须为 rfdetr 或 yolo，实际为 {boundary_backend!r}")
+        suffix = Path(boundary_checkpoint).suffix.lower()
+        backend_by_suffix = {".pth": "rfdetr", ".onnx": "onnx", ".pt": "yolo"}
+        if suffix not in backend_by_suffix:
+            raise ValueError(f"边界模型仅支持 .pth、.onnx 或 .pt，实际为: {boundary_checkpoint}")
+        self.boundary_backend = backend_by_suffix[suffix]
         self.boundary_resolution = boundary_resolution
         self.boundary_conf = boundary_conf
         self.padding = padding
@@ -90,7 +88,14 @@ class LargeImageTiler:
             from ultralytics import YOLO
 
             self.boundary_model = YOLO(self.boundary_checkpoint)
+        elif self.boundary_backend == "onnx":
+            from rfdetr.export._onnx.inference import ONNXDetector
+
+            providers = None if str(device).startswith("cuda") else ["CPUExecutionProvider"]
+            self.boundary_model = ONNXDetector(self.boundary_checkpoint, providers=providers)
         else:
+            from rfdetr import RFDETR
+
             self.boundary_model = RFDETR.from_checkpoint(
                 self.boundary_checkpoint,
                 resolution=self.boundary_resolution,

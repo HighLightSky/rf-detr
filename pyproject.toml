@@ -61,6 +61,7 @@ dependencies = [
     "wandb",
     "mlflow",
     "clearml",
+    "onnxruntime-gpu>=1.29.0",
 ]
 
 [project.optional-dependencies]
@@ -79,6 +80,7 @@ large-image = [
 ]
 onnx = [
     "onnx>=1.16.0,<2.0",
+    "ml-dtypes",
     "onnxsim<0.6.0",  # TODO: onnxsim 0.6.0+ hangs on install
     "onnx_graphsurgeon",
     "onnxruntime",

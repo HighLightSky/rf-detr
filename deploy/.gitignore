@@ -1,0 +1,10 @@
+models/*
+!models/.gitkeep
+app/vendor/rfdetr/
+!app/vendor/README.md
+environment.yml
+__pycache__/
+*.py[cod]
+
+test-input
+test-output

@@ -1,5 +1,5 @@
 # SHWX 数据集测试评估配置（比赛口径：ship/aircraft IoU=0.50，vehicle=0.35）
-# 用法: python src/scripts/test.py -c configs/experiments/test_shwx.yaml
+# 用法: uv run --no-sync python src/scripts/test.py -c configs/experiments/train_tests/test_shwx.yaml
 test:
   dataset: shwx_truck # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
   dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand-truck
@@ -11,8 +11,8 @@ test:
 
   # 民船NMS
   ms_nms:
-    # enabled: false
-    enabled: tiling_square_stretch
+    enabled: false
+    # enabled: tiling_square_stretch
     ms_class_id: 3
     ship_class_ids: [0, 1, 2, 3]
     same_class_iou: 0.80
@@ -24,8 +24,16 @@ test:
     cross_class_score_margin: 0.05
     keep_ambiguous_cross_class: true
 
+  # 发射车一级候选的 IoU 与包含感知去重。
+  fsc_containment_nms:
+    enabled: true
+    containment_enabled: true
+    iou_threshold: 0.5
+    containment_threshold: 0.95
+    center_ratio_threshold: 0.35
+
   device: cuda:0 # 无 CUDA 时自动回退 CPU
-  batch_size: 16 # GPU 单次前向图像数
+  batch_size: 8 # GPU 单次前向图像数
   num_workers: 12 # CPU 预取 worker 数
   prefetch_factor: 3
   precision: auto
@@ -50,10 +58,6 @@ test:
     backbone_checkpoint: data/dinov3_vit_base_patch16_backbone.pth # DINOv3 头 checkpoint 未自包含 backbone 时必填
     class_ids: [24]
     candidate_floor: 0.05
-    candidate_nms_iou: 0.5
-    candidate_containment_nms_enabled: true # 包含感知 NMS；true 时额外按包含率和中心距离抑制重复候选
-    candidate_nms_containment: 0.95
-    candidate_nms_center_ratio: 0.35
     context_scale: 2.0
     image_size: 224
     batch_size: 64
@@ -63,12 +67,12 @@ test:
 
   save_fp_fn: true # 保存 FP/FN 可视化
 
-    # --- 大图切分（边界检测 → 裁切 → 目标检测 → 映射回原图）---
+  # --- 大图切分（边界检测 → 裁切 → 目标检测 → 映射回原图）---
   large_image_min_side: 2000
   large_image_inference_mode: per_image # mixed：小图与裁窗混合批量；per_image：逐张大图端到端计时
 
-  boundary_backend: rfdetr
-  boundary_checkpoint: data/large_cut/rf-detr-nano-large-cut.pth
+  boundary_checkpoint: output/0827-0825基线方案/2基线+多模态原型+SSCL+难例抑制/onnx/large_cut_boundary_704.onnx
+  # boundary_checkpoint: data/large-cut/rf-detr-nano-large-cut.pth
   boundary_resolution: 704 # RF-DETR nano 704
   boundary_conf: 0.25 # 边界框置信度阈值
   detector_conf: 0.25 # 裁窗目标检测置信度阈值

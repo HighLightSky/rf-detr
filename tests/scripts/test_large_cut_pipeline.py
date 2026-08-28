@@ -13,12 +13,15 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
+from rfdetr.models.postprocess import PostProcess
 from scripts.large_cut.large_cut_pipeline import (
     crop_with_padding,
     infer_detector_on_crops,
     letterbox_resize,
     map_boxes_to_original,
+    predict_proxy_boundaries,
     predict_yolo_boundaries,
 )
 
@@ -165,6 +168,49 @@ class TestYoloBoundaryPrediction:
         assert results[0]["scale"] == 1.0
         assert results[0]["pad_x"] == 0
         assert results[0]["pad_y"] == 0
+
+
+class TestOnnxBoundaryPrediction:
+    """ONNX 边界输出应复用 RF-DETR 的后处理和几何映射。"""
+
+    def test_onnx_output_uses_existing_postprocess(self) -> None:
+        """ONNX detector 的原始输出应得到与 PyTorch 相同的边界记录。"""
+        class FakeDetector:
+            """返回一个归一化边界框的最小 ONNX detector。"""
+
+            means = [0.0, 0.0, 0.0]
+            stds = [1.0, 1.0, 1.0]
+            postprocess = PostProcess(num_select=1)
+
+            def __call__(self, batch: torch.Tensor) -> dict[str, torch.Tensor]:
+                """返回固定单类高置信边界框。"""
+                return {
+                    "pred_boxes": torch.tensor([[[0.5, 0.5, 0.5, 0.5]]], device=batch.device),
+                    "pred_logits": torch.tensor([[[8.0, -8.0]]], device=batch.device),
+                }
+
+            def to(self, device: str) -> "FakeDetector":
+                """兼容设备迁移。"""
+                del device
+                return self
+
+            def eval(self) -> "FakeDetector":
+                """兼容评估模式。"""
+                return self
+
+        proxy = np.zeros((100, 200, 3), dtype=np.uint8)
+        results = predict_proxy_boundaries(
+            FakeDetector(),
+            [("image", proxy, (400, 800))],
+            device="cpu",
+            resolution=32,
+            conf_threshold=0.5,
+            batch_size=1,
+            backend="onnx",
+        )
+        assert len(results) == 1
+        assert results[0]["boxes"].shape == (1, 4)
+        assert results[0]["class_ids"].tolist() == [0]
 
 
 class TestCropDetectorBatching:
