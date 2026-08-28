@@ -53,7 +53,7 @@ BASE_CHECKPOINT = str(
     Path(
         os.environ.get(
             "RFDETR_PROTO_CHECKPOINT",
-            "output/0825-rfdetr-final-baseline/checkpoint_best_total.pth",
+            "output/0827-rfdetr-truck-final-baseline/checkpoint_best_total.pth",
         )
     ).resolve()
 )
@@ -61,7 +61,7 @@ BASE_CHECKPOINT = str(
 # SHWX 数据集（YOLO 布局；与 configs/experiments/*.yaml 的 dataset_dir 一致）
 DATASET_DIR = os.environ.get(
     "RFDETR_PROTO_DATASET_DIR",
-    "/home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand",
+    "/home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand-truck",
 )
 DATASET_FILE = "yolo"
 

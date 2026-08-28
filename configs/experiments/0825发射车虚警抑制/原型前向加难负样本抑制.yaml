@@ -1,14 +1,14 @@
 # 启用类别原型前向引导与发射车难负样本抑制。
 model:
   variant: medium
-  num_classes: 25
+  num_classes: 26
   resolution: 1024
   gradient_checkpointing: true
-  pretrain_weights: output/0824-rfdetr-final-baseline/checkpoint_best_total.pth
+  pretrain_weights: output/0827-rfdetr-truck-final-baseline/checkpoint_best_total.pth
 
   # 多模态原型前向引导
   proto_guidance_enabled: true
-  proto_guidance_artifacts_path: data/proto_guidance_shwx_1024_from120ep.pt
+  proto_guidance_artifacts_path: data/proto_guidance_shwx_truck_26.pt
   proto_guidance_fusion_mode: simple
   proto_guidance_num_slots: 10
   proto_guidance_position_enabled: true
@@ -34,9 +34,9 @@ train:
     aircraft: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
     vehicle: [24]
   f1_group_iou_thresholds: {ship: 0.50, aircraft: 0.50, vehicle: 0.35}
-  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand
+  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand-truck
   dataset_file: yolo
-  output_dir: output/0825发射车虚警抑制/原型前向加难负样本抑制
+  output_dir: output/0828发射车虚警抑制/原型前向加难负样本抑制
   epochs: 10
   batch_size: 16
   grad_accum_steps: 4
@@ -68,7 +68,7 @@ train:
 
   # SSCL 装配入口
   sscl_enabled: true
-  sscl_semantic_matrix_path: data/semantic_matrix_shwx.pt
+  sscl_semantic_matrix_path: data/semantic_matrix_shwx_truck_26.pt
   sscl_lambda: 0.0
   sscl_prototype_enabled: false
 

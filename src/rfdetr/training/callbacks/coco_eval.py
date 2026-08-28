@@ -163,6 +163,9 @@ class COCOEvalCallback(Callback):
         self._cat_id_to_name: dict[int, str] = {}
         self._f1_local: dict[int, dict[str, Any]] = init_matching_accumulator()
         self._f1_train_local: dict[int, dict[str, Any]] = init_matching_accumulator()
+        # EMA 前向独立收集的 F1 匹配数据，与 map_metric_ema 同步在 on_validation_batch_end 中累计，
+        # 用于 best_metric=='f1' 时用 EMA 版 F1 选取最佳权重（legacy 仅支持 EMA mAP）。
+        self._f1_local_ema: dict[int, dict[str, Any]] = init_matching_accumulator()
         # Whether the EMA metric received ≥1 update this epoch.  Gates the EMA cross-rank
         # sync so it is issued symmetrically on all DDP ranks (see _should_compute_ema).
         self._ema_has_updates: bool = False
@@ -333,6 +336,7 @@ class COCOEvalCallback(Callback):
         """
         self.map_metric.reset()
         self._f1_local = init_matching_accumulator()
+        self._f1_local_ema = init_matching_accumulator()
         self._reset_keypoint_split("val")
         self._reset_keypoint_split("val_ema")
         self._prepare_ema_metric(trainer, pl_module)
@@ -352,6 +356,7 @@ class COCOEvalCallback(Callback):
         """
         self.map_metric.reset()
         self._f1_local = init_matching_accumulator()
+        self._f1_local_ema = init_matching_accumulator()
         self._reset_keypoint_split("test")
         self._prepare_ema_metric(trainer, pl_module)
 
@@ -447,9 +452,10 @@ class COCOEvalCallback(Callback):
         routed to the EMA mAP/checkpoint track (``map_metric_ema`` / ``val/ema_*``) instead of the regular one,
         which never ran a base-model forward pass this batch. Without this routing, the regular ``val/mAP_50_95``
         key silently reflects EMA quality while ``BestModelCallback`` checkpoints the (unevaluated) base weights
-        under that key — a metric/weights mismatch. The macro-F1 sweep (``val/F1``) has no parallel EMA-tracked
-        accumulator and is not rerouted; under ``eval_ema_only`` it reflects EMA-quality predictions logged under
-        the regular key, a known limitation of this mode.
+        under that key — a metric/weights mismatch. The macro-F1 sweep likewise has a parallel EMA track
+        (``val/ema_F1``) populated from the separate EMA forward, but it is not rerouted under ``eval_ema_only``:
+        because the duplicated EMA forward is skipped in that mode, ``val/F1`` reflects EMA-quality predictions
+        logged under the regular key — a known limitation of this mode.
 
         Args:
             trainer: The PTL Trainer.
@@ -512,6 +518,16 @@ class COCOEvalCallback(Callback):
                 else targets_raw
             )
             self.map_metric_ema.update(ema_preds, ema_targets)
+            # EMA 版 F1 与 EMA mAP 同源：用同一份 EMA 预测/目标构建 F1 匹配数据，
+            # 供 best_metric=='f1' 时独立选取 EMA 最佳权重。
+            ema_batch_matching = build_matching_data(
+                ema_preds,
+                ema_targets,
+                iou_threshold=0.5,
+                iou_type=iou_type,
+                class_iou_thresholds=self._f1_class_iou_thresholds,
+            )
+            merge_matching_data(self._f1_local_ema, ema_batch_matching)
             self._update_keypoint_oks_metric(
                 trainer,
                 {"results": ema_results, "targets": outputs["targets"]},
@@ -535,6 +551,7 @@ class COCOEvalCallback(Callback):
                 if self.map_metric_ema is not None:
                     self.map_metric_ema.reset()
                 self._f1_local = init_matching_accumulator()
+                self._f1_local_ema = init_matching_accumulator()
                 self._reset_keypoint_split("val")
                 self._reset_keypoint_split("val_ema")
                 return
@@ -704,22 +721,12 @@ class COCOEvalCallback(Callback):
             trainer.callback_metrics[f"{split}/segm_mAP_50"] = metrics["segm_map_50"].detach().cpu()
 
         # F1 sweep — run first so per-class F1/prec/rec are available when
-        # building the unified per-class table rows below.
-        merged = distributed_merge_matching_data(f1_local)
+        # building the unified per-class table rows below. 提取阈值扫描公共逻辑，供普通与
+        # EMA 模型共用（同参：类别分组、IoU 阈值、置信度扫描）。
+        best, sorted_ids = self._f1_best(f1_local)
         # category_id → {f1, precision, recall} at the best macro-F1 threshold
         f1_by_cid: dict[int, dict[str, float]] = {}
-        if merged:
-            sorted_ids = sorted(merged.keys())
-            per_class_list = [merged[cid] for cid in sorted_ids]
-            classes_with_gt = [i for i, cid in enumerate(sorted_ids) if merged[cid]["total_gt"] > 0]
-            f1_results = sweep_confidence_thresholds(
-                per_class_list,
-                self._f1_thresholds(),
-                classes_with_gt,
-                class_ids=sorted_ids,
-                class_groups=self._f1_class_groups,
-            )
-            best = max(f1_results, key=lambda x: x["macro_f1"])
+        if best is not None:
             overall["F1"] = float(best["macro_f1"])
             overall["Precision"] = float(best["macro_precision"])
             overall["Recall"] = float(best["macro_recall"])
@@ -762,6 +769,40 @@ class COCOEvalCallback(Callback):
             trainer.callback_metrics[f"{split}/F1"] = torch.tensor(0.0)
             trainer.callback_metrics[f"{split}/precision"] = torch.tensor(0.0)
             trainer.callback_metrics[f"{split}/recall"] = torch.tensor(0.0)
+
+        # EMA 版 F1 — 用 EMA 前向独立收集的匹配数据做阈值扫描，供 best_metric=='f1'
+        # 时用 F1 指标选取 EMA 最佳权重。与 EMA mAP 一样受 should_compute_ema（全 rank
+        # 一致）约束，保证跨 rank 合并安全；无有效数据时记 0，避免残留上次的值。
+        if should_compute_ema:
+            ema_best, _ = self._f1_best(self._f1_local_ema)
+            if ema_best is not None:
+                pl_module.log(
+                    f"{split}/ema_F1",
+                    float(ema_best["macro_f1"]),
+                    logger=True,
+                    on_step=False,
+                    on_epoch=True,
+                )
+                pl_module.log(
+                    f"{split}/ema_precision",
+                    float(ema_best["macro_precision"]),
+                    logger=True,
+                    on_step=False,
+                    on_epoch=True,
+                )
+                pl_module.log(
+                    f"{split}/ema_recall",
+                    float(ema_best["macro_recall"]),
+                    logger=True,
+                    on_step=False,
+                    on_epoch=True,
+                )
+                trainer.callback_metrics[f"{split}/ema_F1"] = torch.tensor(float(ema_best["macro_f1"]))
+                trainer.callback_metrics[f"{split}/ema_precision"] = torch.tensor(float(ema_best["macro_precision"]))
+                trainer.callback_metrics[f"{split}/ema_recall"] = torch.tensor(float(ema_best["macro_recall"]))
+            else:
+                pl_module.log(f"{split}/ema_F1", 0.0, logger=True, on_step=False, on_epoch=True)
+                trainer.callback_metrics[f"{split}/ema_F1"] = torch.tensor(0.0)
 
         # torchmetrics returns `classes` as a 0-d scalar when only one class is
         # present in the batch.  Ensure it is always 1-d before iterating.
@@ -810,6 +851,40 @@ class COCOEvalCallback(Callback):
             self._f1_train_local = init_matching_accumulator()
         else:
             self._f1_local = init_matching_accumulator()
+            self._f1_local_ema = init_matching_accumulator()
+
+    def _f1_best(
+        self,
+        f1_local: dict[int, dict[str, Any]],
+    ) -> tuple[dict[str, Any] | None, list[int]]:
+        """对一段 F1 匹配数据做置信度阈值扫描，返回最佳宏 F1 结果与其类别顺序。
+
+        普通与 EMA 模型共用此逻辑，保证二者使用完全一致的类别分组、逐类别 IoU 阈值与
+        置信度扫描参数。
+
+        Args:
+            f1_local: 由 ``merge_matching_data`` 累计的逐类匹配数据。
+
+        Returns:
+            ``(best, sorted_ids)`` 二元组。``best`` 为阈值扫描中 ``macro_f1`` 最高的结果；当
+            没有任何类别含 ground truth 时返回 ``(None, [])``。``sorted_ids`` 为与
+            ``best["per_class_*"]`` 下标对应的升序类别 ID，用于构建逐类表格。
+        """
+        merged = distributed_merge_matching_data(f1_local)
+        if not merged:
+            return None, []
+        sorted_ids = sorted(merged.keys())
+        per_class_list = [merged[cid] for cid in sorted_ids]
+        classes_with_gt = [i for i, cid in enumerate(sorted_ids) if merged[cid]["total_gt"] > 0]
+        f1_results = sweep_confidence_thresholds(
+            per_class_list,
+            self._f1_thresholds(),
+            classes_with_gt,
+            class_ids=sorted_ids,
+            class_groups=self._f1_class_groups,
+        )
+        best = max(f1_results, key=lambda x: x["macro_f1"])
+        return best, sorted_ids
 
     def _get_ema_callback(self, trainer: Any) -> Any:
         """Return the EMA callback instance, or ``None`` if not present."""

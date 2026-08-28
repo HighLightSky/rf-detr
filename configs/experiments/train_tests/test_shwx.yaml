@@ -1,11 +1,11 @@
 # SHWX 数据集测试评估配置（比赛口径：ship/aircraft IoU=0.50，vehicle=0.35）
 # 用法: python src/scripts/test.py -c configs/experiments/test_shwx.yaml
 test:
-  dataset: shwx # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
-  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand
+  dataset: shwx_truck # eval_lib.DATASET_CONFIGS 内置名（shwx/dior）
+  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand-truck
   resolution: 1024
-  checkpoint: output/0827-0825基线方案/2基线+多模态原型+SSCL+难例抑制/stage1.pth
-  output_dir: output/0827-0825基线方案/3基线+多模态抑制+SSCL+难例抑制+发射车两阶段/实验二-一阶段多模态-包含感知NMS
+  checkpoint: output/0828发射车虚警抑制/原型前向加难负样本抑制/checkpoint_best_total.pth
+  output_dir: output/0828发射车虚警抑制/原型前向加难负样本抑制
   conf_threshold: 0.25 # 全局置信度阈值
   class_conf_thresholds: {} # 逐类阈值 {类别id: 阈值}
 
@@ -44,7 +44,7 @@ test:
   # --- 二阶段 FSC 复核插件（默认关闭）---
   # 启用时先以 candidate_floor 收集 FSC 候选，再按最终 class_conf_thresholds 筛选。
   two_stage:
-    enabled: true
+    enabled: false
     backend: dinov3 # dinov3 / resnet18 / mobilenet_v3_small
     checkpoint: output/0827-0825基线方案/3基线+多模态抑制+SSCL+难例抑制+发射车两阶段/stage2.pth
     backbone_checkpoint: data/dinov3_vit_base_patch16_backbone.pth # DINOv3 头 checkpoint 未自包含 backbone 时必填

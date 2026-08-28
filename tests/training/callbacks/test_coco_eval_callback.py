@@ -961,6 +961,37 @@ class TestOnValidationEpochEnd:
         assert "val/ema_mAR" in logged_keys
         cb.map_metric_ema.reset.assert_called_once()
 
+    def test_ema_f1_logged_when_ema_metric_populated(self) -> None:
+        """val/ema_F1 is logged from the EMA matching accumulator when EMA is active."""
+        cb = COCOEvalCallback(max_dets=500)
+        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = _minimal_metrics()
+        cb.map_metric_ema = MagicMock(name="map_metric_ema")
+        cb.map_metric_ema.compute.return_value = _minimal_metrics()
+        cb._ema_has_updates = True
+        # EMA 前向积累的 F1 匹配数据（一个类别、单个 TP 检测）。
+        cb._f1_local_ema = {
+            0: {
+                "scores": np.array([0.9], dtype=np.float32),
+                "matches": np.array([1], dtype=np.int64),
+                "ignore": np.array([False]),
+                "total_gt": 1,
+            }
+        }
+        module = _make_pl_module()
+        trainer = _make_trainer()
+        # callback_metrics 是 trainer 上的属性，on_validation_epoch_end 会写入其中。
+        trainer.callback_metrics = {}
+
+        cb.on_validation_epoch_end(trainer, module)
+
+        logged_keys = {c.args[0] for c in module.log.call_args_list}
+        assert "val/ema_F1" in logged_keys
+        assert "val/ema_precision" in logged_keys
+        assert "val/ema_recall" in logged_keys
+        assert trainer.callback_metrics["val/ema_F1"].item() == pytest.approx(1.0)
+
     def test_eval_interval_skips_non_matching_epochs(self) -> None:
         """Validation metric computation is skipped on non-interval epochs."""
         cb = COCOEvalCallback(eval_interval=3)

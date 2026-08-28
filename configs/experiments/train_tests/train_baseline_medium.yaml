@@ -7,23 +7,23 @@
 #   - 有效 batch=32 与既往 medium 实验一致（batch 8 + accum 4），nano 基线为 64
 model:
   variant: medium # nano/small/medium/large/large_deprecated
-  num_classes: 25
+  num_classes: 26
   resolution: 1024
   gradient_checkpointing: true
   freeze_encoder: false
 
 train:
-  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand
+  dataset_dir: /home/liu/wzt/datasets/SHWX-FINAL-no-FSC-expand-truck
   dataset_file: yolo
-  output_dir: output/0825-rfdetr-final-baseline
-  epochs: 100
+  output_dir: output/0827-rfdetr-truck-final-baseline
+  epochs: 120
   batch_size: 16
   grad_accum_steps: 4 # 有效 batch = 64（与既往 medium 实验一致）
 
   # 选择F1分数最高的
   best_metric: f1
 
-  num_workers: 8d
+  num_workers: 8
   prefetch_factor: 4  # 有效预取 = num_workers * prefetch_factor
   persistent_workers: true
   pin_memory: true  # 使用固定目录
@@ -52,7 +52,7 @@ train:
   # 平方根频率过采样（注意与 P0 class_balance_* 区分，两套机制不同）
   class_balanced_sampling: true
   class_balanced_threshold: null
-  class_balanced_class_ids: [0, 1] # 0=HM 航母, 1=LQS 两栖舰；空=全部类别
+  class_balanced_class_ids: [0, 1, 25] # 0=HM 航母, 1=LQS 两栖舰；空=全部类别
   
   dataset_cache_mode: raw
   dataset_cache_dir: null # null=使用 output_dir/dataset_cache

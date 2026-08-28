@@ -216,7 +216,8 @@ def _append_training_callbacks(
             if tc.eval_ema_only:
                 raise ValueError("best_metric='f1' cannot be used with eval_ema_only=True; use best_metric='map'.")
             monitor_regular = "val/F1"
-            early_stopping_monitor_ema = None
+            # F1 模式同样用 EMA 版 F1 选取最佳权重（而非无 EMA 监控或误用 EMA mAP）。
+            early_stopping_monitor_ema = "val/ema_F1"
         else:
             monitor_regular = "val/mAP_50_95"
             early_stopping_monitor_ema = "val/ema_mAP_50_95"

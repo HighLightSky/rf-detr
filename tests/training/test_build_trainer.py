@@ -147,14 +147,22 @@ class TestBuildTrainerCallbacks:
         assert best_cb.monitor == "val/mAP_50_95"
         assert best_cb._monitor_ema == "val/ema_mAP_50_95"
 
-    def test_detection_f1_early_stopping_does_not_use_ema_map(self, tmp_path):
-        """F1 早停不得比较 regular F1 与 EMA mAP。"""
+    def test_detection_f1_early_stopping_uses_ema_f1(self, tmp_path):
+        """F1 早停用 EMA 版 F1 而非 EMA mAP，避免把 F1 与 mAP 混比。"""
         trainer = build_trainer(_tc(tmp_path, use_ema=True, best_metric="f1", early_stopping=True), _mc())
         early_stop_cb = next(cb for cb in trainer.callbacks if isinstance(cb, RFDETREarlyStopping))
 
         assert early_stop_cb._monitor_regular == "val/F1"
-        assert early_stop_cb._monitor_ema is None
+        assert early_stop_cb._monitor_ema == "val/ema_F1"
         assert early_stop_cb._use_ema is False
+
+    def test_detection_best_model_uses_ema_f1(self, tmp_path):
+        """F1 模式下 BestModelCallback 应同时用 F1 监控 regular 与 EMA。"""
+        trainer = build_trainer(_tc(tmp_path, use_ema=True, best_metric="f1"), _mc())
+        best_cb = next(cb for cb in trainer.callbacks if isinstance(cb, BestModelCallback))
+
+        assert best_cb.monitor == "val/F1"
+        assert best_cb._monitor_ema == "val/ema_F1"
 
     def test_detection_f1_class_groups_are_forwarded_to_eval_callback(self, tmp_path):
         """F1 类别分组应传递给 COCO 评估回调。"""
