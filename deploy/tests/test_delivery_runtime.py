@@ -3,27 +3,35 @@
 from __future__ import annotations
 
 import sys
+import stat
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pytest
 import yaml
 
 DELIVERY_APP = Path(__file__).resolve().parents[1] / "app"
+DELIVERY_DIR = DELIVERY_APP.parent
 sys.path.insert(0, str(DELIVERY_APP))
+sys.path.insert(0, str(DELIVERY_DIR))
 
 from competition.config import (  # noqa: E402
+    DetectorConfig,
     FscNmsConfig,
     MsNmsConfig,
     PostprocessConfig,
     PreprocessConfig,
+    RoleConfig,
     load_submission_config,
 )
 from competition.contracts import CoordinateTransform, InferenceTask, RawDetection  # noqa: E402
 from competition.detector.decoding import decode_rfdetr_outputs  # noqa: E402
 from competition.pipeline import CompetitionPipeline  # noqa: E402
+from competition.detector.multi_backend import MultiBackendDetector  # noqa: E402
 from competition.postprocess.shwx_competition import ShwxCompetitionPostprocessor  # noqa: E402
 from competition.preprocess.shwx_large_image import ShwxLargeImagePreprocessor  # noqa: E402
+from prepare_delivery_assets import _ensure_readable  # noqa: E402
 
 
 def _postprocessor(
@@ -164,6 +172,46 @@ def test_config_accepts_pytorch_boundary_without_proto_guidance(tmp_path: Path) 
     assert loaded.detector.roles["main"].backend == "pytorch"
     assert loaded.detector.roles["boundary"].backend == "pytorch"
     assert loaded.detector.roles["boundary"].proto_guidance_artifact is None
+
+
+def test_detector_initialization_error_includes_role_context(tmp_path: Path) -> None:
+    """检测角色初始化失败时应保留角色和模型文件上下文。"""
+    model_path = tmp_path / "main.pth"
+    model_path.touch()
+    config = DetectorConfig(
+        name="rfdetr_multi_backend",
+        device="cuda:0",
+        batch_size=1,
+        roles={
+            "main": RoleConfig(
+                backend="pytorch",
+                model_path=model_path,
+                resolution=1024,
+            )
+        },
+    )
+    with mock.patch(
+        "competition.detector.multi_backend.PytorchRfdetrDetector",
+        side_effect=RuntimeError("cuda 初始化失败"),
+    ):
+        with pytest.raises(RuntimeError, match="初始化检测角色 main 失败.*main\\.pth") as error:
+            MultiBackendDetector(config)
+    assert isinstance(error.value.__cause__, RuntimeError)
+
+
+def test_delivery_asset_permission_is_readable_by_non_root(tmp_path: Path) -> None:
+    """复制进入交付目录的模型应允许非 root 容器用户读取。"""
+    model_path = tmp_path / "main.pth"
+    model_path.touch()
+    model_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    _ensure_readable(model_path)
+    assert model_path.stat().st_mode & stat.S_IROTH
+
+
+def test_dockerfile_makes_model_directory_readable() -> None:
+    """镜像构建必须覆盖源模型文件的过严权限。"""
+    dockerfile = (DELIVERY_DIR / "Dockerfile").read_text(encoding="utf-8")
+    assert "RUN chmod -R a+rX /app/models" in dockerfile
 
 
 def test_decoder_preserves_task_identity_and_box_coordinates() -> None:

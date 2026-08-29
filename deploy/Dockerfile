@@ -25,6 +25,9 @@ ENV PATH=/opt/micromamba/envs/detector/bin:/opt/micromamba/bin:$PATH
 COPY app /app
 COPY models /app/models
 
+# 平台可能使用非 root 用户启动，确保复制进镜像的模型和原型工件可读。
+RUN chmod -R a+rX /app/models
+
 RUN mkdir -p /input /output
 
 ENTRYPOINT ["python", "/app/main.py"]

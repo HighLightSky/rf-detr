@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import filecmp
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,9 +63,16 @@ def _copy_asset(asset: Asset, destination_dir: Path) -> None:
     destination = destination_dir / asset.destination
     if destination.exists():
         if filecmp.cmp(asset.source, destination, shallow=False):
+            _ensure_readable(destination)
             return
         raise FileExistsError(f"目标资产已存在且内容不同，拒绝覆盖: {destination}")
     shutil.copy2(asset.source, destination)
+    _ensure_readable(destination)
+
+
+def _ensure_readable(path: Path) -> None:
+    """为交付资产补齐所有用户的读取权限。"""
+    path.chmod(path.stat().st_mode | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
 
 
 def _copy_pytorch_runtime(source_root: Path, vendor_dir: Path) -> None:

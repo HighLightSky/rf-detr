@@ -16,12 +16,18 @@ class MultiBackendDetector:
         """按 YAML 的受限 backend 枚举创建所有模型角色。"""
         self._detectors: dict[str, Detector] = {}
         for role_name, role in config.roles.items():
-            if role.backend == "onnx":
-                self._detectors[role_name] = OnnxRfdetrDetector(role, config)
-            elif role.backend == "pytorch":
-                self._detectors[role_name] = PytorchRfdetrDetector(role, config)
-            else:
-                raise ValueError(f"未注册的检测器后端: {role.backend}")
+            try:
+                if role.backend == "onnx":
+                    detector = OnnxRfdetrDetector(role, config)
+                elif role.backend == "pytorch":
+                    detector = PytorchRfdetrDetector(role, config)
+                else:
+                    raise ValueError(f"未注册的检测器后端: {role.backend}")
+            except Exception as exc:
+                raise RuntimeError(
+                    f"初始化检测角色 {role_name} 失败（后端: {role.backend}，模型: {role.model_path.name}）"
+                ) from exc
+            self._detectors[role_name] = detector
 
     def check_gpu(self) -> None:
         """确认每个已启用角色均会使用 GPU。"""

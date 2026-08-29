@@ -12,12 +12,12 @@ pipeline:
     batch_size: 1
     roles:
       main:
-        backend: pytorch
-        model: baseline.pth
+        backend: onnx
+        model: shwx_detector_1024.onnx
         resolution: 1024
       boundary:
-        backend: pytorch
-        model: boundary.pth
+        backend: onnx
+        model: large_cut_boundary_704.onnx
         resolution: 704
   postprocess:
     name: shwx_competition_v1
