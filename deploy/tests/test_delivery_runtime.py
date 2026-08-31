@@ -26,6 +26,7 @@ from competition.config import (  # noqa: E402
     load_submission_config,
 )
 from competition.contracts import CoordinateTransform, InferenceTask, RawDetection  # noqa: E402
+from competition.detector.batch import clamp_batch, safe_batch_forward  # noqa: E402
 from competition.detector.decoding import decode_rfdetr_outputs  # noqa: E402
 from competition.pipeline import CompetitionPipeline  # noqa: E402
 from competition.detector.multi_backend import MultiBackendDetector  # noqa: E402
@@ -297,3 +298,79 @@ def test_postprocessor_filters_only_ms_boxes_below_configured_area(
         (100, 100),
     )
     assert len(result) == expected_count
+
+
+# ── 安全批量：clamp（启动按空闲显存下探）与 OOM 退避 ────────────────────────────
+
+
+def test_clamp_batch_keeps_requested_when_vram_roomy() -> None:
+    """显存充足时保持请求批量，不做无谓下调。"""
+    assert clamp_batch(requested=8, free_mb=22000, per_image_mb=170) == 8
+
+
+def test_clamp_batch_lowers_when_vram_tight() -> None:
+    """显存不足时按空闲显存下探到安全批量，且不高于请求值。"""
+    # budget = 1600 * 0.6 = 960，960 // 170 = 5
+    assert clamp_batch(requested=8, free_mb=1600, per_image_mb=170) == 5
+    # budget = 800 * 0.6 = 480，480 // 170 = 2
+    assert clamp_batch(requested=8, free_mb=800, per_image_mb=170) == 2
+
+
+def test_clamp_batch_lowers_below_requested_value() -> None:
+    """请求量大但显存很小时，结果应严格低于请求值。"""
+    assert clamp_batch(requested=32, free_mb=800, per_image_mb=170) < 32
+
+
+def test_clamp_batch_returns_requested_when_increment_unknown() -> None:
+    """每图增量无法标定（None）时保守返回请求值，交给运行时 OOM 退避兜底。"""
+    assert clamp_batch(requested=8, free_mb=500, per_image_mb=None) == 8
+
+
+def test_clamp_batch_never_below_one() -> None:
+    """即使空闲显存极小，批量也至少为 1（单图是安全下限）。"""
+    assert clamp_batch(requested=8, free_mb=50, per_image_mb=170) == 1
+
+
+class _FakeOOM(Exception):
+    """用于在测试中模拟显存不足异常的哨兵类型。"""
+
+
+def test_safe_batch_forward_keeps_requested_batch_when_no_oom() -> None:
+    """无 OOM 时按请求批量分批，且全部任务被处理。"""
+    seen: list[tuple[int, int]] = []
+
+    def run_slice(start: int, count: int) -> list[int]:
+        seen.append((start, count))
+        return [start + i for i in range(count)]
+
+    results, eff = safe_batch_forward(10, 4, run_slice, is_oom=lambda exc: isinstance(exc, _FakeOOM))
+    assert seen == [(0, 4), (4, 4), (8, 2)]
+    assert eff == 4
+    assert len(results) == 10
+
+
+def test_safe_batch_forward_halves_batch_and_retries_on_oom() -> None:
+    """整批触发 OOM 时批量减半、重试同一批，并持久化降低后的批量。"""
+    seen: list[tuple[int, int]] = []
+
+    def run_slice(start: int, count: int) -> list[int]:
+        seen.append((start, count))
+        if count == 6:  # 第一批请求 6 触发 OOM
+            raise _FakeOOM()
+        return [start + i for i in range(count)]
+
+    results, eff = safe_batch_forward(10, 6, run_slice, is_oom=lambda exc: isinstance(exc, _FakeOOM))
+    # (0,6) 触发 → 降为 3 重试 (0,3)→(3,3)→(6,3)→(9,1)
+    assert seen == [(0, 6), (0, 3), (3, 3), (6, 3), (9, 1)]
+    assert eff == 3
+    assert len(results) == 10
+
+
+def test_safe_batch_forward_raises_non_oom_error() -> None:
+    """非显存不足异常应如实上抛，不因退避逻辑被吞掉。"""
+
+    def run_slice(start: int, count: int) -> list[int]:
+        raise ValueError("模型输出形状不符")
+
+    with pytest.raises(ValueError, match="形状不符"):
+        safe_batch_forward(4, 2, run_slice, is_oom=lambda exc: isinstance(exc, _FakeOOM))
