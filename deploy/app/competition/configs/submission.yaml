@@ -9,12 +9,11 @@ pipeline:
   detector:
     name: rfdetr_multi_backend
     device: cuda:0
-    batch_size: 16
+    batch_size: 1
     roles:
       main:
         backend: pytorch
-        model: main.pth
-        proto_guidance_artifact: proto_guidance_shwx_1024_from120ep.pt
+        model: baseline.pth
         resolution: 1024
       boundary:
         backend: pytorch
@@ -23,10 +22,10 @@ pipeline:
   postprocess:
     name: shwx_competition_v1
     confidence_threshold: 0.25
-    ms_min_box_area: 100
+    ms_min_box_area: 0
     class_names: resources/shwx_class_names.yaml
     ms_nms:
-      enabled: true
+      enabled: false
       ms_class_id: 3
       ship_class_ids: [0, 1, 2, 3]
       same_class_iou: 0.80
