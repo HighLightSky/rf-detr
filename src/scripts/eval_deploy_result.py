@@ -39,6 +39,7 @@ CLASS_TO_GROUP = {
     **{class_id: "aircraft" for class_id in range(4, 24)},
     24: "vehicle",
 }
+IGNORED_GT_CLASS_IDS = frozenset({25})
 GROUP_IOU_THRESHOLDS = {"ship": 0.50, "aircraft": 0.50, "vehicle": 0.35}
 RUNTIME_FIELDS = ("runtime_ms", "run_duration_ms", "duration_ms", "elapsed_ms")
 
@@ -82,6 +83,8 @@ def _read_gt_records(labels_dir: Path, images: list[Mapping[str, Any]]) -> list[
             if len(parts) < 5:
                 raise ValueError(f"标签格式错误: {label_path}:{line_number}")
             class_id = int(float(parts[0]))
+            if class_id in IGNORED_GT_CLASS_IDS:
+                continue
             if class_id not in CLASS_TO_GROUP:
                 raise ValueError(f"未知类别 id={class_id}: {label_path}:{line_number}")
             xyxy = xywhn_to_xyxy(*map(float, parts[1:5]), width, height)

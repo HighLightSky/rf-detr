@@ -9,7 +9,7 @@ pipeline:
   detector:
     name: rfdetr_multi_backend
     device: cuda:0
-    batch_size: 1
+    batch_size: 8
     roles:
       main:
         backend: pytorch

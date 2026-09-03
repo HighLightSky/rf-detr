@@ -3,27 +3,36 @@
 from __future__ import annotations
 
 import sys
+import stat
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pytest
 import yaml
 
 DELIVERY_APP = Path(__file__).resolve().parents[1] / "app"
+DELIVERY_DIR = DELIVERY_APP.parent
 sys.path.insert(0, str(DELIVERY_APP))
+sys.path.insert(0, str(DELIVERY_DIR))
 
 from competition.config import (  # noqa: E402
+    DetectorConfig,
     FscNmsConfig,
     MsNmsConfig,
     PostprocessConfig,
     PreprocessConfig,
+    RoleConfig,
     load_submission_config,
 )
 from competition.contracts import CoordinateTransform, InferenceTask, RawDetection  # noqa: E402
+from competition.detector.batch import clamp_batch, safe_batch_forward  # noqa: E402
 from competition.detector.decoding import decode_rfdetr_outputs  # noqa: E402
 from competition.pipeline import CompetitionPipeline  # noqa: E402
+from competition.detector.multi_backend import MultiBackendDetector  # noqa: E402
 from competition.postprocess.shwx_competition import ShwxCompetitionPostprocessor  # noqa: E402
 from competition.preprocess.shwx_large_image import ShwxLargeImagePreprocessor  # noqa: E402
+from prepare_delivery_assets import _ensure_readable  # noqa: E402
 
 
 def _postprocessor(
@@ -115,6 +124,97 @@ def test_config_accepts_onnx_and_pytorch_roles(tmp_path: Path) -> None:
     assert loaded.detector.roles["boundary"].backend == "onnx"
 
 
+def test_config_accepts_pytorch_boundary_without_proto_guidance(tmp_path: Path) -> None:
+    """普通 PyTorch 边界模型不应被强制要求 ProtoGuidance 工件。"""
+    for file_name in ("main.pth", "boundary.pth", "proto.pt"):
+        (tmp_path / file_name).touch()
+    config_file = tmp_path / "submission.yaml"
+    config_file.write_text(
+        yaml.safe_dump(
+            {
+                "pipeline": {
+                    "preprocess": {
+                        "name": "shwx_large_image",
+                        "large_image_min_side": 2000,
+                        "boundary_confidence": 0.25,
+                        "padding": 0,
+                        "boundary_nms_iou": 0.5,
+                        "proxy_max_side": 704,
+                    },
+                    "detector": {
+                        "name": "rfdetr_multi_backend",
+                        "device": "cuda:0",
+                        "batch_size": 1,
+                        "roles": {
+                            "main": {
+                                "backend": "pytorch",
+                                "model": "main.pth",
+                                "proto_guidance_artifact": "proto.pt",
+                                "resolution": 1024,
+                            },
+                            "boundary": {"backend": "pytorch", "model": "boundary.pth", "resolution": 704},
+                        },
+                    },
+                    "postprocess": {
+                        "name": "shwx_competition_v1",
+                        "confidence_threshold": 0.25,
+                        "class_names": "resources/shwx_class_names.yaml",
+                        "ms_nms": {"enabled": True, "ms_class_id": 3, "ship_class_ids": [0, 1, 2, 3]},
+                        "fsc_containment_nms": {"enabled": True, "containment_enabled": True},
+                    },
+                }
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_submission_config(config_file, tmp_path)
+    assert loaded.detector.batch_size == 1
+    assert loaded.detector.roles["main"].backend == "pytorch"
+    assert loaded.detector.roles["boundary"].backend == "pytorch"
+    assert loaded.detector.roles["boundary"].proto_guidance_artifact is None
+
+
+def test_detector_initialization_error_includes_role_context(tmp_path: Path) -> None:
+    """检测角色初始化失败时应保留角色和模型文件上下文。"""
+    model_path = tmp_path / "main.pth"
+    model_path.touch()
+    config = DetectorConfig(
+        name="rfdetr_multi_backend",
+        device="cuda:0",
+        batch_size=1,
+        roles={
+            "main": RoleConfig(
+                backend="pytorch",
+                model_path=model_path,
+                resolution=1024,
+            )
+        },
+    )
+    with mock.patch(
+        "competition.detector.multi_backend.PytorchRfdetrDetector",
+        side_effect=RuntimeError("cuda 初始化失败"),
+    ):
+        with pytest.raises(RuntimeError, match="初始化检测角色 main 失败.*main\\.pth") as error:
+            MultiBackendDetector(config)
+    assert isinstance(error.value.__cause__, RuntimeError)
+
+
+def test_delivery_asset_permission_is_readable_by_non_root(tmp_path: Path) -> None:
+    """复制进入交付目录的模型应允许非 root 容器用户读取。"""
+    model_path = tmp_path / "main.pth"
+    model_path.touch()
+    model_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    _ensure_readable(model_path)
+    assert model_path.stat().st_mode & stat.S_IROTH
+
+
+def test_dockerfile_makes_model_directory_readable() -> None:
+    """镜像构建必须覆盖源模型文件的过严权限。"""
+    dockerfile = (DELIVERY_DIR / "Dockerfile").read_text(encoding="utf-8")
+    assert "RUN chmod -R a+rX /app/models" in dockerfile
+
+
 def test_decoder_preserves_task_identity_and_box_coordinates() -> None:
     """解码后的检测框保留裁切来源并处于模型输入坐标系。"""
     task = InferenceTask(
@@ -198,3 +298,79 @@ def test_postprocessor_filters_only_ms_boxes_below_configured_area(
         (100, 100),
     )
     assert len(result) == expected_count
+
+
+# ── 安全批量：clamp（启动按空闲显存下探）与 OOM 退避 ────────────────────────────
+
+
+def test_clamp_batch_keeps_requested_when_vram_roomy() -> None:
+    """显存充足时保持请求批量，不做无谓下调。"""
+    assert clamp_batch(requested=8, free_mb=22000, per_image_mb=170) == 8
+
+
+def test_clamp_batch_lowers_when_vram_tight() -> None:
+    """显存不足时按空闲显存下探到安全批量，且不高于请求值。"""
+    # budget = 1600 * 0.6 = 960，960 // 170 = 5
+    assert clamp_batch(requested=8, free_mb=1600, per_image_mb=170) == 5
+    # budget = 800 * 0.6 = 480，480 // 170 = 2
+    assert clamp_batch(requested=8, free_mb=800, per_image_mb=170) == 2
+
+
+def test_clamp_batch_lowers_below_requested_value() -> None:
+    """请求量大但显存很小时，结果应严格低于请求值。"""
+    assert clamp_batch(requested=32, free_mb=800, per_image_mb=170) < 32
+
+
+def test_clamp_batch_returns_requested_when_increment_unknown() -> None:
+    """每图增量无法标定（None）时保守返回请求值，交给运行时 OOM 退避兜底。"""
+    assert clamp_batch(requested=8, free_mb=500, per_image_mb=None) == 8
+
+
+def test_clamp_batch_never_below_one() -> None:
+    """即使空闲显存极小，批量也至少为 1（单图是安全下限）。"""
+    assert clamp_batch(requested=8, free_mb=50, per_image_mb=170) == 1
+
+
+class _FakeOOM(Exception):
+    """用于在测试中模拟显存不足异常的哨兵类型。"""
+
+
+def test_safe_batch_forward_keeps_requested_batch_when_no_oom() -> None:
+    """无 OOM 时按请求批量分批，且全部任务被处理。"""
+    seen: list[tuple[int, int]] = []
+
+    def run_slice(start: int, count: int) -> list[int]:
+        seen.append((start, count))
+        return [start + i for i in range(count)]
+
+    results, eff = safe_batch_forward(10, 4, run_slice, is_oom=lambda exc: isinstance(exc, _FakeOOM))
+    assert seen == [(0, 4), (4, 4), (8, 2)]
+    assert eff == 4
+    assert len(results) == 10
+
+
+def test_safe_batch_forward_halves_batch_and_retries_on_oom() -> None:
+    """整批触发 OOM 时批量减半、重试同一批，并持久化降低后的批量。"""
+    seen: list[tuple[int, int]] = []
+
+    def run_slice(start: int, count: int) -> list[int]:
+        seen.append((start, count))
+        if count == 6:  # 第一批请求 6 触发 OOM
+            raise _FakeOOM()
+        return [start + i for i in range(count)]
+
+    results, eff = safe_batch_forward(10, 6, run_slice, is_oom=lambda exc: isinstance(exc, _FakeOOM))
+    # (0,6) 触发 → 降为 3 重试 (0,3)→(3,3)→(6,3)→(9,1)
+    assert seen == [(0, 6), (0, 3), (3, 3), (6, 3), (9, 1)]
+    assert eff == 3
+    assert len(results) == 10
+
+
+def test_safe_batch_forward_raises_non_oom_error() -> None:
+    """非显存不足异常应如实上抛，不因退避逻辑被吞掉。"""
+
+    def run_slice(start: int, count: int) -> list[int]:
+        raise ValueError("模型输出形状不符")
+
+    with pytest.raises(ValueError, match="形状不符"):
+        safe_batch_forward(4, 2, run_slice, is_oom=lambda exc: isinstance(exc, _FakeOOM))

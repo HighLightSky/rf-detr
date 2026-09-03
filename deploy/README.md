@@ -3,18 +3,19 @@
 该目录是独立于训练 `uv` 环境的比赛运行时。根目录保留给赛事要求的
 `Dockerfile`、`environment.yml`、`app/` 与 `models/`；当前不创建 Dockerfile，必须使用主办方提供的原文件。
 
-默认 `app/competition/configs/submission.yaml` 使用实验二导出的两个 ONNX 模型：主检测为
-`shwx_detector_1024.onnx`，大图边界检测为 `large_cut_boundary_704.onnx`。它同时开启民船 NMS 和
-发射车一级候选 NMS。通过替换该 YAML 为 `configs/variants/` 下的变体，可以为 `main`、`boundary`
-角色分别选择 `onnx` 或 `pytorch` 后端。
+默认 `app/competition/configs/submission.yaml` 使用两个 PyTorch 模型：主检测为 25 类的
+`main.pth`，大图边界检测为 `boundary.pth`。主检测同时使用
+`proto_guidance_shwx_1024_from120ep.pt`，并固定逐图、逐裁切推理（`batch_size: 1`）。它同时开启民船
+NMS 和发射车一级候选 NMS。通过替换该 YAML 为 `configs/variants/` 下的变体，可以为 `main`、
+`boundary` 角色分别选择 `onnx` 或 `pytorch` 后端。
 
-先装配默认 ONNX 资产：
+如需保留或补齐兼容的 ONNX 资产，可执行：
 
 ```bash
 python deploy/prepare_delivery_assets.py
 ```
 
-PyTorch 变体额外需要 checkpoint、ProtoGuidance 工件和精简后的 `rfdetr` 运行时：
+默认 PyTorch 交付需要 checkpoint、ProtoGuidance 工件和精简后的 `rfdetr` 运行时：
 
 ```bash
 python deploy/prepare_delivery_assets.py --include-pytorch-runtime

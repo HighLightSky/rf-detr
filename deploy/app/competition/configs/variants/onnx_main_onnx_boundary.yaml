@@ -12,20 +12,20 @@ pipeline:
     batch_size: 1
     roles:
       main:
-        backend: pytorch
-        model: baseline.pth
+        backend: onnx
+        model: shwx_detector_1024.onnx
         resolution: 1024
       boundary:
-        backend: pytorch
-        model: boundary.pth
+        backend: onnx
+        model: large_cut_boundary_704.onnx
         resolution: 704
   postprocess:
     name: shwx_competition_v1
     confidence_threshold: 0.25
-    ms_min_box_area: 0
+    ms_min_box_area: 800
     class_names: resources/shwx_class_names.yaml
     ms_nms:
-      enabled: false
+      enabled: true
       ms_class_id: 3
       ship_class_ids: [0, 1, 2, 3]
       same_class_iou: 0.80
