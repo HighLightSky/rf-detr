@@ -4,15 +4,23 @@
 小样本、类别不均衡、细粒度类别混淆和复杂背景虚警进行改进。项目提供从训练、评估、
 单图推理到比赛 Docker 交付的完整代码。
 
+在包含 25 类目标（4 类舰船、20 类飞机、1 类发射车）的遥感检测数据集上，本方案与 9 种主流检测方法进行了严格对比。结果如下：
+
+![](assets/对比实验.png)
+
 ## 1. 任务与目标
 
-数据集包含 25 个目标类别，类别实例数差异较大，其中舰船类别样本稀缺且相互外观相似。
-输入还可能是约 `10000 x 10000` 像素的大幅面影像，因此模型需要同时处理以下问题：
+核心任务：面向光学遥感卫星影像中的陆上时敏目标（如航母、两栖舰、发射车及各类飞机），在样本总量有限且类别分布高度不均衡的约束下，设计一套不依赖大规模标注数据的高效检测识别方案。 
 
-- 稀有类别样本不足，导致分类偏置和漏检；
-- 舰船等细粒度类别之间边界模糊，容易互相误检；
-- 港口、道路、阴影和复杂纹理容易产生高置信背景虚警；
-- 大图不能直接缩放到单张小图，需要在精度、覆盖范围和推理时延之间折中。
+本项目使用的数据集包含 25 类目标（4 类舰船、20 类飞机、1 类发射车），在真实业务场景中面临以下四大结构性瓶颈，这也是本方案着力解决的核心问题：
+
+- 极端类别不均衡（长尾分布）：头部类别（飞机）占总样本的 74.5%，而尾部类别（发射车）仅占 1.8%，最大类与最小类样本比约为 19:1。模型极易偏向头部类，导致航母、发射车等稀有目标出现严重的召回不足与特征漂移。
+
+- 异源数据模态差异：舰船图像为全色（PAN）灰度成像（单通道），而飞机与发射车为 RGB 彩色成像（三通道）。异源模态导致特征分布失配，要求模型具备跨模态对齐能力。 
+
+- 细粒度类别边界模糊：不同舰船型号之间、部分飞机型号之间，以及目标与港口设施、阴影等“类目标”背景之间存在极强的外观相似性，极易引发类别误判。 
+
+- 复杂背景虚警突出：港口码头密集停泊、发射车置于草地林地等场景下，背景纹理高度结构化，检测器容易以高置信度将背景预测为前景，导致虚警率居高不下。
 
 项目的优化目标是提高稀有类别和易混类别的召回率，降低背景虚警，并在目标硬件上完成
 大图快速推理。最终指标以实际数据集和评测环境中的结果为准。
@@ -21,9 +29,11 @@
 
 ### 2.1 RF-DETR 检测基座
 
-RF-DETR 是基于 LW-DETR 思路的两阶段 Transformer 检测器。模型使用 DINOv2 视觉骨干
-提取多尺度特征，通过两阶段候选查询选择得到固定数量的查询，再由 Transformer 解码器
-逐层细化目标位置和类别，最后输出分类结果与边界框。
+本方案以 RF-DETR（两阶段 DETR 变体） 为检测基座，针对上述四大挑战，创新性地引入了“一个多模态原型锚点、两处在线引导、三类训练约束”的核心机制，构建了从特征提取到背景抑制的完整闭环。 
+
+![](assets/总体方案.png)
+
+检测基座：本方案以 RF-DETR 为检测基座。RF-DETR 是基于 LW-DETR 思路的两阶段 Transformer 检测器，整体流程为：输入图像经骨干网络提取多尺度特征，通过两阶段候选查询选择得到固定数量的初始查询，再由 Transformer 解码器逐层细化目标位置与类别，最终输出分类结果与边界框。 在骨干网络选择上，RF-DETR 采用窗口化 DINOv2 ViT，其自监督预训练赋予了特征较强的泛化能力，有助于缓解遥感影像与自然图像之间的域差异；同时，通过窗口注意力与全局注意力的交错设计，在保持全局上下文建模能力的前提下有效降低了高分辨率影像的计算开销。编码器输出的多级特征经投影层融合后得到记忆特征（Memory），作为后续查询选择与解码器交叉注意力的输入，也为本文多模态原型增强模块的引入提供了统一的特征接口。 训练时采用匈牙利匹配进行预测-标注一对一分配，联合优化分类焦点损失、L1 回归损失与 GIoU 损失，并在多级解码层上施加密集监督。
 
 ```text
 输入图像
@@ -44,19 +54,19 @@ Transformer 解码器（自注意力 + 可变形交叉注意力）
 目标类别、置信度和边界框
 ```
 
-训练时使用匈牙利匹配将预测查询与标注目标对应，并联合优化分类焦点损失、L1 框回归
-损失和 GIoU 损失。
-
 ### 2.2 一个锚点、两处引导、三类约束
 
 在 RF-DETR 基础上，本项目引入多模态原型增强。整体可以概括为“一个原型锚点、两处
 在线引导、三类训练约束”。
+![](assets/多模态原型增强.png)
 
 **一个原型锚点：多模态类别原型库**
 
 1. 使用训练数据和骨干特征，在目标框区域提取视觉特征，并按类别进行余弦聚类，得到
    能表示不同角度、尺度和外观的多个视觉子原型。
+
 2. 使用 CLIP 文本编码器编码类别名称和遥感场景提示词，得到文本原型。
+
 3. 将视觉原型与文本原型投影到统一空间并融合。原型库在训练和推理中作为冻结的类别
    先验锚点使用，不参与在线更新。
 
@@ -88,6 +98,8 @@ SSCL 负责易混类别分离，难负样本损失负责前景与背景边界建
 重叠的小块送入主检测模型。各裁块的预测框会映射回原图坐标，并通过 NMS 等后处理合
 并重叠结果。这样可以保留小目标细节，同时避免整幅图缩放造成的目标尺寸过小。
 
+![](assets/推理流水线.png)
+
 ## 3. 环境安装
 
 要求 Python `>=3.10`。推荐使用仓库声明的 `uv` 环境：
@@ -95,12 +107,6 @@ SSCL 负责易混类别分离，难负样本损失负责前景与背景边界建
 ```bash
 pip install uv
 uv sync --all-groups
-```
-
-如果只使用已经发布的基础包，也可以安装：
-
-```bash
-pip install rfdetr
 ```
 
 GPU 训练和部署需要可用的 CUDA、PyTorch 以及对应驱动。Albumentations/Kornia 等增强依
@@ -131,49 +137,32 @@ dataset/
 
 ### 5.1 统一 YAML 入口
 
-训练脚本会读取 YAML，构造模型并将 `train:` 段参数透传给 `model.train(**kwargs)`。
-配置错误会在启动时被校验。一个完整的多原型、SSCL 和难负样本实验可以这样启动：
+训练采取模块化的配置方式，训练脚本会读取 YAML，构造模型并将 `train:` 段参数透传给 `model.train(**kwargs)`。
+
+项目建议采用三阶段策略：
+
+![](assets/三阶段训练.png)
+
+ - 阶段I：大规模预训练（基础能力）。直接加载 RF-DETR 在 Objects365 上的官方预训练权重（我们选用 Medium 尺寸），建立通用目标检测基础能力。
+
+ - 阶段II：遥感域适配微调（域迁移）。在竞赛数据集（25类）上对基座模型做全量微调 120 轮。该阶段暂不引入任何原型模块，避免新增随机初始化参数干扰域适配。此阶段完成模型从通用域到遥感域的迁移，同时为后续原型构建提供收敛的特征空间。
 
 ```bash
 uv run python src/scripts/train.py \
-  -c configs/experiments/0807-SSCL对比学习/train_sscl_multproto_hardneg_suppress_v1.yaml
+  -c configs/experiments/train_stage1_medium.yaml
 ```
 
-基线或纯 SSCL 实验可使用对应配置：
-
-```bash
-# 纯 SSCL/原型微调
-uv run python src/scripts/train.py \
-  -c configs/experiments/0807-SSCL对比学习/train_sscl_0807.yaml
-
-# 查看最终 kwargs，不启动训练
-uv run python src/scripts/train.py \
-  -c configs/experiments/0807-SSCL对比学习/train_sscl_0807.yaml \
-  --dump-kwargs
-```
-
-不复制 YAML 也可以使用 `--set` 覆盖单个字段：
+ - 阶段III：原型增强与适应（小样本辨识）。基于阶段II收敛的最佳域适配模型，离线构建多模态原型库（每类 M=10 槽位），随后进行 20 轮微调： 冻结策略：冻结骨干网络与编码器，仅解冻解码器末尾两层、归一化层与分类头；开启模块：全程启用特征选择增强、语义信息增强、原型辅助分类损失、SSCL与难负样本抑制
 
 ```bash
 uv run python src/scripts/train.py \
-  -c configs/experiments/0807-SSCL对比学习/train_sscl_hardneg_k3.yaml \
-  --set train.sscl_hard_neg_topk=5 \
-  --set train.output_dir=output/exp-hardneg-k5
+  -c configs/experiments/train_stage2_medium.yaml
 ```
-
-### 5.2 推荐训练策略
-
-项目建议采用两阶段策略：
-
-1. **联合适配阶段**：以 RF-DETR 基线权重为起点，让检测器和原型投影/引导模块共同适
-   配，位置和内容注入从较小权重开始逐步增强。
-2. **判别性微调阶段**：冻结骨干和编码器，保留解码器末层、分类头以及原型/SSCL 模块
-   的可训练性，重点修正易混类别边界和背景虚警。
 
 每个实验的冻结范围、学习率、损失权重、启动轮次和难例筛选阈值都应以实际 YAML 为准，
 不要仅凭实验目录名称推断配置。
 
-### 5.3 训练产物
+### 5.2 训练产物
 
 训练输出目录通常包含：
 
@@ -221,7 +210,7 @@ uv run python src/scripts/test.py \
 
 ```bash
 uv run python src/scripts/predict.py \
-  -c configs/experiments/train_tests/predict_shwx.yaml
+  -c configs/experiments/predict_shwx.yaml
 ```
 
 配置中的 `predict.image` 指向图片或目录，`predict.output_dir` 指定输出位置。默认输出：
@@ -233,15 +222,6 @@ output_dir/
 └── label_comparison/       # 开启 label_comparison 后生成
 ```
 
-Python API 适合快速验证单个 checkpoint：
-
-```python
-from rfdetr import RFDETR
-
-model = RFDETR.from_checkpoint("/path/to/checkpoint_best_total.pth")
-results = model.predict("/path/to/image.jpg", threshold=0.25)
-model.export(output_dir="output/onnx", format="onnx")
-```
 
 ## 7. 部署
 
@@ -323,40 +303,4 @@ uv run python src/scripts/eval_deploy_result.py \
   --vis-dir deploy/test-output/viz
 ```
 
-完整的 ONNX 环境、镜像推送和平台提交步骤见：
-
-- [deploy/README.md](deploy/README.md)
-- [deploy/ONNX镜像构建说明.md](deploy/ONNX镜像构建说明.md)
-- [比赛镜像构建与提交流程](docs/比赛方案/比赛镜像构建与提交流程.md)
-
-## 8. 代码与文档索引
-
-```text
-src/rfdetr/                  # RF-DETR 模型、训练和原型/SSCL 模块
-src/scripts/train.py         # 统一训练入口
-src/scripts/test.py          # 批量评估入口
-src/scripts/predict.py       # 单图/目录推理入口
-src/scripts/onnx/            # ONNX 导出工具
-configs/experiments/         # 训练、测试和推理 YAML
-deploy/                      # Docker 交付运行时和模型资产
-docs/改进方案-dinov2-proto/  # 多模态原型设计与机制说明
-docs/改进方案-SSCL/          # SSCL、语义头和难例抑制方案
-docs/竞赛文档草稿/           # 研究报告方法部分草稿
-```
-
-进一步阅读：
-
-- [实验配置说明](configs/experiments/README.md)
-- [训练参数与数据格式](docs/learn/train/index.md)
-- [多模态原型引导方案](docs/改进方案-dinov2-proto/RF-DETR-DINOv2多模态原型引导方案.md)
-- [SSCL 难例原型方案](docs/改进方案-SSCL/RF-DETR-SSCL难例原型改进方案.md)
-- [大图切分实现](docs/比赛方案/项目介绍.md)
-
-## 9. 复现注意事项
-
-- 训练、评估和推理的分辨率应与 checkpoint 和 YAML 保持一致，尤其是大图边界分支。
-- 训练侧的类别均衡、Logit Adjustment、SSCL 和难例抑制开关，必须与评估侧阈值配置一
-  起记录，避免不同实验口径混用。
-- 相对路径默认以项目根目录解析；交付 YAML 中的模型路径只能引用镜像内的模型文件名。
-- 新实验优先复制现有 YAML 并修改输出目录，保留每次运行生成的 `training_config.json`，
-  以便追溯实际生效参数。
+![](assets/可视化.png)
