@@ -2066,6 +2066,48 @@ class RFDETR:
         assert model is not None
         model.eval()
 
+    def enable_proto_guidance_debug(self) -> None:
+        """Enable dense multi-modal prototype scores for explanatory inference.
+
+        Raises:
+            RuntimeError: If the model is optimized, unavailable, or has no
+                configured ProtoGuidance module.
+        """
+        if self._is_optimized_for_inference or self.model.model is None:
+            raise RuntimeError("ProtoGuidance debug requires an unoptimized PyTorch model.")
+        transformer = getattr(self.model.model, "transformer", None)
+        guidance = getattr(transformer, "proto_guidance", None)
+        if transformer is None or guidance is None:
+            raise RuntimeError("ProtoGuidance is not enabled in this checkpoint.")
+        if not bool(getattr(transformer, "two_stage", False)):
+            raise RuntimeError("ProtoGuidance debug requires a two-stage model with encoder token selection.")
+        transformer.proto_guidance_debug_enabled = True
+        transformer.last_proto_guidance_debug = None
+
+    def disable_proto_guidance_debug(self) -> None:
+        """Disable dense multi-modal prototype score collection."""
+        if self.model.model is None:
+            return
+        transformer = getattr(self.model.model, "transformer", None)
+        if transformer is not None:
+            transformer.proto_guidance_debug_enabled = False
+            transformer.last_proto_guidance_debug = None
+
+    def get_proto_guidance_debug(self) -> dict[str, Any] | None:
+        """Return the most recent dense ProtoGuidance debug payload.
+
+        Returns:
+            Detached dense scores and their multi-scale geometry, or ``None``
+            when collection is disabled or no forward pass has run.
+        """
+        if self.model.model is None:
+            return None
+        transformer = getattr(self.model.model, "transformer", None)
+        debug = getattr(transformer, "last_proto_guidance_debug", None)
+        if debug is None:
+            return None
+        return dict(debug)
+
     @torch.inference_mode()
     # mypy can't match this signature against _ensure_model_on_device's Concatenate[Any, _P] typing without
     # `self` being positional-only (a side effect of the trailing **kwargs); ignored rather than changing the

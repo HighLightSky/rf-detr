@@ -129,6 +129,28 @@ class TestTransformerIntegration:
         assert dense is not None
         assert dense["pred_proto_logits_dense"].shape == (_BS, _H * _W, _C)
 
+    def test_debug_collector_returns_dense_scores_and_geometry(self) -> None:
+        """debug 开关必须记录 group 0 的 dense 分数和多尺度几何。"""
+        transformer = _make_transformer()
+        transformer.proto_guidance = _make_proto_guidance()
+        transformer.proto_guidance_debug_enabled = True
+        out = _forward(transformer)
+        debug = transformer.last_proto_guidance_debug
+        assert debug is not None
+        assert debug["proto_logits"].shape == (_BS, _H * _W, _C)
+        assert debug["proto_score"].shape == (_BS, _H * _W)
+        assert debug["linear_score"].shape == (_BS, _H * _W)
+        assert debug["select_score"].shape == (_BS, _H * _W)
+        assert debug["spatial_shapes"] == ((_H, _W),)
+        assert out[4] is not None
+
+    def test_debug_collector_is_empty_when_disabled(self) -> None:
+        """debug 默认关闭时不得残留 dense collector 状态。"""
+        transformer = _make_transformer()
+        transformer.proto_guidance = _make_proto_guidance()
+        _forward(transformer)
+        assert transformer.last_proto_guidance_debug is None
+
     def test_without_module_returns_none(self) -> None:
         """无模块时第 5 位为 None（原版行为兼容）。"""
         transformer = _make_transformer()

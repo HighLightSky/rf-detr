@@ -211,6 +211,8 @@ class LWDETR(nn.Module):
         # （位置打分在 two-stage 循环内、内容增强在 tgt 构造后，均在 Transformer 内部）。
         # 离线产物缺失时 build 返回 None，保持原版行为。
         self.transformer.proto_guidance = None
+        self.transformer.proto_guidance_debug_enabled = False
+        self.transformer.last_proto_guidance_debug = None
         if proto_guidance_enabled:
             from rfdetr.sscl.proto_guidance import ProtoGuidance
 
@@ -609,6 +611,12 @@ class LWDETR(nn.Module):
             enc_kp_predictions = None
 
         out: dict[str, Any] = {}
+        if self.transformer.proto_guidance_debug_enabled:
+            debug = self.transformer.last_proto_guidance_debug
+            if debug is not None:
+                debug = dict(debug)
+                debug["input_size"] = tuple(int(v) for v in samples.tensors.shape[-2:])
+                self.transformer.last_proto_guidance_debug = debug
         if hs is not None:
             if self.bbox_reparam:
                 outputs_coord_delta = self.bbox_embed(hs)
@@ -672,6 +680,10 @@ class LWDETR(nn.Module):
                 outputs_masks = seg_head_fwd(features[0].tensors, hs, cast(tuple[int, int], samples.tensors.shape[-2:]))
 
             out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1]}
+            if self.transformer.proto_guidance_debug_enabled:
+                debug = self.transformer.last_proto_guidance_debug
+                if debug is not None:
+                    out["proto_guidance_debug"] = debug
             # [SemHead] 语义监控统计挂载到输出（已 detach，供训练监控读取）
             if semantic_stats is not None:
                 out["semantic_stats"] = semantic_stats

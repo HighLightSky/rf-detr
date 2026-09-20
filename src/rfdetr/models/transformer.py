@@ -260,6 +260,9 @@ class Transformer(nn.Module):
         # （默认 None = 原版行为，top-k 恒等于线性分数）。
         self.proto_guidance: "ProtoGuidance | None" = None
         self.proto_guidance_dense_loss_enabled = False
+        # 仅供离线解释性推理使用；关闭时不保留 dense 原型分数。
+        self.proto_guidance_debug_enabled = False
+        self.last_proto_guidance_debug: dict[str, object] | None = None
 
     def export(self) -> None:
         self._export = True
@@ -290,6 +293,7 @@ class Transformer(nn.Module):
         query_feat: Tensor,
         cross_attn_srcs: Sequence[Tensor] | None = None,
     ) -> tuple[Tensor | None, ...]:
+        self.last_proto_guidance_debug = None
         src_flatten = []
         mask_flatten_parts: list[Tensor] | None = [] if masks is not None else None
         lvl_pos_embed_flatten_parts = []
@@ -412,6 +416,22 @@ class Transformer(nn.Module):
                         select_score_gidx = linear_score_gidx
                 else:
                     select_score_gidx = linear_score_gidx
+
+                if (
+                    self.proto_guidance_debug_enabled
+                    and g_idx == 0
+                    and proto_logits_gidx is not None
+                    and selected_class_gidx is not None
+                ):
+                    self.last_proto_guidance_debug = {
+                        "proto_logits": proto_logits_gidx.detach(),
+                        "proto_score": proto_score_gidx.detach(),
+                        "linear_score": linear_score_gidx.detach(),
+                        "select_score": select_score_gidx.detach(),
+                        "selected_class": selected_class_gidx.detach(),
+                        "spatial_shapes": tuple(spatial_shapes_hw),
+                        "level_start_index": level_start_index.detach(),
+                    }
 
                 # dense 对齐监督必须与推理路径一致：eval 只使用 group 0，训练时
                 # 其余 group 仅用于 group-detr 的检测扰动，不能让它们分摊原型监督。
